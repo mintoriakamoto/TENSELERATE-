@@ -1271,7 +1271,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
-            return has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4;
+            // Q2_0 disabled: the Metal Q2_0 kernels assume the fork's 128-weight
+            // Q2_0 blocks, but this tree carries upstream's 64-weight layout
+            return has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4 && op->src[0]->type != GGML_TYPE_Q2_0;
         case GGML_OP_SET:
         case GGML_OP_CPY:
         case GGML_OP_DUP:
@@ -1285,7 +1287,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                            case GGML_TYPE_BF16:
                            case GGML_TYPE_Q8_0:
                            case GGML_TYPE_Q1_0:
-                           case GGML_TYPE_Q2_0:
+                           // (no Q2_0: 128-weight fork kernels vs upstream 64-weight blocks)
                            case GGML_TYPE_Q4_0:
                            case GGML_TYPE_Q4_1:
                            case GGML_TYPE_Q5_0:
@@ -1313,7 +1315,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                                 return false;
                         }
                     case GGML_TYPE_Q1_0:
-                    case GGML_TYPE_Q2_0:
+                    // (no Q2_0: 128-weight fork kernels vs upstream 64-weight blocks)
                     case GGML_TYPE_Q4_0:
                     case GGML_TYPE_Q4_1:
                     case GGML_TYPE_Q5_0:
@@ -1333,7 +1335,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 };
             }
         case GGML_OP_GET_ROWS:
-            return op->src[0]->type != GGML_TYPE_NVFP4;
+            // Q2_0 disabled: 128-weight fork kernels vs upstream 64-weight blocks (see MUL_MAT)
+            return op->src[0]->type != GGML_TYPE_NVFP4 && op->src[0]->type != GGML_TYPE_Q2_0;
         case GGML_OP_SET_ROWS:
             {
                 if (op->src[0]->type != GGML_TYPE_F32 && op->src[0]->type != GGML_TYPE_F16) {

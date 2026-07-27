@@ -118,8 +118,11 @@ jobs:
         id: cmake_build
         run: |
           source ./vulkan_sdk/setup-env.sh
+          # GGML_NATIVE=OFF: ccache reuses objects across heterogeneous hosted
+          # runners; -march=native objects from a wider-ISA host SIGILL here
           cmake -B build \
-            -DGGML_VULKAN=ON
+            -DGGML_VULKAN=ON \
+            -DGGML_NATIVE=OFF
           cmake --build build --config Release -j $(nproc)
 
       - name: Test
