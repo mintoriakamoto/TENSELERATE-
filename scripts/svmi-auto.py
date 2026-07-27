@@ -28,13 +28,17 @@ from pathlib import Path
 
 GiB = 1024**3
 
-# (n_layer, n_embd, n_head, n_head_kv, weights GiB Q4_K_M-class) — svmi-fleet.py shapes
+# (n_layer, n_embd, n_head, n_head_kv, weights GiB Q4_K_M-class, params B) — svmi-fleet.py shapes
 MODEL_PROFILES = {
-    "7b":  (32, 4096, 32, 32,  3.9),
-    "8b":  (32, 4096, 32,  8,  4.6),
-    "13b": (40, 5120, 40, 40,  7.4),
-    "70b": (80, 8192, 64,  8, 39.6),
+    "7b":  (32, 4096, 32, 32,  3.9,  6.7),
+    "8b":  (32, 4096, 32,  8,  4.6,  8.0),
+    "13b": (40, 5120, 40, 40,  7.4, 13.0),
+    "70b": (80, 8192, 64,  8, 39.6, 70.6),
 }
+# extreme low-bit requants that ship in this tree (tools/quantize):
+# Q2_0 has CPU x86 AVX-VNNI + ARM NEON-DP dot kernels; Q1_0 adds repack paths
+# and (Hopper, opt-in GGML_USE_HOPPER_Q1) a wgmma prefill kernel.
+LOWBIT_BPW = {"Q2_0": 2.25, "Q1_0": 1.125}
 GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "1660ti": (6, 12.0), "2060": (6, 12.0), "2070": (8, 12.0), "2080": (8, 12.0),
     "2080ti": (11, 12.0),
@@ -84,11 +88,13 @@ def main() -> int:
         n_head = fi(f"{arch}.attention.head_count") or 1
         n_head_kv = fi(f"{arch}.attention.head_count_kv") or n_head
         weights = sum(int(t.n_bytes) for t in reader.tensors)
+        n_params = sum(int(t.n_elements) for t in reader.tensors)
         name = Path(args.model).name
         model_arg = args.model
     elif args.profile:
-        n_layer, n_embd, n_head, n_head_kv, w_gib = MODEL_PROFILES[args.profile]
+        n_layer, n_embd, n_head, n_head_kv, w_gib, params_b = MODEL_PROFILES[args.profile]
         weights = int(w_gib * GiB)
+        n_params = int(params_b * 1e9)
         name = f"{args.profile} (Q4_K_M-class profile)"
         model_arg = "model.gguf"
     else:
@@ -146,6 +152,11 @@ def main() -> int:
               f"({args.host_ram:.0f} GiB) cannot pin {weights / GiB:.1f} GiB of weights for streaming")
         print("          options: a smaller model/quant that fits VRAM, or more host RAM.")
         print(f"          largest resident-friendly weights on this rig: ~{max(0.0, (budget - fixed) / GiB - 1.0):.1f} GiB + KV")
+        for q, bpw in LOWBIT_BPW.items():
+            est = n_params * bpw / 8
+            fits = "fits resident" if est + kv + fixed <= budget else "still does not fit"
+            print(f"          requant {q} ({bpw} bpw): ~{est / GiB:.1f} GiB — {fits}")
+        print("          (Q2_0 is the sane floor for agent-quality output; Q1_0 is draft/experiment territory)")
     else:
         streamed = max(weights * 0.05, need - budget)   # bytes/pass that do not fit resident
         floor = pcie_agg * 1e9 / streamed
@@ -153,6 +164,12 @@ def main() -> int:
         print(f"          PCIe decode floor ~{floor:.1f} tok/s, ~{floor * 7:.0f} with BitSpec-class speculation")
         print(f"\n  llama-cli -m {model_arg} -ngl 999 --stream-weights 8 --stream-decode \\")
         print(f"            {kvflags} -c {args.ctx}")
+        for q, bpw in LOWBIT_BPW.items():
+            est = n_params * bpw / 8
+            if est + kv + fixed <= budget:
+                print(f"\n  or requant {q} ({bpw} bpw, ~{est / GiB:.1f} GiB) to go RESIDENT and skip PCIe entirely")
+                print("  (Q2_0 is the sane floor for agent-quality output; Q1_0 is draft/experiment territory)")
+                break
         print(f"\n  split + floor detail : python3 scripts/svmi-plan.py {model_arg} --gpu {gpu_names[0]}")
         prof = args.profile or "70b"
         print(f"  CPU-assisted decode  : python3 scripts/svmi-arbiter.py --profile {prof} "
@@ -181,10 +198,19 @@ def main() -> int:
     ):
         cmax = int(room / (kv_tok1 * bpe * per))
         print(f"  {label:<18} ~{cmax:>9,} tok   {flags}")
+    print("  q4_0 K rows lose fidelity vs q8_0 — claw most of it back (attention-invariant")
+    print("  per-channel mean shift) with a one-time bias file:")
+    print(f"    llama-kv-mean-center -m {model_arg} -f calib.txt -o kbias.gguf   # tools/kv-mean-center")
+    print("    then add: --kv-mean-center kbias.gguf   (requires -ctk q4_0)")
     print("  beyond training ctx: --rope-scaling yarn --yarn-orig-ctx <train-ctx>; long")
     print("  sessions reuse the window via --cache-reuse / context shift; SWA models cap")
     print("  KV at their window (--swa-full disables). CTX-VM paging past all of these")
     print("  is planner-level today (svmi-fleet.py).")
+    print("\nspeculate: llama-server now ships the DSpark block-diffusion drafter —")
+    print("  build a drafter GGUF for your target family (conversion/dspark.py), then:")
+    print("    llama-server ... --spec-type draft-dspark -md drafter.gguf --spec-draft-n-max <block>")
+    print("  (server engages target-layer capture automatically; <block> must equal the")
+    print("  drafter's block_size. CLI llama-cli does not engage capture yet.)")
 
     if n_gpu > 1:
         print("\nmulti-gpu: layer split shown (safest); 2080 Ti-class pairs with an NVLink")

@@ -384,3 +384,55 @@ VRAM + host RAM of the next agent; prompt tokens saved by prefix dedup; and the 
 decode rate in the streaming-bound region. The rules of thumb it encodes: **weights cost
 O(1) in agents; paged KV costs O(window + ctx/page) in VRAM instead of O(ctx); the full
 context lives in host RAM (the cheap resource); idle agents cost ~0.**
+
+---
+
+# Ported engine features (PrismML merge)
+
+Merged from the PrismML-Eng llama.cpp fork and adapted to this tree's formats
+(upstream 64-weight `Q2_0` blocks, upstream gated-delta-net snapshot-slot order).
+These compose with SVMI streaming — everything below is engine-real today:
+
+## Extreme low-bit weights: Q1_0 (1.125 bpw) and Q2_0 (2.25 bpw)
+
+`llama-quantize model.gguf out.gguf Q2_0` (or `Q1_0`). CPU has dedicated dot
+kernels (x86 AVX-VNNI, ARM NEON-DP) plus Q1_0 repack paths; CUDA runs both via
+MMQ; Hopper cards can opt into a wgmma Q1_0 prefill kernel (compile with
+`GGML_USE_HOPPER_Q1`, set `GGML_HOPPER_Q1=1`). Rule of thumb: Q2_0 is the sane
+floor for agent-quality output; Q1_0 is draft-model / experiment territory —
+`svmi-auto.py` prints both estimates whenever a model does not fit.
+
+## K-cache mean-centering (`--kv-mean-center`)
+
+`-ctk q4_0` doubles max context vs `q8_0` but costs K fidelity: `q4_0` is a
+symmetric quantizer, and K channels with a consistent nonzero mean waste range
+encoding that constant. A one-time calibration file removes the bias — and since
+the same constant shifts every logit in a query's row, softmax is invariant:
+attention results do not change, only quantization error drops.
+
+```sh
+llama-kv-mean-center -m model.gguf -f calib.txt -o kbias.gguf
+llama-cli ... -fa on -ctk q4_0 -ctv q4_0 --kv-mean-center kbias.gguf
+```
+
+## DSpark block-diffusion speculative drafter (`--spec-type draft-dspark`)
+
+An EAGLE-style drafter that proposes a whole block per round from captured
+target hidden states (multi-layer tap), verified in one target pass. The server
+engages target-layer capture automatically; the drafter GGUF is produced by
+`conversion/dspark.py` and its `block_size` must equal `--spec-draft-n-max`:
+
+```sh
+llama-server -m target.gguf --spec-type draft-dspark -md drafter.gguf --spec-draft-n-max 8
+```
+
+On STREAMED rigs this multiplies the PCIe decode floor by the accepted-block
+length — the drafter runs resident while the target streams.
+
+## Recurrent-state snapshot ring (rollback without re-prefill)
+
+For hybrid/recurrent models (Qwen3.5-class GDN layers), the recurrent cache now
+keeps a rotating ring of per-token state snapshots (`rs_ring`), so speculative
+rejection and small context rollbacks restore state in place instead of
+re-prefilling — including a rows-indexed state read (`ggml_gated_delta_net_rows`,
+CPU + Metal; other backends fall back) that skips the gather entirely.
