@@ -556,7 +556,7 @@ jobs:
           sudo apt install ocl-icd-opencl-dev opencl-headers opencl-clhpp-headers intel-opencl-icd
 
       - name: Use OpenVINO Toolkit Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-openvino
         with:
           path: ./openvino_toolkit
@@ -672,7 +672,7 @@ jobs:
           evict-old-files: 1d
 
       - name: Setup Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-openvino
         with:
           path: ./openvino_toolkit
@@ -1381,7 +1381,7 @@ jobs:
 
       - name: Cache ROCm Installation
         id: cache-rocm
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: C:\Program Files\AMD\ROCm
           key: cache-gha-rocm-${{ env.HIPSDK_INSTALLER_VERSION }}-${{ runner.os }}

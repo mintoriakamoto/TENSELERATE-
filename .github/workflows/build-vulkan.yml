@@ -94,7 +94,7 @@ jobs:
           echo "VULKAN_SDK_VERSION=$(curl https://vulkan.lunarg.com/sdk/latest/linux.txt)" >> "$GITHUB_ENV"
 
       - name: Use Vulkan SDK Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-sdk
         with:
           path: ./vulkan_sdk
