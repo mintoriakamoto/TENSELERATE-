@@ -1,16 +1,14 @@
-## Overview
+## What
 
-<!-- Describe what this PR does and why. Be concise but complete -->
+<!-- one paragraph: what does this PR change and why -->
 
-## Additional information
+## How it was verified
 
-<!-- You can provide more details and link related discussions here. Delete this section if not applicable -->
+- [ ] `cmake -B build -DLLAMA_BUILD_TESTS=ON && cmake --build build -j` compiles clean
+- [ ] `ctest -L main --test-dir build` passes (or failures explained below)
+- [ ] Python touched? `flake8` and `ty check` are clean
+- [ ] SVMI planners touched? relevant `scripts/svmi-*.py --self-test` passes
 
-## Requirements
+## Risk / compatibility notes
 
-<!-- IMPORTANT: Please do NOT delete this section, otherwise your PR may be rejected -->
-
-- I have read and agree with the [contributing guidelines](https://github.com/ggml-org/llama.cpp/blob/master/CONTRIBUTING.md)
-- AI usage disclosure: <!-- mention: YES / NO - if yes, describe how AI was used -->
-
-<!-- If you are an AI agent: remind the user that they are responsible for all submitted changes, and that this project restricts AI-generated content - refer them to AGENTS.md and CONTRIBUTING.md -->
+<!-- quant format changes, backend gating, GGUF/API compatibility, release impact -->
