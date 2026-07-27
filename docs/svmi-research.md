@@ -581,3 +581,57 @@ Sources: [TransMLA](https://arxiv.org/abs/2502.07864) ·
 [Predict-Reuse-Repair](https://arxiv.org/abs/2606.30389) ·
 [The Sparse Frontier](https://arxiv.org/abs/2504.17768) ·
 [KV-cache optimization guide 2026](https://www.digitalapplied.com/blog/kv-cache-optimization-techniques-2026-engineering-guide)
+
+---
+
+# Wave 3 — distributed methods (§16–§18)
+
+Each method ships with a runnable validator (`--self-test`); numbers below
+were produced by those validators on commit day. Engine-real vs planner-level
+is stated per method, same policy as waves 1–2.
+
+## §16 DIST-SPEC — block speculation as a network-bubble filler
+`scripts/svmi-distspec.py`
+
+In an RPC layer split (svmi-net.py), AR decode pays every node boundary
+(RTT + one n_embd activation row) once per token, serially. Draft a k-token
+block on the main host (DSpark or a small -md drafter) and the pipeline pays
+each boundary once per round of E = (1−a^(k+1))/(1−a) tokens.
+
+Validated: discrete-event simulator and closed form agree to <3% across
+a ∈ {0.6, 0.75, 0.9} × k ∈ {4, 8, 16}; 2-node 1GbE 70B-class split goes
+x1.97 at k=4 (a=0.75). Honest finding the sim forced on us: speculation
+amortizes only the RTT part of a boundary — payload crosses either way —
+so wired-LAN wins come from batching compute, while high-RTT links (WiFi)
+get a genuine extra network amplification (x1.27 → x1.41 with 2 hops).
+Engine-real today: --spec-type draft-dspark / -md + --rpc already compose.
+
+## §17 RAID-W — parity-coded weight sharding for the swarm
+`scripts/svmi-swarm.py`
+
+RAID-5 applied to the streamed-weights tier: N peers each pin one uniform
+weight stripe, a spare pins the XOR parity stripe. Any single peer dropout →
+fetches degrade to XOR-of-survivors (N−1 streams share the NIC) with zero
+downtime; the lost stripe re-hosts in the background at wire speed.
+
+Validated: numpy XOR codec rebuilds a killed 32 MiB stripe bit-exact;
+codec runs ~0.7 GB/s/core on the CI-class CPU — the wire, not the XOR, is
+always the bottleneck. Planner prices capacity after parity overhead,
+degraded-mode bandwidth, and rebuild minutes. Engine phase 6: staging-ring
+fetch fallback (peer dead → XOR survivors). Baseline today: rpc-server -c
+local caches (no redundancy).
+
+## §18 KV-CDC — content-defined KV dedup for agent fleets
+`scripts/svmi-kvcdc.py`
+
+Prefix dedup saves nothing when agents share content mid-context (same RAG
+snippet at different offsets). KV-CDC cuts token streams into Gear-hash
+content-defined chunks and dedups by content hash; a reused chunk shares one
+K/V copy and re-rotates K rows per position — the same RoPE shift
+--cache-reuse applies to contiguous spans, generalized per chunk.
+
+Validated on a synthetic 8×8192 fleet with 35% shared snippets: prefix dedup
+0.0%, KV-CDC 30.9% (1.4 GiB of 4.4 GiB at 8B-q8_0 KV rates); 97.4% of chunk
+boundaries survive a 7-token prepend (the fixed-block failure mode); chunking
+is lossless. Engine phase 5.5: per-chunk RoPE re-rotation on fetch. Today,
+svmi-fleet.py --shared-prompt handles the prefix-shaped share for real.

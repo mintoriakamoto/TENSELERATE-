@@ -198,6 +198,10 @@ def main() -> int:
     print("          decode crosses the network once per boundary per token, so 2 nodes on")
     print("          gigabit is usually compute-bound, not network-bound — but prefill of")
     print("          long prompts feels the link. Wire > WiFi, always.")
+    print("\ngo further:")
+    print(f"  block speculation over this split : python3 scripts/svmi-distspec.py --nodes {len(nodes)} --nic {args.nic}")
+    print("  dropout-tolerant weight swarm     : python3 scripts/svmi-swarm.py --weights-gib "
+          f"{weights / GiB:.1f} --nic {args.nic}")
     return 0
 
 
