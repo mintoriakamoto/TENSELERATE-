@@ -27,16 +27,16 @@ run it ONLY on a trusted LAN, never on an open network.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 from pathlib import Path
 
 GiB = 1024**3
 
-# reuse svmi-auto's tables
-sys.path.insert(0, str(Path(__file__).parent))
-_auto = __import__("importlib").import_module("importlib.util")
-_spec = _auto.spec_from_file_location("svmi_auto", Path(__file__).parent / "svmi-auto.py")
-_mod = _auto.module_from_spec(_spec)
+# reuse svmi-auto's tables (dash in the filename forces a spec-based import)
+_spec = importlib.util.spec_from_file_location("svmi_auto", Path(__file__).parent / "svmi-auto.py")
+assert _spec is not None and _spec.loader is not None
+_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 MODEL_PROFILES = _mod.MODEL_PROFILES
 GPU_PRESETS = _mod.GPU_PRESETS
