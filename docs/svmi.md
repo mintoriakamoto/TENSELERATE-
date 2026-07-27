@@ -436,3 +436,36 @@ keeps a rotating ring of per-token state snapshots (`rs_ring`), so speculative
 rejection and small context rollbacks restore state in place instead of
 re-prefilling — including a rows-indexed state read (`ggml_gated_delta_net_rows`,
 CPU + Metal; other backends fall back) that skips the gather entirely.
+
+---
+
+# Distributed network inference (combine VRAM across machines)
+
+The release binaries ship the RPC backend (`GGML_RPC=ON`): one main host
+drives GPU devices on other machines over TCP and layer-splits the model
+across ALL devices, local + remote — two 22 GiB + 14 GiB rigs become one
+36 GiB pool. Decode crosses the network once per node boundary per token
+(one n_embd activation row: RTT-bound, usually negligible on wired LAN);
+prefill is bandwidth-bound and feels the link on long prompts.
+
+Plan it with `svmi-net.py` — it sizes the combined pool, prices the network
+hop, orders the `--tensor-split`, and prints both sides' commands:
+
+```sh
+# main rig: 2x 2080 Ti; worker rig: 3060 Ti + 1660 Ti on gigabit LAN
+python3 scripts/svmi-net.py --profile 70b \
+    --node 3060ti,1660ti:ram=64 --node 2080ti,2080ti:ram=8 --nic 1gbe
+
+# worker (release binaries include it):
+ggml-rpc-server -H 0.0.0.0 -p 50052 -c        # -c caches shards locally
+
+# main:
+llama-cli -m model.gguf --rpc <worker-ip>:50052 -ngl 999 \
+    --split-mode layer --tensor-split 8,6,10,11 -fa on -ctk q8_0 -ctv q8_0
+```
+
+Rules the planner encodes: put the big-RAM machine at the front (if the pool
+still doesn't fit, SVMI streams the main host's shard from ITS pinned RAM
+while RPC workers stay resident); slowest card last; `rpc-server -c` makes
+reload instant after the first ~weights/link-speed shard shipment; and the
+RPC protocol is unauthenticated — trusted LAN only, never an open network.

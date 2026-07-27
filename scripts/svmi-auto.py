@@ -215,6 +215,9 @@ def main() -> int:
     if n_gpu > 1:
         print("\nmulti-gpu: layer split shown (safest); 2080 Ti-class pairs with an NVLink")
         print("bridge can try --split-mode row for tensor parallelism on the resident share.")
+    print("\nmore VRAM on another machine? combine rigs over the LAN (RPC layer split):")
+    print("    python3 scripts/svmi-net.py " + (f"--profile {args.profile}" if args.profile else model_arg)
+          + f" --node {','.join(gpu_names)}:ram={args.host_ram:.0f} --node <other-rig-gpus>:ram=<GiB> --nic 1gbe")
     print("\nverify any streamed setup with scripts/svmi-verify.sh (token identity) before trusting it.")
     return 0
 
