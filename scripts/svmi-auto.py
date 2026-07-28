@@ -49,6 +49,10 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "4080": (16, 24.0), "4090": (24, 24.0),
     "5060ti": (16, 24.0), "5070": (12, 48.0), "5070ti": (16, 48.0),
     "5080": (16, 48.0), "5090": (32, 48.0),
+    # CMP mining cards: cheap VRAM, but PCIe gen1 x4 (~0.8 GB/s) makes them
+    # streaming-hostile - use as RESIDENT shards / RPC workers only. Their
+    # throttled dp4a needs -DGGML_CUDA_DISABLE_DP4A=ON (dp2a emulation, ~2x).
+    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8),
 }
 PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
 Q8_BPE = 1.0625

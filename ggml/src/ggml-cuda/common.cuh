@@ -721,7 +721,21 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 #else // defined(GGML_USE_HIP)
 
 #if __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
+#if defined(GGML_CUDA_DISABLE_DP4A) && !defined(GGML_USE_MUSA)
+    // NVIDIA CMP mining cards dispatch dp4a ~16x slower than regular silicon;
+    // emulate it with 2x prmt (sign-extend byte pairs to s16 lanes) + 2x dp2a
+    // for a measured ~2x end-to-end decode speedup on CMP 90HX/170HX.
+    // Opt-in only (GGML_CUDA_DISABLE_DP4A) - slower on normal GPUs.
+    // See ggml-org/llama.cpp#24616.
+    int a_lo, a_hi;
+    asm("prmt.b32 %0, %1, 0, 0x9180;" : "=r"(a_lo) : "r"(a));
+    asm("prmt.b32 %0, %1, 0, 0xB3A2;" : "=r"(a_hi) : "r"(a));
+    asm("dp2a.lo.s32.s32 %0, %1, %2, %0;" : "+r"(c) : "r"(a_lo), "r"(b));
+    asm("dp2a.hi.s32.s32 %0, %1, %2, %0;" : "+r"(c) : "r"(a_hi), "r"(b));
+    return c;
+#else
     return __dp4a(a, b, c);
+#endif // defined(GGML_CUDA_DISABLE_DP4A) && !defined(GGML_USE_MUSA)
 #else // __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
     const int8_t * a8 = (const int8_t *) &a;
     const int8_t * b8 = (const int8_t *) &b;

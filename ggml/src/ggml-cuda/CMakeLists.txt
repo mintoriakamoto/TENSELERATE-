@@ -139,6 +139,12 @@ if (CUDAToolkit_FOUND)
         add_compile_definitions(GGML_CUDA_FORCE_MMQ)
     endif()
 
+    if (GGML_CUDA_DISABLE_DP4A)
+        # CMP mining cards throttle dp4a dispatch; emulate via prmt+dp2a
+        # (sm_61+). Opt-in only - slower on regular GPUs. llama.cpp#24616
+        add_compile_definitions(GGML_CUDA_DISABLE_DP4A)
+    endif()
+
     if (GGML_CUDA_HOPPER_Q1)
         # opt-in Hopper (sm_90a) wgmma path for Q1_0/Q2_0 prefill; needs CUTLASS headers (CuTe)
         if (NOT GGML_CUDA_CUTLASS_DIR)
