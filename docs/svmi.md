@@ -469,3 +469,27 @@ still doesn't fit, SVMI streams the main host's shard from ITS pinned RAM
 while RPC workers stay resident); slowest card last; `rpc-server -c` makes
 reload instant after the first ~weights/link-speed shard shipment; and the
 RPC protocol is unauthenticated — trusted LAN only, never an open network.
+
+---
+
+# CMP mining cards as swarm workers (dp4a emulation)
+
+NVIDIA CMP cards (90HX ≈ 3080 silicon with 10 GB, 170HX with 8 GB HBM2e) are
+the cheapest VRAM per dollar you can bolt onto an RPC swarm — with two traps:
+
+1. **PCIe gen1 x4 (~0.8 GB/s)**: streaming-hostile. Never plan SVMI weight
+   streaming through a CMP card; use them as RESIDENT shards / RPC workers
+   (`svmi-auto.py` / `svmi-net.py` know the `cmp90hx` / `cmp170hx` presets
+   and will price that link honestly).
+2. **Throttled dp4a dispatch (~16x)**: quantized decode crawls on the stock
+   build. Build the worker's binaries with the dp2a emulation (ported from
+   upstream issue ggml-org/llama.cpp#24616; the prmt+dp2a sequence is
+   verified bit-exact against dp4a over 10^4 random cases in this repo):
+
+   ```sh
+   cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_DISABLE_DP4A=ON
+   ```
+
+   Measured upstream: CMP 170HX 61.7 -> 124.6 t/s, CMP 90HX 57.5 -> 114.3 t/s
+   (Llama-2-7B Q4_0, ~2x). Opt-in only — it is SLOWER on regular GeForce
+   cards, so never set it on mixed-build binaries; build per machine.
