@@ -49,10 +49,24 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "4080": (16, 24.0), "4090": (24, 24.0),
     "5060ti": (16, 24.0), "5070": (12, 48.0), "5070ti": (16, 48.0),
     "5080": (16, 48.0), "5090": (32, 48.0),
-    # CMP mining cards: cheap VRAM, but PCIe gen1 x4 (~0.8 GB/s) makes them
-    # streaming-hostile - use as RESIDENT shards / RPC workers only. Their
-    # throttled dp4a needs -DGGML_CUDA_DISABLE_DP4A=ON (dp2a emulation, ~2x).
+    # CMP mining cards: cheap VRAM, but crippled PCIe makes them streaming-
+    # hostile - use as RESIDENT shards / RPC workers only. See GPU_QUIRKS and
+    # scripts/svmi-gpucheck.py for the per-card build flags they need.
     "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8),
+    "cmp100-210": (16, 0.25),   # Volta GV100, 16 GB HBM2 @ ~830 GB/s, PCIe 1.0 x1
+}
+# firmware quirks that change how llama.cpp must be BUILT for a card
+GPU_QUIRKS = {
+    "cmp90hx":  ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
+    "cmp170hx": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
+    "cmp100-210": [
+        "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
+        "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
+        "a Tesla V100 vBIOS flash does NOT restore PCIe width or tensor cores (board-level x1)",
+        "but HBM2 bandwidth (~830 GB/s) is intact — decode is bandwidth-bound, so it is FAST",
+        "A/B '-fa on' vs '-fa off' (flash-attn leans on FP16); if you drop FA you must also "
+        "drop quantized V: use '-ctk q8_0 -ctv f16' since -ctv q8_0 requires -fa on",
+    ],
 }
 PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
 Q8_BPE = 1.0625
@@ -128,8 +142,14 @@ def main() -> int:
 
     print(f"model   : {name}  ({weights / GiB:.1f} GiB weights, {n_layer} layers)")
     gpu_lbl = "+".join(gpu_names) if mixed else (f"{n_gpu}x {gpu_names[0]}" if n_gpu > 1 else gpu_names[0])
-    print(f"gpu     : {gpu_lbl}  ({vram} GiB VRAM total, ~{pcie_agg:.0f} GB/s aggregate PCIe"
+    pcie_txt = f"{pcie_agg:.2f}" if pcie_agg < 1 else f"{pcie_agg:.0f}"
+    print(f"gpu     : {gpu_lbl}  ({vram} GiB VRAM total, ~{pcie_txt} GB/s aggregate PCIe"
           + (", platform-capped" if args.pcie else "") + ")")
+    quirked = [(g, q) for g in dict.fromkeys(gpu_names) for q in GPU_QUIRKS.get(g, [])]
+    if quirked:
+        for g, q in quirked:
+            print(f"quirk   : [{g}] {q}")
+        print("          verify the real link + flags on the box: python3 scripts/svmi-gpucheck.py")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")

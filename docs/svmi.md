@@ -493,3 +493,65 @@ the cheapest VRAM per dollar you can bolt onto an RPC swarm — with two traps:
    Measured upstream: CMP 170HX 61.7 -> 124.6 t/s, CMP 90HX 57.5 -> 114.3 t/s
    (Llama-2-7B Q4_0, ~2x). Opt-in only — it is SLOWER on regular GeForce
    cards, so never set it on mixed-build binaries; build per machine.
+
+## CMP 100-210 (Volta) — the 16 GB HBM2 sleeper, and what the V100 BIOS really does
+
+The CMP 100-210 is a mining-locked GV100 (Volta, sm_70) with **16 GB HBM2 at
+~830–900 GB/s** — more VRAM than a 3060 Ti and more memory bandwidth than a
+3090, for used-market pocket change. Decode is memory-bandwidth-bound, so on
+paper this is a monster. Three firmware realities decide whether it actually
+is one:
+
+| | Reality | What it means for llama.cpp |
+|---|---|---|
+| PCIe | **1.0 x1 (~0.25 GB/s)** — board-level (many boards ship with PCIe-lane SMD parts absent) | SVMI weight streaming is off the table. Load once, stay resident. |
+| Tensor cores | **firmware-gimped**: measured FP16 ~5.6 TFLOPS vs FP32 ~10.6 TFLOPS — FP16 is *slower* than FP32 (a healthy Volta is ~8× faster) | Every FP16 path is a trap: force integer kernels. |
+| HBM2 | **intact**, ~830–900 GB/s | Quantized decode is genuinely fast. This is the reason to buy the card. |
+
+### About flashing a Tesla V100 vBIOS
+
+The common advice is to flash a V100 vBIOS. Be clear-eyed about what that
+buys: community reports and teardown threads show it **nudges clocks/power
+behavior — it does not restore the x16 link and does not un-gimp the tensor
+cores.** The x1 limit is a board-level restriction (people have reflowed
+missing PCIe-lane SMD parts and *still* not gotten x16), and the tensor-core
+throttle sits below the driver. Treat a V100-BIOS card as a CMP 100-210 with
+slightly better clocks, and plan with the x1 link. (Flashing a vBIOS can
+brick a card; keep a dump of the original and a recovery path.)
+
+### The build that suits it
+
+```sh
+cmake -B build -DGGML_CUDA=ON \
+    -DGGML_CUDA_FORCE_MMQ=ON      # integer MMQ kernels; never cuBLAS FP16 GEMM
+# GGML_CUDA_F16 stays OFF (default)
+```
+
+Runtime: keep it fully resident and A/B flash-attention, because the FA
+kernels lean on FP16 — and note the interaction, `-ctv q8_0` *requires*
+`-fa on`, so if FA loses you must move V back to f16:
+
+```sh
+llama-cli -m model.gguf -ngl 999 -fa on  -ctk q8_0 -ctv q8_0 -c 8192   # A
+llama-cli -m model.gguf -ngl 999 -fa off -ctk q8_0 -ctv f16  -c 8192   # B
+```
+
+Do **not** set `-DGGML_CUDA_DISABLE_DP4A=ON` here by reflex: that flag is for
+the *Ampere* CMP cards (30HX–170HX), whose dp4a dispatch is throttled ~16×.
+Volta's dp4a is not known to be throttled — benchmark before assuming.
+
+### Check your actual card before trusting any of this
+
+```sh
+python3 scripts/svmi-gpucheck.py          # reads nvidia-smi, or --from-file a capture
+```
+
+It prints the link your card *negotiated* (not the box spec), the one-time
+model-load cost that implies, and the build flags that card needs. In a
+swarm, a crippled PCIe link costs you the one-time load, not per-token
+traffic — RPC activations are kilobytes — so these cards make fine resident
+RPC workers:
+
+```sh
+python3 scripts/svmi-net.py --profile 13b --node 3060ti:ram=64 --node cmp100-210:ram=16
+```
