@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Install cargo binstall
-        uses: cargo-bins/cargo-binstall@268643a6b5ea099f5718ee5cd3ff7dc89a5eb49b
+        uses: cargo-bins/cargo-binstall@f3284c9c2dd42d52f4437bf415a5712669699999
 
       - name: Install komac
         run: |
