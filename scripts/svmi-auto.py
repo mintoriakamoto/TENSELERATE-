@@ -52,13 +52,19 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     # CMP mining cards: cheap VRAM, but crippled PCIe makes them streaming-
     # hostile - use as RESIDENT shards / RPC workers only. See GPU_QUIRKS and
     # scripts/svmi-gpucheck.py for the per-card build flags they need.
-    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8),
+    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8),   # STOCK/locked; see cmp170hx-40/-64 for the unlocked card
     "cmp100-210": (16, 0.25),   # Volta GV100, 16 GB HBM2 @ ~830 GB/s, PCIe 1.0 x1
+    # cmpunlocker-unlocked CMP 170HX: full 40/64 GB HBM2e + PCIe Gen2 (~6 GB/s
+    # pinned). No longer streaming-hostile -- big enough to hold 70B-class
+    # models mostly (40 GB) or fully (64 GB) resident.
+    "cmp170hx-40": (40, 6.0), "cmp170hx-64": (64, 6.0),
 }
 # firmware quirks that change how llama.cpp must be BUILT for a card
 GPU_QUIRKS = {
     "cmp90hx":  ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
     "cmp170hx": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
+    "cmp170hx-40": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
+    "cmp170hx-64": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
@@ -68,7 +74,7 @@ GPU_QUIRKS = {
         "drop quantized V: use '-ctk q8_0 -ctv f16' since -ctv q8_0 requires -fa on",
     ],
 }
-PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
+PCIE_BW = {"2.0-x16": 6.0, "3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
 Q8_BPE = 1.0625
 
 

@@ -167,6 +167,40 @@ export GGML_SCHED_STREAM_QUEUES=1        # single copy engine (planner reminds y
 python3 scripts/svmi-bitspec.py models/llama-70b-q4_k_m.gguf --gpu 2080ti
 ```
 
+## Unlocked CMP 170HX (40–64 GB): the inverse case
+
+The NVIDIA CMP 170HX is a GA100 (A100-class) mining card. Stock it advertises 8–10 GB
+and a crippled Gen1 link, so SVMI treats the stock `cmp170hx` preset as a streaming-
+hostile resident-only shard. After the [cmpunlocker](https://github.com/mintoriakamoto/cmpunlocker)
+memory + PCIe unlock it becomes the *opposite* of the consumer cards this fork targets:
+big HBM2e VRAM behind a still-narrow PCIe Gen2 link. Two SKUs, two presets:
+
+| Preset | VRAM | Arch | PCIe link | eff. H2D (pinned) | HBM2e BW | Notes |
+| --- | ---: | --- | --- | ---: | ---: | --- |
+| `cmp170hx-64` | 64 GB | GA100 | 2.0 x16 | ~6 GB/s | ~1493 GB/s | 70B Q4_K_M fits **fully resident** |
+| `cmp170hx-40` | 40 GB | GA100 | 2.0 x16 | ~6 GB/s | ~1493 GB/s | 70B Q4_K_M streams only its FFN tail |
+
+Card-specific guidance:
+
+- **Streaming is a last resort here, not the design point.** With 40–64 GB of resident
+  budget the planner keeps a 70B mostly/fully resident and decode runs at HBM2e speed
+  (~1.5 TB/s), not at the ~6 GB/s PCIe floor. The narrow Gen2 link only hurts the
+  one-time model load and any FFN tail that must stream. `svmi-plan.py --gpu cmp170hx-64`
+  will typically print `-ngl 99` with no `--stream-weights` at all.
+- **dp4a is throttled** on this silicon — build with `-DGGML_CUDA_DISABLE_DP4A=ON`
+  (`scripts/svmi-gpucheck.py` reminds you and reads the *real* negotiated link on the box).
+- **Headless compute card** (no display output): pass `--display-reserve 0` to give the
+  whole budget to weights + KV.
+- **Confirm the unlock landed first.** The presets assume the cmpunlocker unlock is
+  active (full VRAM + Gen2). Run `nvidia-smi --query-gpu=memory.total,pcie.link.gen.current`
+  and `scripts/svmi-gpucheck.py` before trusting the plan.
+
+```bash
+# 70B on an unlocked 64 GB CMP 170HX — fits resident, no streaming:
+python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx-64
+python3 scripts/svmi-plan.py models/llama-70b-q4_k_m.gguf --gpu cmp170hx-64 --display-reserve 0
+```
+
 ## Measured expectations (honest numbers)
 
 Per-token decode cost when streaming: `bytes_streamed / effective_PCIe_bandwidth`.

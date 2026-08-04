@@ -45,13 +45,17 @@ from pathlib import Path
 GiB = 1024**3
 GB = 1e9
 
-PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
+PCIE_BW = {"2.0-x16": 6.0, "3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
 # (vram GiB, pcie link, vram GB/s)
 GPU_PRESETS = {
     "1660ti": (6, "3.0-x16", 288), "2060": (6, "3.0-x16", 336), "2070": (8, "3.0-x16", 448),
     "2080": (8, "3.0-x16", 448), "2080ti": (11, "3.0-x16", 616),
     "3060": (12, "4.0-x16", 360), "3070": (8, "4.0-x16", 448), "3080": (10, "4.0-x16", 760),
     "3090": (24, "4.0-x16", 936), "4070": (12, "4.0-x16", 504), "4090": (24, "4.0-x16", 1008),
+    # unlocked CMP 170HX (GA100): PCIe Gen2 after the cmpunlocker link unlock;
+    # HBM2e ~1493 GB/s (A100-class) is the whole point -- huge resident weight
+    # bandwidth behind a narrow PCIe link, exactly the compute-follows-memory case.
+    "cmp170hx-40": (40, "2.0-x16", 1493), "cmp170hx-64": (64, "2.0-x16", 1493),
 }
 # effective (not theoretical) CPU memory bandwidth for GEMV-like streaming, GB/s
 CPU_PRESETS = {
