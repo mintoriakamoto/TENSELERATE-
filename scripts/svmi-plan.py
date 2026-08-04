@@ -41,6 +41,7 @@ MiB = 1024**2
 
 # effective *pinned* H2D bandwidth (GB/s), well below the theoretical link rate
 PCIE_BW = {
+    "2.0-x16": 6.0,   # CMP 170HX after the Gen2 link unlock (Gen1 x16 stock); ~6 GB/s pinned
     "3.0-x8":  6.0,
     "3.0-x16": 12.0,
     "4.0-x8":  12.0,
@@ -64,6 +65,15 @@ GPU_PRESETS = {
     "4060":   (8,  "4.0-x8",  2, "Ada AD107, PCIe 4.0 x8 (narrow link!)"),
     "4070":   (12, "4.0-x16", 2, "Ada AD104, PCIe 4.0"),
     "4090":   (24, "4.0-x16", 2, "Ada AD102, PCIe 4.0"),
+    # Unlocked NVIDIA CMP 170HX (GA100 / A100-class silicon), two HBM2e SKUs.
+    # The cmpunlocker unlock exposes the full 40/64 GB and lifts the PCIe link
+    # from Gen1 to Gen2 (~6 GB/s pinned). Headless compute card (no display) --
+    # pass --display-reserve 0 to use the whole budget. A 70B Q4_K_M (~40 GB)
+    # fits fully resident on the 64 GB SKU (no streaming needed); on the 40 GB
+    # SKU only a few FFN layers stream. dp4a is throttled on this silicon --
+    # build llama.cpp with -DGGML_CUDA_DISABLE_DP4A=ON (see scripts/svmi-gpucheck.py).
+    "cmp170hx-64": (64, "2.0-x16", 2, "unlocked CMP 170HX, 64 GB HBM2e (GA100), PCIe Gen2; headless"),
+    "cmp170hx-40": (40, "2.0-x16", 2, "unlocked CMP 170HX, 40 GB HBM2e (GA100), PCIe Gen2; headless"),
 }
 
 

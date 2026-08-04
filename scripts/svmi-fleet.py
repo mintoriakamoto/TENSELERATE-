@@ -43,9 +43,13 @@ from pathlib import Path
 
 GiB = 1024**3
 
-PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
+PCIE_BW = {"2.0-x16": 6.0, "3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
 # (vram GiB, pcie link, copy engines, effective dense fp16 TFLOPS)
 GPU_PRESETS = {
+    # unlocked CMP 170HX (GA100): 40/64 GB HBM2e, PCIe Gen2 after the cmpunlocker
+    # unlock. FP16 ~78 TF is an A100-class estimate assuming the SM (SS0/SS1)
+    # compute unlock is also applied; drop it toward ~40 if only memory is unlocked.
+    "cmp170hx-40": (40, "2.0-x16", 2, 78.0), "cmp170hx-64": (64, "2.0-x16", 2, 78.0),
     "1660ti": (6, "3.0-x16", 1, 5.0), "2060": (6, "3.0-x16", 1, 10.0), "2070": (8, "3.0-x16", 1, 12.0),
     "2080": (8, "3.0-x16", 1, 16.0), "2080ti": (11, "3.0-x16", 1, 22.0),
     "3060": (12, "4.0-x16", 2, 13.0), "3060ti": (8, "4.0-x16", 2, 16.0),
