@@ -115,7 +115,7 @@ jobs:
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Setup Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-openvino
         with:
           path: ./openvino_toolkit
