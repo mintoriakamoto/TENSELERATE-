@@ -419,13 +419,34 @@ is `q8_0`. That is ~18% of the weights, so the file is ~15% larger than `Q4_K_M`
 
 It also lines up with the SVMI split: the planner keeps attention resident and
 streams the FFN, so the INT8 half is the half that never crosses PCIe, and the
-streamed half stays at Q4_K_M's byte count. A CMP 170HX (8 GiB VRAM, 64 GiB
-pinned host store) holds a 70B at ~46 GiB in the store; a CMP 90HX (10 GiB,
-40 GiB store) holds up to a ~55B. `svmi-auto.py` prints the store fit for both:
+streamed half stays at Q4_K_M's byte count.
+
+### CMP 170HX with unlocked HBM2e
+
+The 170HX is A100 silicon (GA100, 70 SM, ~1.5 TB/s HBM2e) fused down to 8 or
+10 GiB. `cmpunlocker` restores the memory geometry - 8 GiB -> 64 GiB, 10 GiB ->
+40 GiB - plus SM throughput, so the card stops being a streaming problem and
+just holds the model: a 70B at `Q4_K_M_INT8` is ~46 GiB and runs RESIDENT on the
+64 GiB config. Presets for both, and for the factory sizes:
 
 ```sh
-python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx
+python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx-64   # unlocked 8 GiB card
+python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx-40   # unlocked 10 GiB card
 ```
+
+Two caveats the planner prints and you should not forget:
+
+- the unlock is **volatile** - a daemon rewrites it every second, and a driver
+  reload drops the card back to 8/10 GiB. `svmi-gpucheck.py` flags a 170HX still
+  reporting the factory size, so run it before trusting a plan.
+- the link stays narrow: gen1 x4 (~1 GB/s) stock, gen2 after the unlock; the
+  capacitor mod (12 of 16 lanes ship without AC coupling caps) restores gen1 x16
+  (~4 GB/s). That is the one-time model load, not per-token traffic - which is
+  exactly why RESIDENT beats streaming on this card.
+
+The CMP 90HX unlock is compute-only: VRAM stays 10 GiB and the link is
+untouched, so it wants the same `Q4_K_M_INT8` build advice but none of the
+capacity presets.
 
 ## K-cache mean-centering (`--kv-mean-center`)
 

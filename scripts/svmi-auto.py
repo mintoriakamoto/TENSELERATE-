@@ -56,15 +56,31 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     # CMP mining cards: cheap VRAM, but crippled PCIe makes them streaming-
     # hostile - use as RESIDENT shards / RPC workers only. See GPU_QUIRKS and
     # scripts/svmi-gpucheck.py for the per-card build flags they need.
-    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8),
+    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8), "cmp170hx-10g": (10, 0.8),
+    # 170HX after the cmpunlocker HBM2e geometry unlock: the 8 GB variant comes back
+    # as 64 GB, the 10 GB variant as 40 GB, and the link moves to PCIe gen2 (~2 GB/s).
+    # At that size the card stops being a streaming problem and just holds the model.
+    "cmp170hx-64": (64, 2.0), "cmp170hx-40": (40, 2.0),
     "cmp100-210": (16, 0.25),   # Volta GV100, 16 GB HBM2 @ ~830 GB/s, PCIe 1.0 x1
 }
 # firmware quirks that change how llama.cpp must be BUILT for a card
+DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
+INT8_QUIRK = "no usable FP16 path - quantize Q4_K_M_INT8 so attention runs on q8_0/MMQ"
+UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every second, and a "
+                "driver reload drops the card back to its factory 8/10 GB",
+                "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "
+                "restores gen1 x16 ~4 GB/s) - that is the one-time model load, not per-token"]
 GPU_QUIRKS = {
-    "cmp90hx":  ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)",
-                 "no usable FP16 path - quantize Q4_K_M_INT8 so attention runs on q8_0/MMQ"],
-    "cmp170hx": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)",
-                 "no usable FP16 path - quantize Q4_K_M_INT8 so attention runs on q8_0/MMQ"],
+    "cmp90hx":  [DP4A_QUIRK, INT8_QUIRK,
+                 "the 90HX unlock is compute-only - VRAM stays 10 GB, link unchanged"],
+    "cmp170hx": [DP4A_QUIRK, INT8_QUIRK,
+                 "8 GB stock: cmpunlocker restores HBM2e geometry to 64 GB - plan the "
+                 "unlocked card with --gpu cmp170hx-64"],
+    "cmp170hx-10g": [DP4A_QUIRK, INT8_QUIRK,
+                     "10 GB stock: cmpunlocker restores HBM2e geometry to 40 GB - plan the "
+                     "unlocked card with --gpu cmp170hx-40"],
+    "cmp170hx-64": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-40": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
@@ -75,10 +91,6 @@ GPU_QUIRKS = {
     ],
 }
 PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
-# a CMP rig is built around its pinned host weight store, not its VRAM: the 8 GiB
-# 170HX is provisioned to a 64 GiB store, the 10 GiB 90HX to 40 GiB. Used as the
-# --host-ram default so the regime picker sizes the store these cards actually run.
-CMP_HOST_STORE = {"cmp170hx": 64.0, "cmp90hx": 40.0}
 Q8_BPE = 1.0625
 
 
@@ -96,9 +108,7 @@ def main() -> int:
     ap.add_argument("--agents", type=int, default=1, help="concurrent agents/slots planned")
     ap.add_argument("--display-reserve", type=float, default=1.0)
     ap.add_argument("--overhead", type=float, default=1.25, help="activation reserve GiB")
-    ap.add_argument("--host-ram", type=float, default=None,
-                    help="host RAM GiB (for the -nkvo ceiling); default 64, or the card's "
-                         "provisioned weight store for CMP presets")
+    ap.add_argument("--host-ram", type=float, default=64.0, help="host RAM GiB (for the -nkvo ceiling)")
     args = ap.parse_args()
 
     if args.model:
@@ -136,9 +146,6 @@ def main() -> int:
             ap.error(f"unknown GPU '{g}'; known: {', '.join(sorted(GPU_PRESETS))}")
     if len(gpu_names) == 1 and args.gpus > 1:
         gpu_names = gpu_names * args.gpus
-    if args.host_ram is None:
-        stores = [CMP_HOST_STORE[g] for g in gpu_names if g in CMP_HOST_STORE]
-        args.host_ram = min(stores) if stores and len(stores) == len(gpu_names) else 64.0
     cards = [GPU_PRESETS[g] for g in gpu_names]
     n_gpu = len(gpu_names)
     vram = sum(c[0] for c in cards)
@@ -165,13 +172,11 @@ def main() -> int:
         for g, q in quirked:
             print(f"quirk   : [{g}] {q}")
         print("          verify the real link + flags on the box: python3 scripts/svmi-gpucheck.py")
-    if all(g in CMP_HOST_STORE for g in gpu_names):
-        print(f"store   : {vram} GiB VRAM resident window over a {args.host_ram:.0f} GiB pinned "
-              "host weight store (SVMI)")
+    if any(g.startswith("cmp") for g in gpu_names):
         for q, bpw in MIXED_BPW.items():
             est = n_params * bpw / 8
-            fits = "fits the store" if est <= args.host_ram * GiB * 0.9 else "exceeds the store"
-            print(f"          {q} ({bpw} bpw): ~{est / GiB:.1f} GiB - {fits}"
+            fits = "resident" if est + fixed <= budget else "does not fit resident"
+            print(f"quant   : {q} ({bpw} bpw) ~{est / GiB:.1f} GiB - {fits}"
                   "   llama-quantize model.gguf out.gguf " + q)
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
