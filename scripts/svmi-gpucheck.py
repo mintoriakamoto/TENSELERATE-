@@ -110,6 +110,8 @@ def advise(c: Card) -> tuple[list[str], list[str]]:
         warn.append("Ampere CMP card: dp4a dispatch is throttled ~16x, which is exactly "
                     "what quantized decode uses.")
         flags.append("-DGGML_CUDA_DISABLE_DP4A=ON  # dp2a emulation, ~2x (llama.cpp#24616)")
+        flags.append("quantize Q4_K_M_INT8         # q8_0 attention (resident, INT8/MMQ) "
+                     "over a Q4_K_M body (streamed)")
 
     if c.link_is_crippled:
         warn.append(f"PCIe link negotiated at gen{c.gen_cur} x{c.width_cur} "

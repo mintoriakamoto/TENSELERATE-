@@ -402,6 +402,31 @@ MMQ; Hopper cards can opt into a wgmma Q1_0 prefill kernel (compile with
 floor for agent-quality output; Q1_0 is draft-model / experiment territory —
 `svmi-auto.py` prints both estimates whenever a model does not fit.
 
+## Mixed INT8/Q4_K_M weights: `Q4_K_M_INT8`
+
+`llama-quantize model.gguf out.gguf Q4_K_M_INT8` (alias `Q4KM_INT8`). Same
+mixture as `Q4_K_M` - Q4_K body, Q6_K on the `ffn_down` layers `use_more_bits`
+picks, Q6_K output head - except every attention tensor (`attn_q/k/v/qkv/kv_b/output`)
+is `q8_0`. That is ~18% of the weights, so the file is ~15% larger than `Q4_K_M`
+(about 5.6 bpw), and it buys two things:
+
+- **quality**: attention is the part of a layer that `Q4_K_M` hurts most, and it
+  is small enough that INT8 there costs less than a full step up in the body.
+- **speed on cards with no usable FP16**: `q8_0` runs the integer MMQ/dp4a path,
+  which is all the CMP mining cards (90HX, 170HX, 100-210) have. Pair it with
+  `-DGGML_CUDA_DISABLE_DP4A=ON` on Ampere CMP cards and `-DGGML_CUDA_FORCE_MMQ=ON`
+  on the Volta CMP.
+
+It also lines up with the SVMI split: the planner keeps attention resident and
+streams the FFN, so the INT8 half is the half that never crosses PCIe, and the
+streamed half stays at Q4_K_M's byte count. A CMP 170HX (8 GiB VRAM, 64 GiB
+pinned host store) holds a 70B at ~46 GiB in the store; a CMP 90HX (10 GiB,
+40 GiB store) holds up to a ~55B. `svmi-auto.py` prints the store fit for both:
+
+```sh
+python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx
+```
+
 ## K-cache mean-centering (`--kv-mean-center`)
 
 `-ctk q4_0` doubles max context vs `q8_0` but costs K fidelity: `q4_0` is a

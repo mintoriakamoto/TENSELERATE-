@@ -156,6 +156,13 @@ static bool category_is_attn_v(tensor_category cat) {
            cat == tensor_category::ATTENTION_KV_B;
 }
 
+static bool category_is_attn(tensor_category cat) {
+    return category_is_attn_v(cat)                 ||
+           cat == tensor_category::ATTENTION_Q     ||
+           cat == tensor_category::ATTENTION_K     ||
+           cat == tensor_category::ATTENTION_OUTPUT;
+}
+
 //
 // quantization state
 //
@@ -509,6 +516,14 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M) new_type = GGML_TYPE_IQ3_S;
             }
         }
+    } else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M_INT8 && category_is_attn(category)) {
+        // attention is ~10% of the weights and stays GPU-resident under SVMI, so q8_0
+        // buys back most of Q4_K_M's error at little cost - and it is the type the
+        // integer (MMQ/dp4a) kernels run fastest, which is all the CMP cards have
+        new_type = GGML_TYPE_Q8_0;
+        if (category_is_attn_v(category)) {
+            ++qs.i_attention_wv;
+        }
     } else if (category_is_attn_v(category)) {
         if      (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
             new_type = qs.model.hparams.n_gqa() >= 4 ? GGML_TYPE_Q4_K : GGML_TYPE_Q3_K;
@@ -588,7 +603,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
         else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
             new_type = arch == LLM_ARCH_FALCON ? GGML_TYPE_Q4_K : GGML_TYPE_Q5_K;
         }
-        else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M_INT8) {
             if (arch == LLM_ARCH_FALCON) {
                 new_type = i_layer < n_layer/16 ? GGML_TYPE_Q6_K :
                            use_more_bits(i_layer, n_layer) ? GGML_TYPE_Q5_K : GGML_TYPE_Q4_K;
@@ -813,7 +828,8 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q3_K_M:
         case LLAMA_FTYPE_MOSTLY_Q3_K_L:  return GGML_TYPE_Q3_K;
         case LLAMA_FTYPE_MOSTLY_Q4_K_S:
-        case LLAMA_FTYPE_MOSTLY_Q4_K_M:  return GGML_TYPE_Q4_K;
+        case LLAMA_FTYPE_MOSTLY_Q4_K_M:
+        case LLAMA_FTYPE_MOSTLY_Q4_K_M_INT8: return GGML_TYPE_Q4_K;
         case LLAMA_FTYPE_MOSTLY_Q5_K_S:
         case LLAMA_FTYPE_MOSTLY_Q5_K_M:  return GGML_TYPE_Q5_K;
         case LLAMA_FTYPE_MOSTLY_Q6_K:    return GGML_TYPE_Q6_K;

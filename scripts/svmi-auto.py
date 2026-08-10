@@ -39,6 +39,10 @@ MODEL_PROFILES = {
 # Q2_0 has CPU x86 AVX-VNNI + ARM NEON-DP dot kernels; Q1_0 adds repack paths
 # and (Hopper, opt-in GGML_USE_HOPPER_Q1) a wgmma prefill kernel.
 LOWBIT_BPW = {"Q2_0": 2.25, "Q1_0": 1.125}
+# mixed INT8/Q4_K_M: Q4_K_M body, q8_0 attention (tools/quantize Q4_K_M_INT8).
+# Attention is ~18% of the weights, so the mix costs ~15% size over Q4_K_M and
+# keeps the hot, resident half of the model on the integer kernels.
+MIXED_BPW = {"Q4_K_M_INT8": 5.6}
 GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "1660ti": (6, 12.0), "2060": (6, 12.0), "2070": (8, 12.0), "2080": (8, 12.0),
     "2080ti": (11, 12.0),
@@ -57,8 +61,10 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
 }
 # firmware quirks that change how llama.cpp must be BUILT for a card
 GPU_QUIRKS = {
-    "cmp90hx":  ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
-    "cmp170hx": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
+    "cmp90hx":  ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)",
+                 "no usable FP16 path - quantize Q4_K_M_INT8 so attention runs on q8_0/MMQ"],
+    "cmp170hx": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)",
+                 "no usable FP16 path - quantize Q4_K_M_INT8 so attention runs on q8_0/MMQ"],
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
@@ -69,6 +75,10 @@ GPU_QUIRKS = {
     ],
 }
 PCIE_BW = {"3.0-x8": 6.0, "3.0-x16": 12.0, "4.0-x8": 12.0, "4.0-x16": 24.0, "5.0-x16": 48.0}
+# a CMP rig is built around its pinned host weight store, not its VRAM: the 8 GiB
+# 170HX is provisioned to a 64 GiB store, the 10 GiB 90HX to 40 GiB. Used as the
+# --host-ram default so the regime picker sizes the store these cards actually run.
+CMP_HOST_STORE = {"cmp170hx": 64.0, "cmp90hx": 40.0}
 Q8_BPE = 1.0625
 
 
@@ -86,7 +96,9 @@ def main() -> int:
     ap.add_argument("--agents", type=int, default=1, help="concurrent agents/slots planned")
     ap.add_argument("--display-reserve", type=float, default=1.0)
     ap.add_argument("--overhead", type=float, default=1.25, help="activation reserve GiB")
-    ap.add_argument("--host-ram", type=float, default=64.0, help="host RAM GiB (for the -nkvo ceiling)")
+    ap.add_argument("--host-ram", type=float, default=None,
+                    help="host RAM GiB (for the -nkvo ceiling); default 64, or the card's "
+                         "provisioned weight store for CMP presets")
     args = ap.parse_args()
 
     if args.model:
@@ -124,6 +136,9 @@ def main() -> int:
             ap.error(f"unknown GPU '{g}'; known: {', '.join(sorted(GPU_PRESETS))}")
     if len(gpu_names) == 1 and args.gpus > 1:
         gpu_names = gpu_names * args.gpus
+    if args.host_ram is None:
+        stores = [CMP_HOST_STORE[g] for g in gpu_names if g in CMP_HOST_STORE]
+        args.host_ram = min(stores) if stores and len(stores) == len(gpu_names) else 64.0
     cards = [GPU_PRESETS[g] for g in gpu_names]
     n_gpu = len(gpu_names)
     vram = sum(c[0] for c in cards)
@@ -150,6 +165,14 @@ def main() -> int:
         for g, q in quirked:
             print(f"quirk   : [{g}] {q}")
         print("          verify the real link + flags on the box: python3 scripts/svmi-gpucheck.py")
+    if all(g in CMP_HOST_STORE for g in gpu_names):
+        print(f"store   : {vram} GiB VRAM resident window over a {args.host_ram:.0f} GiB pinned "
+              "host weight store (SVMI)")
+        for q, bpw in MIXED_BPW.items():
+            est = n_params * bpw / 8
+            fits = "fits the store" if est <= args.host_ram * GiB * 0.9 else "exceeds the store"
+            print(f"          {q} ({bpw} bpw): ~{est / GiB:.1f} GiB - {fits}"
+                  "   llama-quantize model.gguf out.gguf " + q)
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")
