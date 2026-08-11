@@ -448,6 +448,42 @@ The CMP 90HX unlock is compute-only: VRAM stays 10 GiB and the link is
 untouched, so it wants the same `Q4_K_M_INT8` build advice but none of the
 capacity presets.
 
+### End-to-end: 70B on an unlocked 170HX
+
+```bash
+# 1. what is the card actually reporting right now? (run after every driver reload)
+nvidia-smi --query-gpu=name,memory.total,pcie.link.gen.current,pcie.link.width.current,\
+pcie.link.gen.max,pcie.link.width.max --format=csv,noheader > gpus.csv
+python3 scripts/svmi-gpucheck.py --from-file gpus.csv
+#    -> flags a 170HX still reporting 8/10 GiB, and names the preset to plan with
+
+# 2. build for the card: integer kernels only, dp4a emulated
+cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_DISABLE_DP4A=ON -DGGML_CUDA_FORCE_MMQ=ON
+cmake --build build -j
+
+# 3. quantize: Q4_K_M body, q8_0 attention
+./build/bin/llama-quantize model-f16.gguf model-q4_k_m_int8.gguf Q4_K_M_INT8
+#    richer variant (a few % larger, helps the tensors quantization hurts most):
+./build/bin/llama-quantize --output-tensor-type q8_0 --token-embedding-type q6_K \
+    model-f16.gguf model-q4_k_m_int8-max.gguf Q4_K_M_INT8
+#    calibrated variant:
+./build/bin/llama-imatrix -m model-f16.gguf -f calib.txt -o imatrix.gguf
+./build/bin/llama-quantize --imatrix imatrix.gguf \
+    model-f16.gguf model-q4_k_m_int8-imat.gguf Q4_K_M_INT8
+
+# 4. plan and run - 46 GiB of weights is resident on the 64 GiB config
+python3 scripts/svmi-auto.py model-q4_k_m_int8.gguf --gpu cmp170hx-64 --ctx 32768
+./build/bin/llama-cli -m model-q4_k_m_int8.gguf -ngl 999 \
+    -fa on -ctk q8_0 -ctv q8_0 -c 32768
+
+# 5. compare the variants before committing to one
+./build/bin/llama-perplexity -m model-q4_k_m_int8.gguf -f wiki.test.raw -ngl 999
+```
+
+Loading is the slow part, not decoding: 46 GiB over a gen1 x4 link is ~13 h, ~6.5 h
+at gen2, ~3.3 h with the capacitor mod. Pay it once and keep the process alive -
+`llama-server` rather than repeated `llama-cli` invocations.
+
 ## K-cache mean-centering (`--kv-mean-center`)
 
 `-ctk q4_0` doubles max context vs `q8_0` but costs K fidelity: `q4_0` is a

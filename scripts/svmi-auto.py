@@ -176,8 +176,15 @@ def main() -> int:
         for q, bpw in MIXED_BPW.items():
             est = n_params * bpw / 8
             fits = "resident" if est + fixed <= budget else "does not fit resident"
-            print(f"quant   : {q} ({bpw} bpw) ~{est / GiB:.1f} GiB - {fits}"
-                  "   llama-quantize model.gguf out.gguf " + q)
+            out = f"model-{q.lower()}.gguf"
+            print(f"quant   : {q} ({bpw} bpw) ~{est / GiB:.1f} GiB - {fits}")
+            print(f"          llama-quantize {model_arg} {out} {q}")
+            print("          richer head/embeddings (a few % more, the tensors quantization "
+                  "hurts most):")
+            print("          llama-quantize --output-tensor-type q8_0 --token-embedding-type q6_K \\")
+            print(f"              {model_arg} {out.replace('.gguf', '-max.gguf')} {q}")
+            print("          calibrated: llama-imatrix -m f16.gguf -f calib.txt -o imatrix.gguf, "
+                  "then add --imatrix imatrix.gguf")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")
