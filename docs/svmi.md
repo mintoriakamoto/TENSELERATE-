@@ -82,6 +82,14 @@ the transport is scheduled differently.
   ratio.
 - `scripts/svmi-bench.sh` — three-way llama-bench comparison: baseline vs pinned vs
   streamed, same settings, prints a summary table.
+- `scripts/svmi-cmpbench.sh` — CMP throttle probe. The CUDA backend has two INT8
+  matmul paths and the mining-card throttle only hits one: batch <= 8 goes through
+  `mul_mat_vec_q` (`__dp4a`, throttled ~16x), anything wider goes through MMQ, which
+  on CC >= 7.5 is `mma.sync` s8 tensor-core IMMA. This sweeps `llama-batched-bench
+  -npl` and prints per-sequence decode throughput so the crossover shows up, with an
+  optional second sweep against a `-DGGML_CUDA_DISABLE_DP4A=ON` build. If the
+  crossover is real, the lever for these cards is concurrency and speculative
+  decoding (batch-1 decode becomes batched verification), not kernel flags.
 - `scripts/svmi-verify.sh` — correctness gate: greedy-decodes the same prompt with and
   without streaming and diffs the tokens (byte-identical expected), with an optional
   `--ppl-file` perplexity equality check. This is the executable form of the
