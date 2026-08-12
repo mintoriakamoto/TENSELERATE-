@@ -39,6 +39,10 @@ MODEL_PROFILES = {
 # Q2_0 has CPU x86 AVX-VNNI + ARM NEON-DP dot kernels; Q1_0 adds repack paths
 # and (Hopper, opt-in GGML_USE_HOPPER_Q1) a wgmma prefill kernel.
 LOWBIT_BPW = {"Q2_0": 2.25, "Q1_0": 1.125}
+# mixed INT8/Q4_K_M: Q4_K_M body, q8_0 attention (tools/quantize INT8).
+# Attention is ~18% of the weights, so the mix costs ~15% size over Q4_K_M and
+# keeps the hot, resident half of the model on the integer kernels.
+MIXED_BPW = {"INT8": 5.6}
 GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "1660ti": (6, 12.0), "2060": (6, 12.0), "2070": (8, 12.0), "2080": (8, 12.0),
     "2080ti": (11, 12.0),
@@ -52,13 +56,31 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     # CMP mining cards: cheap VRAM, but crippled PCIe makes them streaming-
     # hostile - use as RESIDENT shards / RPC workers only. See GPU_QUIRKS and
     # scripts/svmi-gpucheck.py for the per-card build flags they need.
-    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8),
+    "cmp90hx": (10, 0.8), "cmp170hx": (8, 0.8), "cmp170hx-10g": (10, 0.8),
+    # 170HX after the cmpunlocker HBM2e geometry unlock: the 8 GB variant comes back
+    # as 64 GB, the 10 GB variant as 40 GB, and the link moves to PCIe gen2 (~2 GB/s).
+    # At that size the card stops being a streaming problem and just holds the model.
+    "cmp170hx-64": (64, 2.0), "cmp170hx-40": (40, 2.0),
     "cmp100-210": (16, 0.25),   # Volta GV100, 16 GB HBM2 @ ~830 GB/s, PCIe 1.0 x1
 }
 # firmware quirks that change how llama.cpp must be BUILT for a card
+DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
+INT8_QUIRK = "no usable FP16 path - quantize INT8 so attention runs on q8_0/MMQ"
+UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every second, and a "
+                "driver reload drops the card back to its factory 8/10 GB",
+                "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "
+                "restores gen1 x16 ~4 GB/s) - that is the one-time model load, not per-token"]
 GPU_QUIRKS = {
-    "cmp90hx":  ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
-    "cmp170hx": ["throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"],
+    "cmp90hx":  [DP4A_QUIRK, INT8_QUIRK,
+                 "the 90HX unlock is compute-only - VRAM stays 10 GB, link unchanged"],
+    "cmp170hx": [DP4A_QUIRK, INT8_QUIRK,
+                 "8 GB stock: cmpunlocker restores HBM2e geometry to 64 GB - plan the "
+                 "unlocked card with --gpu cmp170hx-64"],
+    "cmp170hx-10g": [DP4A_QUIRK, INT8_QUIRK,
+                     "10 GB stock: cmpunlocker restores HBM2e geometry to 40 GB - plan the "
+                     "unlocked card with --gpu cmp170hx-40"],
+    "cmp170hx-64": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-40": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
@@ -150,6 +172,19 @@ def main() -> int:
         for g, q in quirked:
             print(f"quirk   : [{g}] {q}")
         print("          verify the real link + flags on the box: python3 scripts/svmi-gpucheck.py")
+    if any(g.startswith("cmp") for g in gpu_names):
+        for q, bpw in MIXED_BPW.items():
+            est = n_params * bpw / 8
+            fits = "resident" if est + fixed <= budget else "does not fit resident"
+            out = f"model-{q.lower()}.gguf"
+            print(f"quant   : {q} ({bpw} bpw) ~{est / GiB:.1f} GiB - {fits}")
+            print(f"          llama-quantize {model_arg} {out} {q}")
+            print("          richer head/embeddings (a few % more, the tensors quantization "
+                  "hurts most):")
+            print("          llama-quantize --output-tensor-type q8_0 --token-embedding-type q6_K \\")
+            print(f"              {model_arg} {out.replace('.gguf', '-max.gguf')} {q}")
+            print("          calibrated: llama-imatrix -m f16.gguf -f calib.txt -o imatrix.gguf, "
+                  "then add --imatrix imatrix.gguf")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")

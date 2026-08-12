@@ -31,6 +31,9 @@ What's in this branch (all opt-in, off by default):
 | BitSpec feasibility — acceptance rate of a low-bit resident self-draft (novel; see research notes) | `scripts/svmi-bitspec.py` |
 | MAVM + CTX-VM fleet planner — how many agents at 131K/256K context fit one GPU: shared weights (O(1) in agents), paged KV (host-resident context, landmark page table + hot window in VRAM), shared-prefix dedup, idle spill | `scripts/svmi-fleet.py` |
 | ARBITER routing optimizer — compute follows memory: GPU + CPU verify their own resident shares concurrently, zero weight bytes on PCIe, split solved by bandwidth arbitrage (modeled 5× stock partial offload for 70B) | `scripts/svmi-arbiter.py` |
+| **INT8 mixed quant** — `Q4_K_M` body with `q8_0` attention (~5.6 bpw): the resident half of the model runs on integer MMQ kernels, which is all a card with no usable FP16 has | `llama-quantize model.gguf out.gguf INT8` |
+| CMP card support — build/quant advice per card, HBM2e unlock detection (170HX: 8→64 GiB, 10→40 GiB), and a probe for the dp4a-vs-tensor-core throttle crossover | `scripts/svmi-gpucheck.py`, `scripts/svmi-cmpbench.sh` |
+| Update channel — `main` auto-publishes `main-b<N>-<sha>` releases; this is the client that checks and applies them, with or without a git clone | `scripts/tenselerate-update.sh` |
 
 ```bash
 # 70B Q4_K_M on a 20 GB budget:
@@ -39,6 +42,14 @@ python3 scripts/svmi-plan.py model-70b-q4_k_m.gguf --vram-budget 19
 
 # or target a specific consumer card (sets VRAM, PCIe bandwidth, and queue count):
 python3 scripts/svmi-plan.py model-70b-q4_k_m.gguf --gpu 3060     # also: 2080ti, 2080, 1660ti
+
+# NVIDIA CMP mining cards: check what the card is really doing, then plan it
+python3 scripts/svmi-gpucheck.py                                  # flags a fused-down 170HX
+llama-quantize model-f16.gguf model-int8.gguf INT8                # q8_0 attention, Q4_K_M body
+python3 scripts/svmi-auto.py model-int8.gguf --gpu cmp170hx-64    # unlocked 8 GiB card = 64 GiB
+
+# stay current with this fork
+scripts/tenselerate-update.sh --check                             # exit 10 = newer release
 ```
 
 Tuned for small-VRAM consumer GPUs (GTX 1660 Ti, RTX 2080 / 2080 Ti, RTX 3060): the
@@ -373,6 +384,14 @@ The Hugging Face platform provides a variety of online tools for converting, qua
 - Use the [Inference Endpoints](https://ui.endpoints.huggingface.co/) to directly host `llama.cpp` in the cloud (more info: https://github.com/ggml-org/llama.cpp/discussions/9669)
 
 To learn more about model quantization, [read this documentation](tools/quantize/README.md)
+
+This fork adds `INT8` (aliases `Q4_K_M_INT8`, `Q4KM_INT8`), a mixed quant that keeps
+`Q4_K_M`'s mixture but stores every attention tensor as `q8_0` - ~18% of the weights,
+so the file is ~15% larger at about 5.6 bpw. It exists for GPUs whose FP16 path is
+unusable (the NVIDIA CMP mining cards), where the integer MMQ kernels are the only fast
+path, and it lines up with the SVMI split: attention stays resident, the `Q4_K_M` body
+is what streams. Also in this tree: `Q2_0` (2.25 bpw) and `Q1_0` (1.125 bpw). See
+[docs/svmi.md](docs/svmi.md#mixed-int8q4_k_m-weights-int8).
 
 ## [`llama-cli`](tools/cli)
 

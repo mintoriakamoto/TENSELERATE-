@@ -82,6 +82,14 @@ the transport is scheduled differently.
   ratio.
 - `scripts/svmi-bench.sh` — three-way llama-bench comparison: baseline vs pinned vs
   streamed, same settings, prints a summary table.
+- `scripts/svmi-cmpbench.sh` — CMP throttle probe. The CUDA backend has two INT8
+  matmul paths and the mining-card throttle only hits one: batch <= 8 goes through
+  `mul_mat_vec_q` (`__dp4a`, throttled ~16x), anything wider goes through MMQ, which
+  on CC >= 7.5 is `mma.sync` s8 tensor-core IMMA. This sweeps `llama-batched-bench
+  -npl` and prints per-sequence decode throughput so the crossover shows up, with an
+  optional second sweep against a `-DGGML_CUDA_DISABLE_DP4A=ON` build. If the
+  crossover is real, the lever for these cards is concurrency and speculative
+  decoding (batch-1 decode becomes batched verification), not kernel flags.
 - `scripts/svmi-verify.sh` — correctness gate: greedy-decodes the same prompt with and
   without streaming and diffs the tokens (byte-identical expected), with an optional
   `--ppl-file` perplexity equality check. This is the executable form of the
@@ -401,6 +409,88 @@ MMQ; Hopper cards can opt into a wgmma Q1_0 prefill kernel (compile with
 `GGML_USE_HOPPER_Q1`, set `GGML_HOPPER_Q1=1`). Rule of thumb: Q2_0 is the sane
 floor for agent-quality output; Q1_0 is draft-model / experiment territory —
 `svmi-auto.py` prints both estimates whenever a model does not fit.
+
+## Mixed INT8/Q4_K_M weights: `INT8`
+
+`llama-quantize model.gguf out.gguf INT8` (aliases `Q4_K_M_INT8`, `Q4KM_INT8`). Same
+mixture as `Q4_K_M` - Q4_K body, Q6_K on the `ffn_down` layers `use_more_bits`
+picks, Q6_K output head - except every attention tensor (`attn_q/k/v/qkv/kv_b/output`)
+is `q8_0`. That is ~18% of the weights, so the file is ~15% larger than `Q4_K_M`
+(about 5.6 bpw), and it buys two things:
+
+- **quality**: attention is the part of a layer that `Q4_K_M` hurts most, and it
+  is small enough that INT8 there costs less than a full step up in the body.
+- **speed on cards with no usable FP16**: `q8_0` runs the integer MMQ/dp4a path,
+  which is all the CMP mining cards (90HX, 170HX, 100-210) have. Pair it with
+  `-DGGML_CUDA_DISABLE_DP4A=ON` on Ampere CMP cards and `-DGGML_CUDA_FORCE_MMQ=ON`
+  on the Volta CMP.
+
+It also lines up with the SVMI split: the planner keeps attention resident and
+streams the FFN, so the INT8 half is the half that never crosses PCIe, and the
+streamed half stays at Q4_K_M's byte count.
+
+### CMP 170HX with unlocked HBM2e
+
+The 170HX is A100 silicon (GA100, 70 SM, ~1.5 TB/s HBM2e) fused down to 8 or
+10 GiB. `cmpunlocker` restores the memory geometry - 8 GiB -> 64 GiB, 10 GiB ->
+40 GiB - plus SM throughput, so the card stops being a streaming problem and
+just holds the model: a 70B at `INT8` is ~46 GiB and runs RESIDENT on the
+64 GiB config. Presets for both, and for the factory sizes:
+
+```sh
+python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx-64   # unlocked 8 GiB card
+python3 scripts/svmi-auto.py --profile 70b --gpu cmp170hx-40   # unlocked 10 GiB card
+```
+
+Two caveats the planner prints and you should not forget:
+
+- the unlock is **volatile** - a daemon rewrites it every second, and a driver
+  reload drops the card back to 8/10 GiB. `svmi-gpucheck.py` flags a 170HX still
+  reporting the factory size, so run it before trusting a plan.
+- the link stays narrow: gen1 x4 (~1 GB/s) stock, gen2 after the unlock; the
+  capacitor mod (12 of 16 lanes ship without AC coupling caps) restores gen1 x16
+  (~4 GB/s). That is the one-time model load, not per-token traffic - which is
+  exactly why RESIDENT beats streaming on this card.
+
+The CMP 90HX unlock is compute-only: VRAM stays 10 GiB and the link is
+untouched, so it wants the same `INT8` build advice but none of the
+capacity presets.
+
+### End-to-end: 70B on an unlocked 170HX
+
+```bash
+# 1. what is the card actually reporting right now? (run after every driver reload)
+nvidia-smi --query-gpu=name,memory.total,pcie.link.gen.current,pcie.link.width.current,\
+pcie.link.gen.max,pcie.link.width.max --format=csv,noheader > gpus.csv
+python3 scripts/svmi-gpucheck.py --from-file gpus.csv
+#    -> flags a 170HX still reporting 8/10 GiB, and names the preset to plan with
+
+# 2. build for the card: integer kernels only, dp4a emulated
+cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_DISABLE_DP4A=ON -DGGML_CUDA_FORCE_MMQ=ON
+cmake --build build -j
+
+# 3. quantize: Q4_K_M body, q8_0 attention
+./build/bin/llama-quantize model-f16.gguf model-int8.gguf INT8
+#    richer variant (a few % larger, helps the tensors quantization hurts most):
+./build/bin/llama-quantize --output-tensor-type q8_0 --token-embedding-type q6_K \
+    model-f16.gguf model-int8-max.gguf INT8
+#    calibrated variant:
+./build/bin/llama-imatrix -m model-f16.gguf -f calib.txt -o imatrix.gguf
+./build/bin/llama-quantize --imatrix imatrix.gguf \
+    model-f16.gguf model-int8-imat.gguf INT8
+
+# 4. plan and run - 46 GiB of weights is resident on the 64 GiB config
+python3 scripts/svmi-auto.py model-int8.gguf --gpu cmp170hx-64 --ctx 32768
+./build/bin/llama-cli -m model-int8.gguf -ngl 999 \
+    -fa on -ctk q8_0 -ctv q8_0 -c 32768
+
+# 5. compare the variants before committing to one
+./build/bin/llama-perplexity -m model-int8.gguf -f wiki.test.raw -ngl 999
+```
+
+Loading is the slow part, not decoding: 46 GiB over a gen1 x4 link is ~13 h, ~6.5 h
+at gen2, ~3.3 h with the capacitor mod. Pay it once and keep the process alive -
+`llama-server` rather than repeated `llama-cli` invocations.
 
 ## K-cache mean-centering (`--kv-mean-center`)
 

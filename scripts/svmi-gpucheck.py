@@ -27,6 +27,11 @@ still advertises:
   CMP 30HX/40HX/50HX/90HX/170HX (Ampere) throttle dp4a dispatch ~16x
     -> build with -DGGML_CUDA_DISABLE_DP4A=ON (dp2a emulation, ~2x).
 
+  CMP 170HX (GA100, A100 silicon) also ships with its HBM2e geometry fused down
+    to 8 or 10 GiB. cmpunlocker restores it (8 -> 64 GiB, 10 -> 40 GiB) along
+    with SM throughput; the unlock is volatile and reverts on driver reload.
+    This tool flags a 170HX still reporting the factory size.
+
 Usage:
   python3 scripts/svmi-gpucheck.py
   python3 scripts/svmi-gpucheck.py --from-file nvidia-smi-capture.csv
@@ -67,6 +72,15 @@ class Card:
     @property
     def is_volta_cmp(self) -> bool:
         return self.is_cmp and "100-210" in self.name
+
+    @property
+    def is_170hx(self) -> bool:
+        return self.is_cmp and "170hx" in self.name.lower()
+
+    @property
+    def hbm_locked(self) -> bool:
+        """170HX still reporting its factory HBM2e geometry (8 or 10 GiB)"""
+        return self.is_170hx and self.vram_gib < 12.0
 
     @property
     def link_is_crippled(self) -> bool:
@@ -110,6 +124,18 @@ def advise(c: Card) -> tuple[list[str], list[str]]:
         warn.append("Ampere CMP card: dp4a dispatch is throttled ~16x, which is exactly "
                     "what quantized decode uses.")
         flags.append("-DGGML_CUDA_DISABLE_DP4A=ON  # dp2a emulation, ~2x (llama.cpp#24616)")
+        flags.append("quantize INT8                # q8_0 attention (resident, INT8/MMQ) "
+                     "over a Q4_K_M body (streamed)")
+
+    if c.hbm_locked:
+        warn.append(f"CMP 170HX reporting {c.vram_gib:.0f} GiB — that is the factory-fused HBM2e "
+                    "geometry, not the silicon. cmpunlocker restores 8 GiB -> 64 GiB and "
+                    "10 GiB -> 40 GiB; the unlock is volatile and re-applied by a daemon.")
+        flags.append("plan the unlocked card: svmi-auto.py --gpu "
+                     + ("cmp170hx-64" if c.vram_gib < 9.0 else "cmp170hx-40"))
+    elif c.is_170hx:
+        warn.append(f"CMP 170HX reporting {c.vram_gib:.0f} GiB — HBM2e geometry is unlocked. "
+                    "Re-check after any driver reload: it reverts to 8/10 GiB.")
 
     if c.link_is_crippled:
         warn.append(f"PCIe link negotiated at gen{c.gen_cur} x{c.width_cur} "
@@ -152,11 +178,13 @@ def self_test() -> int:
         "NVIDIA CMP 90HX, 10240 MiB, 1, 4, 1, 4",
         "NVIDIA GeForce RTX 3060, 12288 MiB, 3, 16, 3, 16",
         "NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 1, 16, 3, 16",
+        "NVIDIA CMP 170HX, 8192 MiB, 1, 4, 1, 16",
+        "NVIDIA CMP 170HX, 65536 MiB, 2, 4, 2, 16",
     ])
     cards = parse_csv(fixture)
-    assert len(cards) == 4, cards
+    assert len(cards) == 6, cards
 
-    volta, ampere_cmp, healthy, downtrained = cards
+    volta, ampere_cmp, healthy, downtrained, locked_170, unlocked_170 = cards
     # 1. parsing + link math
     assert abs(volta.vram_gib - 16.0) < 0.01
     assert abs(volta.link_gbs - 0.25) < 1e-6, volta.link_gbs          # gen1 x1
@@ -180,9 +208,17 @@ def self_test() -> int:
     assert any("below the card's max" in w for w in dw), dw
     # 4. V100-vBIOS claim is stated honestly (does NOT fix the link)
     assert any("does NOT restore PCIe width" in w for w in vw), vw
-    print("self-test OK: 4 fixtures parsed; link math gen1x1=0.25 / gen3x16=15.76 GB/s;")
+    # 5. 170HX HBM2e geometry: flagged while fused down, not flagged once unlocked
+    assert locked_170.hbm_locked and not unlocked_170.hbm_locked
+    lw, lf = advise(locked_170)
+    uw, _ = advise(unlocked_170)
+    assert any("factory-fused HBM2e" in w for w in lw), lw
+    assert any("cmp170hx-64" in f for f in lf), lf
+    assert any("reverts to 8/10 GiB" in w for w in uw), uw
+    print("self-test OK: 6 fixtures parsed; link math gen1x1=0.25 / gen3x16=15.76 GB/s;")
     print("              CMP-Volta -> FP16-trap + MMQ advice, CMP-Ampere -> dp4a advice,")
-    print("              healthy card -> no advice, downtrained link -> flagged.")
+    print("              healthy card -> no advice, downtrained link -> flagged,")
+    print("              170HX @ 8 GiB -> unlock advice, @ 64 GiB -> revert warning.")
     return 0
 
 
