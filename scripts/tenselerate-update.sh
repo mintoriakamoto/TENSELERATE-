@@ -12,6 +12,10 @@
 #   scripts/tenselerate-update.sh --binary    # download the release build instead
 #   scripts/tenselerate-update.sh --list      # show the release's assets
 #
+# Works without a git clone: downloaders can curl this script on its own, and
+# the local version is then read from `llama-cli --version` ($LLAMA_BIN,
+# build/bin, an unpacked dist/, or PATH).
+#
 # Override the upstream with TENSELERATE_REPO=owner/name (defaults to this
 # clone's origin, then to the fork).
 
@@ -64,9 +68,24 @@ tag_build_number() { printf '%s\n' "$1" | sed -n 's/^main-b\([0-9]\+\)-.*/\1/p';
 
 local_sha() { git -C "$ROOT" rev-parse --short=7 HEAD 2>/dev/null || echo unknown; }
 
-local_build_number() {
-    # the build number CI stamps is the commit count on main
-    git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0
+# build number of the source tree; CI stamps the commit count on main
+source_build_number() { git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo ""; }
+
+# the binary actually installed here - a release download has no git clone, so
+# this is the only version it can report. `--version` prints "version: N (sha)".
+find_binary() {
+    for cand in "${LLAMA_BIN:-}" "$BUILD_DIR/bin/llama-cli" "$ROOT/build/bin/llama-cli" \
+                "$DEST"/*/llama-cli "$ROOT"/llama-cli; do
+        [ -n "$cand" ] && [ -x "$cand" ] && { printf '%s\n' "$cand"; return 0; }
+    done
+    command -v llama-cli 2>/dev/null || true
+}
+
+# "<build> <sha>" of the installed binary, empty when there is none
+binary_version() {
+    bin=$(find_binary)
+    [ -n "$bin" ] || return 0
+    "$bin" --version 2>&1 | sed -n 's/^version: \([0-9]\+\) (\([^)]*\)).*/\1 \2/p' | head -n 1
 }
 
 # how this machine appears in release asset names: "<os> <arch>"
@@ -94,14 +113,28 @@ cmd_check() {
     [ -n "$tag" ] || die "no published release found for $slug"
 
     printf 'repo    : %s\n' "$slug"
-    printf 'local   : %s (build %s)\n' "$(local_sha)" "$(local_build_number)"
+
+    src_n=$(source_build_number)
+    read -r bin_n bin_sha <<<"$(binary_version)"
+    if [ -n "${bin_n:-}" ]; then
+        printf 'running : b%s (%s)\n' "$bin_n" "${bin_sha%%-*}"
+    fi
+    if [ -n "$src_n" ]; then
+        printf 'source  : b%s (%s)\n' "$src_n" "$(local_sha)"
+    fi
+    [ -n "${bin_n:-}$src_n" ] || printf 'running : unknown - no binary found and no git clone here\n'
     printf 'latest  : %s  published %s\n' "$tag" "${date:-?}"
 
+    # what you are actually running wins; fall back to the checkout
+    local_n=${bin_n:-$src_n}
     remote_n=$(tag_build_number "$tag")
-    local_n=$(local_build_number)
-    if [ -z "$remote_n" ]; then
-        printf 'status  : cannot compare - tag is not main-b<N>-<sha>; check manually\n'
+    if [ -z "$remote_n" ] || [ -z "$local_n" ]; then
+        printf 'status  : cannot compare automatically - check the release page\n'
         return 0
+    fi
+    if [ -n "${bin_n:-}" ] && [ -n "$src_n" ] && [ "$src_n" -gt "$bin_n" ]; then
+        printf 'note    : the checkout is %d commits ahead of the installed binary - rebuild\n' \
+            "$((src_n - bin_n))"
     fi
     if [ "$remote_n" -gt "$local_n" ]; then
         printf 'status  : UPDATE AVAILABLE (%d commits ahead)\n' "$((remote_n - local_n))"
@@ -176,7 +209,18 @@ cmd_self_test() {
     [ "$(tag_build_number main-b1234-abc1234)" = "1234" ] || die "tag parse failed"
     [ -z "$(tag_build_number v1.2.3)" ] || die "non-matching tag should not parse"
     out=$(TENSELERATE_REPO=owner/name repo_slug); [ "$out" = "owner/name" ] || die "env override failed"
-    printf 'self-test OK: tag parsing, non-matching tag, repo override\n'
+
+    # a release download has no clone: the version must come off the binary
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    printf '#!/bin/sh\necho "version: 42 (cafe123)" >&2\n' > "$tmp/llama-cli"
+    chmod +x "$tmp/llama-cli"
+    read -r n sha <<<"$(LLAMA_BIN=$tmp/llama-cli binary_version)"
+    [ "$n" = "42" ] && [ "$sha" = "cafe123" ] || die "binary version parse failed: '$n' '$sha'"
+    empty=$(ROOT=$tmp/empty BUILD_DIR=$tmp/empty DEST=$tmp/empty PATH=/nonexistent binary_version)
+    [ -z "$empty" ] || die "no binary anywhere should report nothing, got '$empty'"
+
+    printf 'self-test OK: tag parsing, non-matching tag, repo override,\n'
+    printf '              binary --version parsing, missing-binary fallback\n'
 }
 
 case "${1:---check}" in

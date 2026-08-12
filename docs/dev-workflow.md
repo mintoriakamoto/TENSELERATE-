@@ -69,6 +69,22 @@ exits 10 when behind, so it drops into cron or a systemd timer:
     scripts/tenselerate-update.sh --source
 ```
 
+**Users who only downloaded a binary** have no clone, so bootstrap the script
+itself and let it read the version off the binary:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/mintoriakamoto/TENSELERATE-/main/scripts/tenselerate-update.sh
+chmod +x tenselerate-update.sh
+./tenselerate-update.sh --check      # reads `llama-cli --version`
+./tenselerate-update.sh --binary     # replaces it with the current release
+```
+
+It looks for the binary at `$LLAMA_BIN`, `build/bin/llama-cli`, an unpacked
+`dist/*/llama-cli`, or `llama-cli` on `PATH`, and reports `running: b<N> (sha)`
+from `--version`. In a clone it prints `running` *and* `source`, and says so when
+the checkout is ahead of the binary you are actually executing - that gap is
+otherwise invisible and looks like "the update did nothing".
+
 `--source` refuses to run on a dirty tree, fast-forwards only (never a merge
 commit), and reuses the existing `build/CMakeCache.txt` so a CMP box keeps its
 `-DGGML_CUDA_DISABLE_DP4A=ON -DGGML_CUDA_FORCE_MMQ=ON` configuration across
