@@ -39,10 +39,10 @@ MODEL_PROFILES = {
 # Q2_0 has CPU x86 AVX-VNNI + ARM NEON-DP dot kernels; Q1_0 adds repack paths
 # and (Hopper, opt-in GGML_USE_HOPPER_Q1) a wgmma prefill kernel.
 LOWBIT_BPW = {"Q2_0": 2.25, "Q1_0": 1.125}
-# mixed INT8/Q4_K_M: Q4_K_M body, q8_0 attention (tools/quantize Q4_K_M_INT8).
+# mixed INT8/Q4_K_M: Q4_K_M body, q8_0 attention (tools/quantize INT8).
 # Attention is ~18% of the weights, so the mix costs ~15% size over Q4_K_M and
 # keeps the hot, resident half of the model on the integer kernels.
-MIXED_BPW = {"Q4_K_M_INT8": 5.6}
+MIXED_BPW = {"INT8": 5.6}
 GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "1660ti": (6, 12.0), "2060": (6, 12.0), "2070": (8, 12.0), "2080": (8, 12.0),
     "2080ti": (11, 12.0),
@@ -65,7 +65,7 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
 }
 # firmware quirks that change how llama.cpp must be BUILT for a card
 DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
-INT8_QUIRK = "no usable FP16 path - quantize Q4_K_M_INT8 so attention runs on q8_0/MMQ"
+INT8_QUIRK = "no usable FP16 path - quantize INT8 so attention runs on q8_0/MMQ"
 UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every second, and a "
                 "driver reload drops the card back to its factory 8/10 GB",
                 "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "

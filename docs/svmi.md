@@ -402,9 +402,9 @@ MMQ; Hopper cards can opt into a wgmma Q1_0 prefill kernel (compile with
 floor for agent-quality output; Q1_0 is draft-model / experiment territory —
 `svmi-auto.py` prints both estimates whenever a model does not fit.
 
-## Mixed INT8/Q4_K_M weights: `Q4_K_M_INT8`
+## Mixed INT8/Q4_K_M weights: `INT8`
 
-`llama-quantize model.gguf out.gguf Q4_K_M_INT8` (alias `Q4KM_INT8`). Same
+`llama-quantize model.gguf out.gguf INT8` (aliases `Q4_K_M_INT8`, `Q4KM_INT8`). Same
 mixture as `Q4_K_M` - Q4_K body, Q6_K on the `ffn_down` layers `use_more_bits`
 picks, Q6_K output head - except every attention tensor (`attn_q/k/v/qkv/kv_b/output`)
 is `q8_0`. That is ~18% of the weights, so the file is ~15% larger than `Q4_K_M`
@@ -426,7 +426,7 @@ streamed half stays at Q4_K_M's byte count.
 The 170HX is A100 silicon (GA100, 70 SM, ~1.5 TB/s HBM2e) fused down to 8 or
 10 GiB. `cmpunlocker` restores the memory geometry - 8 GiB -> 64 GiB, 10 GiB ->
 40 GiB - plus SM throughput, so the card stops being a streaming problem and
-just holds the model: a 70B at `Q4_K_M_INT8` is ~46 GiB and runs RESIDENT on the
+just holds the model: a 70B at `INT8` is ~46 GiB and runs RESIDENT on the
 64 GiB config. Presets for both, and for the factory sizes:
 
 ```sh
@@ -445,7 +445,7 @@ Two caveats the planner prints and you should not forget:
   exactly why RESIDENT beats streaming on this card.
 
 The CMP 90HX unlock is compute-only: VRAM stays 10 GiB and the link is
-untouched, so it wants the same `Q4_K_M_INT8` build advice but none of the
+untouched, so it wants the same `INT8` build advice but none of the
 capacity presets.
 
 ### End-to-end: 70B on an unlocked 170HX
@@ -462,22 +462,22 @@ cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_DISABLE_DP4A=ON -DGGML_CUDA_FORCE_MMQ=
 cmake --build build -j
 
 # 3. quantize: Q4_K_M body, q8_0 attention
-./build/bin/llama-quantize model-f16.gguf model-q4_k_m_int8.gguf Q4_K_M_INT8
+./build/bin/llama-quantize model-f16.gguf model-int8.gguf INT8
 #    richer variant (a few % larger, helps the tensors quantization hurts most):
 ./build/bin/llama-quantize --output-tensor-type q8_0 --token-embedding-type q6_K \
-    model-f16.gguf model-q4_k_m_int8-max.gguf Q4_K_M_INT8
+    model-f16.gguf model-int8-max.gguf INT8
 #    calibrated variant:
 ./build/bin/llama-imatrix -m model-f16.gguf -f calib.txt -o imatrix.gguf
 ./build/bin/llama-quantize --imatrix imatrix.gguf \
-    model-f16.gguf model-q4_k_m_int8-imat.gguf Q4_K_M_INT8
+    model-f16.gguf model-int8-imat.gguf INT8
 
 # 4. plan and run - 46 GiB of weights is resident on the 64 GiB config
-python3 scripts/svmi-auto.py model-q4_k_m_int8.gguf --gpu cmp170hx-64 --ctx 32768
-./build/bin/llama-cli -m model-q4_k_m_int8.gguf -ngl 999 \
+python3 scripts/svmi-auto.py model-int8.gguf --gpu cmp170hx-64 --ctx 32768
+./build/bin/llama-cli -m model-int8.gguf -ngl 999 \
     -fa on -ctk q8_0 -ctv q8_0 -c 32768
 
 # 5. compare the variants before committing to one
-./build/bin/llama-perplexity -m model-q4_k_m_int8.gguf -f wiki.test.raw -ngl 999
+./build/bin/llama-perplexity -m model-int8.gguf -f wiki.test.raw -ngl 999
 ```
 
 Loading is the slow part, not decoding: 46 GiB over a gen1 x4 link is ~13 h, ~6.5 h
