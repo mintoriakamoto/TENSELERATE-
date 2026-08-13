@@ -1,0 +1,77 @@
+name: CI (CMP INT8)
+# The all-integer CUDA configuration the CMP mining cards need: every matmul on
+# MMQ, no cuBLAS FP16 GEMM, and the prmt+dp2a emulation of the throttled dp4a.
+# Nothing else in the fleet compiles GGML_CUDA_FORCE_MMQ + GGML_CUDA_DISABLE_DP4A
+# together, and both are compile-time definitions, so without this job the
+# configuration our own docs tell users to build is never built by CI.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths: [
+      '.github/workflows/build-cmp-int8.yml',
+      'CMakePresets.json',
+      'ggml/src/ggml-cuda/**',
+      'ggml/CMakeLists.txt'
+    ]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: [
+      '.github/workflows/build-cmp-int8.yml',
+      'CMakePresets.json',
+      'ggml/src/ggml-cuda/**',
+      'ggml/CMakeLists.txt'
+    ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  cmp-int8:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.6.2-devel-ubuntu24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [cmp170hx-int8, cmp90hx-int8, cmp100-210-int8]
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt update
+          apt install -y cmake build-essential ninja-build libgomp1 git libssl-dev
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: cmp-int8-${{ matrix.preset }}
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build ${{ matrix.preset }}
+        run: |
+          cmake --preset ${{ matrix.preset }} \
+            -DLLAMA_FATAL_WARNINGS=ON \
+            -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+            -DGGML_CUDA_CUB_3DOT2=ON
+          cmake --build build-${{ matrix.preset }} --target llama-cli llama-quantize llama-batched-bench
+
+      - name: Confirm the INT8 definitions actually reached the compiler
+        run: |
+          set -e
+          cache=build-${{ matrix.preset }}/CMakeCache.txt
+          grep -q '^GGML_CUDA_FORCE_MMQ:BOOL=ON' "$cache" || { echo "FORCE_MMQ not set"; exit 1; }
+          grep -q '^GGML_CUDA_F16:BOOL=OFF'      "$cache" || { echo "CUDA_F16 not off"; exit 1; }
+          if [ "${{ matrix.preset }}" != "cmp100-210-int8" ]; then
+              grep -q '^GGML_CUDA_DISABLE_DP4A:BOOL=ON' "$cache" || { echo "DISABLE_DP4A not set"; exit 1; }
+          fi
+          echo "ok: $(grep -E '^GGML_CUDA(_FORCE_MMQ|_F16|_DISABLE_DP4A):' "$cache" | tr '\n' ' ')"

@@ -42,7 +42,9 @@ LOWBIT_BPW = {"Q2_0": 2.25, "Q1_0": 1.125}
 # mixed INT8/Q4_K_M: Q4_K_M body, q8_0 attention (tools/quantize INT8).
 # Attention is ~18% of the weights, so the mix costs ~15% size over Q4_K_M and
 # keeps the hot, resident half of the model on the integer kernels.
-MIXED_BPW = {"INT8": 5.6}
+# Q8_0 is full INT8: every 2D tensor, embeddings and head included. Biggest of the
+# three, but nothing in the decode path leaves the integer kernels.
+MIXED_BPW = {"INT8": 5.6, "Q8_0": 8.5}
 GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "1660ti": (6, 12.0), "2060": (6, 12.0), "2070": (8, 12.0), "2080": (8, 12.0),
     "2080ti": (11, 12.0),
@@ -177,14 +179,21 @@ def main() -> int:
             est = n_params * bpw / 8
             fits = "resident" if est + fixed <= budget else "does not fit resident"
             out = f"model-{q.lower()}.gguf"
-            print(f"quant   : {q} ({bpw} bpw) ~{est / GiB:.1f} GiB - {fits}")
+            note = "mixed: q8_0 attention" if q == "INT8" else "full INT8: every 2D tensor"
+            print(f"quant   : {q} ({bpw} bpw, {note}) ~{est / GiB:.1f} GiB - {fits}")
             print(f"          llama-quantize {model_arg} {out} {q}")
-            print("          richer head/embeddings (a few % more, the tensors quantization "
-                  "hurts most):")
-            print("          llama-quantize --output-tensor-type q8_0 --token-embedding-type q6_K \\")
-            print(f"              {model_arg} {out.replace('.gguf', '-max.gguf')} {q}")
-            print("          calibrated: llama-imatrix -m f16.gguf -f calib.txt -o imatrix.gguf, "
-                  "then add --imatrix imatrix.gguf")
+            if q == "INT8":
+                # Q8_0 already stores the head at q8_0, so these overrides only
+                # make sense for the mixed quant
+                print("          richer head/embeddings (a few % more, the tensors "
+                      "quantization hurts most):")
+                print("          llama-quantize --output-tensor-type q8_0 "
+                      "--token-embedding-type q6_K \\")
+                print(f"              {model_arg} {out.replace('.gguf', '-max.gguf')} {q}")
+                print("          calibrated: llama-imatrix -m f16.gguf -f calib.txt "
+                      "-o imatrix.gguf, then add --imatrix imatrix.gguf")
+        print("build   : cmake --preset cmp170hx-int8 && cmake --build build-cmp170hx-int8 -j")
+        print("          (all matmuls on MMQ, no cuBLAS FP16; also cmp90hx-int8, cmp100-210-int8)")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")
