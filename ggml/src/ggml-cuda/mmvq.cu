@@ -2,6 +2,7 @@
 #include "quantize.cuh"
 #include "unary.cuh"
 #include "vecdotq.cuh"
+#include "mmq.cuh"
 
 #include <cstdint>
 
@@ -279,8 +280,19 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
     return MMVQ_MAX_BATCH_SIZE;
 }
 
+bool ggml_cuda_no_mmvq() {
+    // MMVQ is built on dp4a, which the NVIDIA CMP mining firmware dispatches ~16x
+    // slower than regular silicon; the MMQ path uses tensor-core IMMA instead and
+    // is not affected. Opting out sends small batches to MMQ as well.
+    static const bool no_mmvq = getenv("GGML_CUDA_NO_MMVQ") != nullptr;
+    return no_mmvq;
+}
+
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     if (!ggml_is_quantized(type)) {
+        return false;
+    }
+    if (ggml_cuda_no_mmvq() && ggml_cuda_should_use_mmq(type, cc, ne11, /*n_experts =*/ 0)) {
         return false;
     }
     if (GGML_CUDA_CC_IS_CDNA(cc)) {

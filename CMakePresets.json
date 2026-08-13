@@ -32,6 +32,21 @@
     { "name": "vulkan",   "hidden": true, "cacheVariables": { "GGML_VULKAN":      "ON" } },
 
     {
+        "description": "all-integer CUDA build: every matmul on MMQ, no cuBLAS FP16 GEMM anywhere",
+        "name": "cuda-int8", "hidden": true,
+        "cacheVariables": {
+            "GGML_CUDA":           "ON",
+            "GGML_CUDA_FORCE_MMQ": "ON",
+            "GGML_NATIVE":         "OFF"
+        }
+    },
+    {
+        "description": "Ampere CMP mining cards dispatch dp4a ~16x slow; emulate it with prmt+dp2a",
+        "name": "cmp-dp4a", "hidden": true,
+        "cacheVariables": { "GGML_CUDA_DISABLE_DP4A": "ON" }
+    },
+
+    {
         "name": "x64-windows-llvm", "hidden": true,
         "cacheVariables": {
             "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/x64-windows-llvm.cmake"
@@ -90,6 +105,22 @@
     { "name": "x64-windows-sycl-release-f16", "inherits": [ "sycl-base", "release", "sycl_f16" ] },
 
     { "name": "x64-windows-vulkan-debug", "inherits": [ "base", "vulkan", "debug" ] },
-    { "name": "x64-windows-vulkan-release", "inherits": [ "base", "vulkan", "release" ] }
+    { "name": "x64-windows-vulkan-release", "inherits": [ "base", "vulkan", "release" ] },
+
+    {
+        "description": "CMP 170HX (GA100, sm_80): throttled dp4a, no usable FP16. Pair with an INT8 GGUF.",
+        "name": "cmp170hx-int8", "inherits": [ "base", "release", "cuda-int8", "cmp-dp4a" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "80-real" }
+    },
+    {
+        "description": "CMP 90HX (GA102, sm_86): same throttle, 10 GB, compute-only unlock.",
+        "name": "cmp90hx-int8", "inherits": [ "base", "release", "cuda-int8", "cmp-dp4a" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "86-real" }
+    },
+    {
+        "description": "CMP 100-210 (GV100, sm_70): FP16 is slower than FP32, but dp4a is not throttled.",
+        "name": "cmp100-210-int8", "inherits": [ "base", "release", "cuda-int8" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "70-real" }
+    }
   ]
 }

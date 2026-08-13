@@ -33,6 +33,7 @@ What's in this branch (all opt-in, off by default):
 | ARBITER routing optimizer — compute follows memory: GPU + CPU verify their own resident shares concurrently, zero weight bytes on PCIe, split solved by bandwidth arbitrage (modeled 5× stock partial offload for 70B) | `scripts/svmi-arbiter.py` |
 | **INT8 mixed quant** — `Q4_K_M` body with `q8_0` attention (~5.6 bpw): the resident half of the model runs on integer MMQ kernels, which is all a card with no usable FP16 has | `llama-quantize model.gguf out.gguf INT8` |
 | CMP card support — build/quant advice per card, HBM2e unlock detection (170HX: 8→64 GiB, 10→40 GiB), and a probe for the dp4a-vs-tensor-core throttle crossover | `scripts/svmi-gpucheck.py`, `scripts/svmi-cmpbench.sh` |
+| **All-integer CUDA build** — every matmul on MMQ, no cuBLAS FP16 GEMM, dp4a emulated via prmt+dp2a; CI-built for sm_70/80/86 | `cmake --preset cmp170hx-int8` (also `cmp90hx-int8`, `cmp100-210-int8`) |
 | Update channel — `main` auto-publishes `main-b<N>-<sha>` releases; this is the client that checks and applies them, with or without a git clone | `scripts/tenselerate-update.sh` |
 
 ```bash

@@ -65,6 +65,7 @@ SVMI replaces both:
 | `GGML_SCHED_STREAM_QUEUES=N` | upload queues (default 2, one per DMA copy engine) |
 | `GGML_SCHED_STREAM_PREFETCH=N` | how many scheduler splits ahead to enqueue uploads (default 4) |
 | `GGML_SCHED_PREFETCH_EXPERTS=1` | accepted as a compatibility alias for `GGML_SCHED_STREAM_WEIGHTS` |
+| `GGML_CUDA_NO_MMVQ=1` | skip the dp4a vector kernels so small batches go to MMQ too (CMP cards; see below) |
 
 All of it is opt-in and token-identical: the same kernels run on the same data, only
 the transport is scheduled differently.
@@ -456,6 +457,54 @@ The CMP 90HX unlock is compute-only: VRAM stays 10 GiB and the link is
 untouched, so it wants the same `INT8` build advice but none of the
 capacity presets.
 
+### Full INT8: the build matters as much as the quant
+
+The quant decides what the weights are; the **build** decides which kernels touch
+them. Three CMake presets pin the all-integer configuration:
+
+```sh
+cmake --preset cmp170hx-int8      # GA100 sm_80 - FORCE_MMQ + DISABLE_DP4A + no CUDA F16
+cmake --preset cmp90hx-int8       # GA102 sm_86 - same
+cmake --preset cmp100-210-int8    # GV100 sm_70 - FORCE_MMQ, dp4a is not throttled here
+cmake --build build-cmp170hx-int8 -j
+```
+
+`GGML_CUDA_FORCE_MMQ` keeps every matmul on the quantized integer kernels instead
+of dequantizing to a cuBLAS FP16 GEMM. It is a compile-time definition - you
+cannot switch it at runtime, so a stock binary silently gives up the point of
+these cards. (There is no `GGML_CUDA_F16` knob in this tree; `FORCE_MMQ` on and
+`FORCE_CUBLAS` off is what keeps FP16 GEMM out of the matmul path.) CI builds all three presets (`.github/workflows/build-cmp-int8.yml`)
+and asserts the definitions actually reached the compiler.
+
+**`GGML_CUDA_FORCE_MMQ` alone does not get decode onto MMQ.** The dispatcher in
+`ggml_cuda_mul_mat` checks `ggml_cuda_should_use_mmvq()` *before* it ever asks
+about MMQ, and MMVQ wins for `ne11 <= 8` - so batch-1 decode still runs the dp4a
+vector kernels no matter how the build is configured. That is the throttled path
+on a CMP card. `GGML_CUDA_NO_MMVQ=1` makes `should_use_mmvq()` decline whenever
+MMQ can take the tensor, at all three dispatch sites (plain `MUL_MAT`, the fused
+mul_mat+GLU path, and `MUL_MAT_ID`), so small batches land on MMQ as well:
+
+```sh
+GGML_CUDA_NO_MMVQ=1 ./build-cmp170hx-int8/bin/llama-cli -m model-int8.gguf -ngl 999 ...
+```
+
+It is runtime and opt-in, so it can be A/B-ed without rebuilding, and it is a
+pessimisation on a healthy GPU - MMVQ exists because it is faster there. Measure
+it with `scripts/svmi-cmpbench.sh` before adopting it. If a tensor's type has no
+MMQ kernel the flag is ignored for that tensor rather than falling through to
+cuBLAS FP16.
+
+Two weight choices sit on top of that build:
+
+| Quant | bpw | 70B | What is INT8 |
+| --- | --- | --- | --- |
+| `INT8` | ~5.6 | ~46 GiB | attention `q8_0`, `Q4_K_M` body |
+| `Q8_0` | ~8.5 | ~70 GiB | everything: every 2D tensor, embeddings and head |
+
+`Q8_0` is the "full INT8" end of the range - nothing in the decode path is ever a
+k-quant - but a 70B at ~70 GiB exceeds a single unlocked-64 card, so it is a
+two-card model (or a ~48B-class model on one). `INT8` is the point that fits.
+
 ### End-to-end: 70B on an unlocked 170HX
 
 ```bash
@@ -466,8 +515,7 @@ python3 scripts/svmi-gpucheck.py --from-file gpus.csv
 #    -> flags a 170HX still reporting 8/10 GiB, and names the preset to plan with
 
 # 2. build for the card: integer kernels only, dp4a emulated
-cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_DISABLE_DP4A=ON -DGGML_CUDA_FORCE_MMQ=ON
-cmake --build build -j
+cmake --preset cmp170hx-int8 && cmake --build build-cmp170hx-int8 -j
 
 # 3. quantize: Q4_K_M body, q8_0 attention
 ./build/bin/llama-quantize model-f16.gguf model-int8.gguf INT8
@@ -614,7 +662,7 @@ brick a card; keep a dump of the original and a recovery path.)
 ```sh
 cmake -B build -DGGML_CUDA=ON \
     -DGGML_CUDA_FORCE_MMQ=ON      # integer MMQ kernels; never cuBLAS FP16 GEMM
-# GGML_CUDA_F16 stays OFF (default)
+# or: cmake --preset cmp100-210-int8
 ```
 
 Runtime: keep it fully resident and A/B flash-attention, because the FA
