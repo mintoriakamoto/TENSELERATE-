@@ -470,10 +470,10 @@ cmake --build build-cmp170hx-int8 -j
 ```
 
 `GGML_CUDA_FORCE_MMQ` keeps every matmul on the quantized integer kernels instead
-of dequantizing to a cuBLAS FP16 GEMM, and `GGML_CUDA_F16=OFF` keeps the FP16
-compute path out of the build entirely. Both are compile-time definitions - you
-cannot switch them at runtime, so a stock binary silently gives up the point of
-these cards. CI builds all three presets (`.github/workflows/build-cmp-int8.yml`)
+of dequantizing to a cuBLAS FP16 GEMM. It is a compile-time definition - you
+cannot switch it at runtime, so a stock binary silently gives up the point of
+these cards. (There is no `GGML_CUDA_F16` knob in this tree; `FORCE_MMQ` on and
+`FORCE_CUBLAS` off is what keeps FP16 GEMM out of the matmul path.) CI builds all three presets (`.github/workflows/build-cmp-int8.yml`)
 and asserts the definitions actually reached the compiler.
 
 **`GGML_CUDA_FORCE_MMQ` alone does not get decode onto MMQ.** The dispatcher in
@@ -662,7 +662,7 @@ brick a card; keep a dump of the original and a recovery path.)
 ```sh
 cmake -B build -DGGML_CUDA=ON \
     -DGGML_CUDA_FORCE_MMQ=ON      # integer MMQ kernels; never cuBLAS FP16 GEMM
-# GGML_CUDA_F16 stays OFF (default)
+# or: cmake --preset cmp100-210-int8
 ```
 
 Runtime: keep it fully resident and A/B flash-attention, because the FA

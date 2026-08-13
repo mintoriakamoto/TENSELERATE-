@@ -69,9 +69,10 @@ jobs:
         run: |
           set -e
           cache=build-${{ matrix.preset }}/CMakeCache.txt
-          grep -q '^GGML_CUDA_FORCE_MMQ:BOOL=ON' "$cache" || { echo "FORCE_MMQ not set"; exit 1; }
-          grep -q '^GGML_CUDA_F16:BOOL=OFF'      "$cache" || { echo "CUDA_F16 not off"; exit 1; }
+          # the cache entry type depends on how CMake resolved the option, so match any
+          grep -qE '^GGML_CUDA_FORCE_MMQ:[A-Z]+=ON'   "$cache" || { echo "FORCE_MMQ not set"; exit 1; }
+          grep -qE '^GGML_CUDA_FORCE_CUBLAS:[A-Z]+=ON' "$cache" && { echo "FORCE_CUBLAS is on"; exit 1; }
           if [ "${{ matrix.preset }}" != "cmp100-210-int8" ]; then
-              grep -q '^GGML_CUDA_DISABLE_DP4A:BOOL=ON' "$cache" || { echo "DISABLE_DP4A not set"; exit 1; }
+              grep -qE '^GGML_CUDA_DISABLE_DP4A:[A-Z]+=ON' "$cache" || { echo "DISABLE_DP4A not set"; exit 1; }
           fi
-          echo "ok: $(grep -E '^GGML_CUDA(_FORCE_MMQ|_F16|_DISABLE_DP4A):' "$cache" | tr '\n' ' ')"
+          echo "ok: $(grep -E '^GGML_CUDA(_FORCE_MMQ|_FORCE_CUBLAS|_DISABLE_DP4A):' "$cache" | tr '\n' ' ')"

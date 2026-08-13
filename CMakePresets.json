@@ -37,7 +37,6 @@
         "cacheVariables": {
             "GGML_CUDA":           "ON",
             "GGML_CUDA_FORCE_MMQ": "ON",
-            "GGML_CUDA_F16":       "OFF",
             "GGML_NATIVE":         "OFF"
         }
     },

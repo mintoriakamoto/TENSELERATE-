@@ -118,7 +118,7 @@ def advise(c: Card) -> tuple[list[str], list[str]]:
         warn.append("A Tesla V100 vBIOS flash does NOT restore PCIe width or tensor "
                     "cores (the x1 link is a board-level limit); it only nudges clocks.")
         flags.append("-DGGML_CUDA_FORCE_MMQ=ON   # integer kernels, never cuBLAS FP16 GEMM")
-        flags.append("-DGGML_CUDA_F16=OFF        # (default) no FP16 compute path")
+        flags.append("-DGGML_CUDA_FORCE_CUBLAS=OFF # (default) never route back to FP16 GEMM")
         flags.append("run: -fa off is worth A/B-ing — flash-attn kernels lean on FP16")
     elif c.is_cmp:
         warn.append("Ampere CMP card: dp4a dispatch is throttled ~16x, which is exactly "
@@ -126,7 +126,7 @@ def advise(c: Card) -> tuple[list[str], list[str]]:
         flags.append("-DGGML_CUDA_DISABLE_DP4A=ON  # dp2a emulation, ~2x (llama.cpp#24616)")
         flags.append("quantize INT8                # q8_0 attention (resident, INT8/MMQ) "
                      "over a Q4_K_M body (streamed)")
-        flags.append("cmake --preset cmp170hx-int8  # or cmp90hx-int8: FORCE_MMQ, no CUDA F16")
+        flags.append("cmake --preset cmp170hx-int8  # or cmp90hx-int8: FORCE_MMQ + dp2a")
         flags.append("run: GGML_CUDA_NO_MMVQ=1      # batch-1 decode on MMQ too, off the dp4a "
                      "path (A/B with scripts/svmi-cmpbench.sh)")
 
