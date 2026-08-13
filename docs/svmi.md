@@ -65,6 +65,7 @@ SVMI replaces both:
 | `GGML_SCHED_STREAM_QUEUES=N` | upload queues (default 2, one per DMA copy engine) |
 | `GGML_SCHED_STREAM_PREFETCH=N` | how many scheduler splits ahead to enqueue uploads (default 4) |
 | `GGML_SCHED_PREFETCH_EXPERTS=1` | accepted as a compatibility alias for `GGML_SCHED_STREAM_WEIGHTS` |
+| `GGML_CUDA_NO_MMVQ=1` | skip the dp4a vector kernels so small batches go to MMQ too (CMP cards; see below) |
 
 All of it is opt-in and token-identical: the same kernels run on the same data, only
 the transport is scheduled differently.
@@ -474,6 +475,24 @@ compute path out of the build entirely. Both are compile-time definitions - you
 cannot switch them at runtime, so a stock binary silently gives up the point of
 these cards. CI builds all three presets (`.github/workflows/build-cmp-int8.yml`)
 and asserts the definitions actually reached the compiler.
+
+**`GGML_CUDA_FORCE_MMQ` alone does not get decode onto MMQ.** The dispatcher in
+`ggml_cuda_mul_mat` checks `ggml_cuda_should_use_mmvq()` *before* it ever asks
+about MMQ, and MMVQ wins for `ne11 <= 8` - so batch-1 decode still runs the dp4a
+vector kernels no matter how the build is configured. That is the throttled path
+on a CMP card. `GGML_CUDA_NO_MMVQ=1` makes `should_use_mmvq()` decline whenever
+MMQ can take the tensor, at all three dispatch sites (plain `MUL_MAT`, the fused
+mul_mat+GLU path, and `MUL_MAT_ID`), so small batches land on MMQ as well:
+
+```sh
+GGML_CUDA_NO_MMVQ=1 ./build-cmp170hx-int8/bin/llama-cli -m model-int8.gguf -ngl 999 ...
+```
+
+It is runtime and opt-in, so it can be A/B-ed without rebuilding, and it is a
+pessimisation on a healthy GPU - MMVQ exists because it is faster there. Measure
+it with `scripts/svmi-cmpbench.sh` before adopting it. If a tensor's type has no
+MMQ kernel the flag is ignored for that tensor rather than falling through to
+cuBLAS FP16.
 
 Two weight choices sit on top of that build:
 

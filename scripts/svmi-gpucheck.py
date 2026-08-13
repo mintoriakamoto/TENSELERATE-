@@ -126,6 +126,9 @@ def advise(c: Card) -> tuple[list[str], list[str]]:
         flags.append("-DGGML_CUDA_DISABLE_DP4A=ON  # dp2a emulation, ~2x (llama.cpp#24616)")
         flags.append("quantize INT8                # q8_0 attention (resident, INT8/MMQ) "
                      "over a Q4_K_M body (streamed)")
+        flags.append("cmake --preset cmp170hx-int8  # or cmp90hx-int8: FORCE_MMQ, no CUDA F16")
+        flags.append("run: GGML_CUDA_NO_MMVQ=1      # batch-1 decode on MMQ too, off the dp4a "
+                     "path (A/B with scripts/svmi-cmpbench.sh)")
 
     if c.hbm_locked:
         warn.append(f"CMP 170HX reporting {c.vram_gib:.0f} GiB — that is the factory-fused HBM2e "
@@ -200,10 +203,14 @@ def self_test() -> int:
     aw, af = advise(ampere_cmp)
     hw, hf = advise(healthy)
     dw, _ = advise(downtrained)
+    # both families want integer kernels; only the Ampere CMPs have the dp4a
+    # throttle, so only they get the dp2a emulation and the MMVQ bypass
     assert any("FORCE_MMQ" in f for f in vf), vf
     assert not any("DISABLE_DP4A" in f for f in vf), vf
+    assert not any("NO_MMVQ" in f for f in vf), vf
     assert any("DISABLE_DP4A" in f for f in af), af
-    assert not any("FORCE_MMQ" in f for f in af), af
+    assert any("NO_MMVQ" in f for f in af), af
+    assert any("cmp170hx-int8" in f for f in af), af
     assert hw == [] and hf == [], (hw, hf)
     assert any("below the card's max" in w for w in dw), dw
     # 4. V100-vBIOS claim is stated honestly (does NOT fix the link)
