@@ -64,6 +64,36 @@ many sequences share it, so per-node throughput is
 The crossover is ~64K. Above it, KV per sequence dominates the bandwidth budget
 and no amount of batching helps because the slots do not fit in the first place.
 
+### Deep context: 250K and 500K
+
+At these depths the card choice decides the answer, and it is the **8 GiB variant
+unlocked to 64 GiB** you want - not the 10 GiB variant unlocked to 40 GiB. A 40 GiB
+node has 20 GiB free after weights, which holds exactly one 250K sequence at `q4_0`
+and cannot hold a 500K one at all. A 64 GiB node has 44 GiB free: two 250K
+sequences, or one 500K.
+
+MTP speculation is the only lever left up here, because it adds accepted tokens per
+pass without adding a byte of KV. Figures below assume 1.75 accepted tokens/pass
+(`--spec-type draft-mtp`), `q4_0` KV, 10 nodes:
+
+| Context | Card | Slots/node | Aggregate | vs 600 |
+| --- | --- | --- | --- | --- |
+| 250K | 40 GiB | 1 | 464 tok/s | 77% - needs ~13 nodes |
+| 250K | **64 GiB** | 2 | **589 tok/s** | **98% - 10 nodes is the right count** |
+| 500K | 64 GiB | 1 | 295 tok/s | 49% - needs ~21 nodes |
+| 500K | 40 GiB | pipeline, 2 nodes/replica | 44 tok/s | do not do this |
+
+So: 250K at target throughput is a 10-node deployment on 64 GiB cards. 500K at
+target is a ~20-node deployment. 500K on 40 GiB cards forces a pipeline split that
+costs an order of magnitude - the KV no longer fits, and splitting it does not
+reduce the bytes each token must read, it only spreads them across a sequential
+chain of nodes.
+
+Host-RAM KV offload (`-nkvo`) is **not** a way out at these depths on this
+hardware: every token reads the whole KV, so 18-36 GiB per token over a 1-2 GB/s
+PCIe link is seconds per token, not milliseconds. On these cards KV has to live in
+VRAM.
+
 ## The topology this implies
 
 **Do not pipeline-split the model across nodes for throughput.** The weights fit

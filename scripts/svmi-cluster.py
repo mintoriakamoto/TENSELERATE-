@@ -106,6 +106,10 @@ def main() -> int:
     ap.add_argument("--kv-type", choices=sorted(KV_BPE), default="q8_0")
     ap.add_argument("--target", type=float, default=0.0, help="aggregate tok/s to hit")
     ap.add_argument("--overhead", type=float, default=2.0, help="activation reserve GiB/node")
+    ap.add_argument("--spec-gain", type=float, default=1.0,
+                    help="accepted tokens per verify pass with MTP speculation "
+                         "(--spec-type draft-mtp; 1.0 = off, 1.5-2.0 typical). At deep "
+                         "context this is the only lever that adds tok/s without adding KV")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -165,9 +169,12 @@ def main() -> int:
 
     # --- throughput
     print()
-    per_node = node_throughput(weights, kv_seq, bw, eff_slots)
-    single = node_throughput(weights, kv_seq, bw, 1)
+    per_node = node_throughput(weights, kv_seq, bw, eff_slots) * args.spec_gain
+    single = node_throughput(weights, kv_seq, bw, 1) * args.spec_gain
     aggregate = per_node * replicas / max(1, groups) if groups > 1 else per_node * replicas
+    if args.spec_gain != 1.0:
+        print(f"spec    : MTP x{args.spec_gain:.2f} accepted/pass - costs no KV, so it is the "
+              "lever that survives deep context")
     print(f"decode  : {single:6.1f} tok/s single-stream per node "
           f"(bandwidth roof {bw * BW_EFFICIENCY / (weights / 1e9):.0f} at zero KV)")
     print(f"          {per_node:6.1f} tok/s per node at {eff_slots} slots")
@@ -178,7 +185,7 @@ def main() -> int:
         if aggregate < args.target:
             need_slots = eff_slots
             while need_slots < 256 and node_throughput(weights, kv_seq, bw, need_slots) \
-                    * replicas < args.target:
+                    * replicas * args.spec_gain < args.target:
                 need_slots *= 2
             print(f"          would need ~{need_slots} slots/node (VRAM permitting), "
                   f"a smaller KV type, or more nodes")
