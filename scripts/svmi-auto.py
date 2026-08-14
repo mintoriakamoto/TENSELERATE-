@@ -33,6 +33,9 @@ MODEL_PROFILES = {
     "7b":  (32, 4096, 32, 32,  3.9,  6.7),
     "8b":  (32, 4096, 32,  8,  4.6,  8.0),
     "13b": (40, 5120, 40, 40,  7.4, 13.0),
+    # Qwen3-class 27B. Shapes are approximate - pass the real GGUF when you have
+    # it, the planner reads hparams from the file and ignores this row.
+    "27b": (64, 5120, 40,  8, 15.4, 27.0),
     "70b": (80, 8192, 64,  8, 39.6, 70.6),
 }
 # extreme low-bit requants that ship in this tree (tools/quantize):
