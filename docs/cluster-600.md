@@ -75,14 +75,18 @@ Pipelining *is* justified for one thing: holding a context that exceeds one card
 That is a KV problem, not a weights problem, and there is a cheaper answer first -
 these nodes have 128 GiB of host RAM each, so `-nkvo` puts the KV there.
 
-Run **two pools** and route by request length:
+Run **two pools** and route by request length. The throughput pool has a real
+knob: context traded against slots. 8K/19 slots clears the target ~8x over,
+32K/4 slots clears it ~1.8x with four times the usable context. Pick by what the
+requests actually need - both meet 600.
 
 ```sh
-# throughput pool (7 nodes) - short context, many slots, one replica per node
+# throughput pool (7 nodes) - max aggregate: 8K ctx, 19 slots, ~475 tok/s per node
 GGML_CUDA_NO_MMVQ=1 llama-server -m model-int8.gguf -ngl 999 \
-    -c 32768 -np 4 -cb -fa on -ctk q8_0 -ctv q8_0 \
+    -c 8192 -np 19 -cb -fa on -ctk q8_0 -ctv q8_0 \
     --spec-type draft-mtp --spec-draft-n-max 3 \
     --host 0.0.0.0 --port 8080
+# balanced variant: -c 32768 -np 4   (~109 tok/s per node, 1092 aggregate)
 
 # deep-context pool (3 nodes) - 256K per sequence, q4_0 KV to make it fit
 GGML_CUDA_NO_MMVQ=1 llama-server -m model-int8.gguf -ngl 999 \
