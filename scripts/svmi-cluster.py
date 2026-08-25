@@ -145,9 +145,12 @@ def main() -> int:
     ap.add_argument("--target", type=float, default=0.0, help="aggregate tok/s to hit")
     ap.add_argument("--overhead", type=float, default=2.0, help="activation reserve GiB/node")
     ap.add_argument("--spec-gain", type=float, default=1.0,
-                    help="accepted tokens per verify pass with MTP speculation "
-                         "(--spec-type draft-mtp; 1.0 = off, 1.5-2.0 typical). At deep "
-                         "context this is the only lever that adds tok/s without adding KV")
+                    help="MEASURED end-to-end speedup from MTP speculation, not the raw "
+                         "acceptance rate. 1.0 = off. Anchor: a 27B Q4_K_S on a 5090 goes "
+                         "75 -> 90 tok/s with 2-token MTP at 60% acceptance, i.e. x1.20 - "
+                         "the verify pass is not free, so accepted-tokens-per-pass (x1.6 "
+                         "there) badly overstates it. Vendor figures of 2-3x are document "
+                         "throughput under their own conditions, not this ratio")
     ap.add_argument("--full-attn-interval", type=int, default=1,
                     help="hybrid models keep KV on 1 layer in N (Qwen3.5/3.6, Qwen3-Next: "
                          "typically 4); 1 = every layer, i.e. a dense model. Read from the "
@@ -275,8 +278,14 @@ def self_test() -> int:
     # 3. profile shapes are present for the models the docs reference
     for p in ("27b", "70b"):
         assert p in MODEL_PROFILES, p
+    # 4. anchor the bandwidth model to a published measurement: a 27B Q4_K_S on an
+    #    RTX 5090 (1792 GB/s) decodes at 75 tok/s single-stream. Predicted throughput
+    #    must land within 10% of that, or BW_EFFICIENCY has drifted from reality.
+    w_q4ks = 27e9 * 4.37 / 8
+    pred = node_throughput(w_q4ks, 0.0, 1792.0, 1, BW_EFFICIENCY)
+    assert abs(pred - 75.0) / 75.0 < 0.10, f"bandwidth model off the 5090 anchor: {pred:.1f}"
     print("self-test OK: batching curve (near-linear then KV-bound), KV-dominated cap,")
-    print("              27b/70b profiles present")
+    print(f"              27b/70b profiles, 5090 anchor {pred:.0f} vs 75 tok/s measured")
     return 0
 
 
