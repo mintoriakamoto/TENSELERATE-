@@ -31,10 +31,23 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/svmi-bench.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
 run() {
     local label=$1; shift
     echo "=== $label ==="
-    "$@" "$BIN" "${ARGS[@]}" 2>/dev/null | tee /tmp/svmi-bench-"$label".txt
+    # keep stderr: a run that fails here otherwise looks like an empty result table
+    if ! "$@" "$BIN" "${ARGS[@]}" 2>"$WORK/$label.err" | tee "$WORK/$label.txt"; then
+        echo "error: the $label run failed; stderr follows" >&2
+        tail -n 20 "$WORK/$label.err" >&2 || true
+        exit 1
+    fi
+    if [ ! -s "$WORK/$label.txt" ]; then
+        echo "error: the $label run produced no rows - nothing to compare" >&2
+        tail -n 20 "$WORK/$label.err" >&2 || true
+        exit 1
+    fi
     echo
 }
 
@@ -52,5 +65,5 @@ run streamed env "${STREAM_ENV[@]}"
 echo "=== summary (t/s columns) ==="
 for label in baseline pinned streamed; do
     echo "--- $label"
-    grep -E 'pp[0-9]+|tg[0-9]+' /tmp/svmi-bench-"$label".txt || true
+    grep -E 'pp[0-9]+|tg[0-9]+' "$WORK/$label.txt" || true
 done
