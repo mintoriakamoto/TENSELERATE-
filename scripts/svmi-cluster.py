@@ -55,8 +55,26 @@ HBM_BW = {
 }
 DEFAULT_BW = 500.0
 KV_BPE = {"f16": 2.0, "q8_0": 1.0625, "q4_0": 0.5625}
-# fraction of theoretical bandwidth a real decode loop sustains
+# fraction of theoretical bandwidth a real decode loop sustains. This is a
+# PLANNING ASSUMPTION - run scripts/svmi-bwprofile.py to replace it with a
+# measurement of the actual box, which the loader below picks up automatically.
 BW_EFFICIENCY = 0.65
+
+
+def measured_efficiency(gpu: str) -> tuple[float, bool]:
+    """(efficiency, measured?) - a benched profile for this GPU wins over the guess"""
+    import json
+    import os
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    path = Path(base) / "tenselerate" / f"bwprofile-{gpu}.json"
+    if path.is_file():
+        try:
+            eff = json.loads(path.read_text()).get("bw_efficiency")
+            if isinstance(eff, (int, float)) and 0.0 < eff <= 1.0:
+                return float(eff), True
+        except (OSError, ValueError):
+            pass
+    return BW_EFFICIENCY, False
 
 
 def model_shape(args, ap):
@@ -85,10 +103,11 @@ def model_shape(args, ap):
     return n_layer, n_embd, n_head, n_head_kv, weights, f"{args.profile} @ {args.bpw} bpw"
 
 
-def node_throughput(weights_b: float, kv_per_seq_b: float, bw_gbs: float, slots: int) -> float:
+def node_throughput(weights_b: float, kv_per_seq_b: float, bw_gbs: float, slots: int,
+                    efficiency: float = BW_EFFICIENCY) -> float:
     """tok/s for one node at `slots` concurrent sequences (bandwidth-bound)"""
     bytes_per_step = weights_b + slots * kv_per_seq_b
-    return slots * (bw_gbs * 1e9 * BW_EFFICIENCY) / bytes_per_step
+    return slots * (bw_gbs * 1e9 * efficiency) / bytes_per_step
 
 
 def main() -> int:
@@ -121,6 +140,7 @@ def main() -> int:
     n_layer, n_embd, n_head, n_head_kv, weights, name = model_shape(args, ap)
     vram = GPU_PRESETS[args.gpu][0] * GiB
     bw = HBM_BW.get(args.gpu, DEFAULT_BW)
+    eff, eff_measured = measured_efficiency(args.gpu)
     head_dim = n_embd // n_head
     kv_tok = 2 * head_dim * n_head_kv * n_layer * KV_BPE[args.kv_type]
     kv_seq = kv_tok * args.ctx
@@ -169,8 +189,11 @@ def main() -> int:
 
     # --- throughput
     print()
-    per_node = node_throughput(weights, kv_seq, bw, eff_slots) * args.spec_gain
-    single = node_throughput(weights, kv_seq, bw, 1) * args.spec_gain
+    per_node = node_throughput(weights, kv_seq, bw, eff_slots, eff) * args.spec_gain
+    single = node_throughput(weights, kv_seq, bw, 1, eff) * args.spec_gain
+    print(f"bandwidth: {bw:.0f} GB/s x {eff * 100:.0f}% = {bw * eff:.0f} GB/s effective "
+          + ("(MEASURED on this box)" if eff_measured
+             else "(assumed - run scripts/svmi-bwprofile.py to measure)"))
     aggregate = per_node * replicas / max(1, groups) if groups > 1 else per_node * replicas
     if args.spec_gain != 1.0:
         print(f"spec    : MTP x{args.spec_gain:.2f} accepted/pass - costs no KV, so it is the "
@@ -184,7 +207,7 @@ def main() -> int:
         print(f"target  : {args.target:.0f} tok/s -> {verdict}")
         if aggregate < args.target:
             need_slots = eff_slots
-            while need_slots < 256 and node_throughput(weights, kv_seq, bw, need_slots) \
+            while need_slots < 256 and node_throughput(weights, kv_seq, bw, need_slots, eff) \
                     * replicas * args.spec_gain < args.target:
                 need_slots *= 2
             print(f"          would need ~{need_slots} slots/node (VRAM permitting), "

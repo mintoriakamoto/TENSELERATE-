@@ -2179,6 +2179,17 @@ ggml_backend_sched_t ggml_backend_sched_new(
         sched->stream_n_queues = env_queues ? std::max(1, std::min(atoi(env_queues), GGML_SCHED_MAX_STREAM_QUEUES)) : GGML_SCHED_MAX_STREAM_QUEUES;
         sched->stream_prefetch = env_prefetch ? std::max(1, atoi(env_prefetch)) : 4;
         sched->stream_backend_id = -1;
+
+        // an async H2D copy out of PAGEABLE host memory is synchronous: the driver
+        // stages it through its own pinned buffer and blocks the caller. The staging
+        // ring then overlaps nothing, at full PCIe rate, so it looks healthy in a
+        // bandwidth test and only shows up as lost end-to-end time. --stream-weights
+        // sets GGML_CUDA_REGISTER_HOST, but the env var is a documented entry point too.
+        if (sched->stream_weights && getenv("GGML_CUDA_REGISTER_HOST") == nullptr) {
+            GGML_LOG_WARN("%s: weight streaming is on but host weights are not page-locked; "
+                          "set GGML_CUDA_REGISTER_HOST=1 (or use --stream-weights) or the "
+                          "uploads run synchronously and overlap nothing\n", __func__);
+        }
     }
 
     ggml_backend_sched_reset(sched);
