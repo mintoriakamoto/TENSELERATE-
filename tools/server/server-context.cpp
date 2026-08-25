@@ -3718,7 +3718,14 @@ private:
                 slot_batched->lora[alora_disabled_id].scale = alora_scale;
             }
 
-            llama_set_embeddings(ctx_tgt, slot_batched->need_embd());
+            // the batched slot can be released part-way through a batch: a slot that hits its
+            // n_predict limit while an earlier view is decoding is reset, and its task is gone by
+            // the time the next view (or a smaller-n_batch retry) reaches this point. Querying it
+            // then trips GGML_ASSERT(task) in need_embd(). The embeddings flag set when the batch
+            // was built still applies to the remaining views, so leave it alone.
+            if (slot_batched->is_processing()) {
+                llama_set_embeddings(ctx_tgt, slot_batched->need_embd());
+            }
         }
 
         if (batch.size() == 0) {
