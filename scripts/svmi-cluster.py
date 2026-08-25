@@ -55,8 +55,26 @@ HBM_BW = {
 }
 DEFAULT_BW = 500.0
 KV_BPE = {"f16": 2.0, "q8_0": 1.0625, "q4_0": 0.5625}
-# fraction of theoretical bandwidth a real decode loop sustains
+# fraction of theoretical bandwidth a real decode loop sustains. This is a
+# PLANNING ASSUMPTION - run scripts/svmi-bwprofile.py to replace it with a
+# measurement of the actual box, which the loader below picks up automatically.
 BW_EFFICIENCY = 0.65
+
+
+def measured_efficiency(gpu: str) -> tuple[float, bool]:
+    """(efficiency, measured?) - a benched profile for this GPU wins over the guess"""
+    import json
+    import os
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    path = Path(base) / "tenselerate" / f"bwprofile-{gpu}.json"
+    if path.is_file():
+        try:
+            eff = json.loads(path.read_text()).get("bw_efficiency")
+            if isinstance(eff, (int, float)) and 0.0 < eff <= 1.0:
+                return float(eff), True
+        except (OSError, ValueError):
+            pass
+    return BW_EFFICIENCY, False
 
 
 def model_shape(args, ap):
@@ -77,18 +95,25 @@ def model_shape(args, ap):
         n_head = fi(f"{arch}.attention.head_count") or 1
         n_head_kv = fi(f"{arch}.attention.head_count_kv") or n_head
         weights = sum(int(t.n_bytes) for t in r.tensors)
-        return n_layer, n_embd, n_head, n_head_kv, weights, Path(args.model).name
+        # hybrid (SSM + attention) models keep a KV cache only on the full-attention
+        # layers; the rest carry a fixed-size recurrent state. Qwen3.5/3.6 and
+        # Qwen3-Next mark this with full_attention_interval - see src/models/qwen35.cpp,
+        # is_recr_impl[i] = (i + 1) % full_attn_interval != 0
+        interval = fi(f"{arch}.full_attention_interval") or args.full_attn_interval
+        return n_layer, n_embd, n_head, n_head_kv, weights, Path(args.model).name, interval
     if not args.profile:
         ap.error("provide a GGUF path or --profile")
     n_layer, n_embd, n_head, n_head_kv, w_gib, params_b = MODEL_PROFILES[args.profile]
     weights = int(params_b * 1e9 * args.bpw / 8)
-    return n_layer, n_embd, n_head, n_head_kv, weights, f"{args.profile} @ {args.bpw} bpw"
+    return (n_layer, n_embd, n_head, n_head_kv, weights,
+            f"{args.profile} @ {args.bpw} bpw", args.full_attn_interval)
 
 
-def node_throughput(weights_b: float, kv_per_seq_b: float, bw_gbs: float, slots: int) -> float:
+def node_throughput(weights_b: float, kv_per_seq_b: float, bw_gbs: float, slots: int,
+                    efficiency: float = BW_EFFICIENCY) -> float:
     """tok/s for one node at `slots` concurrent sequences (bandwidth-bound)"""
     bytes_per_step = weights_b + slots * kv_per_seq_b
-    return slots * (bw_gbs * 1e9 * BW_EFFICIENCY) / bytes_per_step
+    return slots * (bw_gbs * 1e9 * efficiency) / bytes_per_step
 
 
 def main() -> int:
@@ -106,6 +131,14 @@ def main() -> int:
     ap.add_argument("--kv-type", choices=sorted(KV_BPE), default="q8_0")
     ap.add_argument("--target", type=float, default=0.0, help="aggregate tok/s to hit")
     ap.add_argument("--overhead", type=float, default=2.0, help="activation reserve GiB/node")
+    ap.add_argument("--spec-gain", type=float, default=1.0,
+                    help="accepted tokens per verify pass with MTP speculation "
+                         "(--spec-type draft-mtp; 1.0 = off, 1.5-2.0 typical). At deep "
+                         "context this is the only lever that adds tok/s without adding KV")
+    ap.add_argument("--full-attn-interval", type=int, default=1,
+                    help="hybrid models keep KV on 1 layer in N (Qwen3.5/3.6, Qwen3-Next: "
+                         "typically 4); 1 = every layer, i.e. a dense model. Read from the "
+                         "GGUF when one is given")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -114,17 +147,22 @@ def main() -> int:
     if args.gpu not in GPU_PRESETS:
         ap.error(f"unknown GPU '{args.gpu}'; known: {', '.join(sorted(GPU_PRESETS))}")
 
-    n_layer, n_embd, n_head, n_head_kv, weights, name = model_shape(args, ap)
+    n_layer, n_embd, n_head, n_head_kv, weights, name, interval = model_shape(args, ap)
+    n_attn_layer = max(1, n_layer // max(1, interval))
     vram = GPU_PRESETS[args.gpu][0] * GiB
     bw = HBM_BW.get(args.gpu, DEFAULT_BW)
+    eff, eff_measured = measured_efficiency(args.gpu)
     head_dim = n_embd // n_head
-    kv_tok = 2 * head_dim * n_head_kv * n_layer * KV_BPE[args.kv_type]
+    kv_tok = 2 * head_dim * n_head_kv * n_attn_layer * KV_BPE[args.kv_type]
     kv_seq = kv_tok * args.ctx
     fixed = args.overhead * GiB
 
     print(f"model   : {name}  ({weights / GiB:.1f} GiB weights, {n_layer} layers)")
     print(f"nodes   : {args.nodes}x {args.gpu}  ({vram / GiB:.0f} GiB VRAM, "
           f"{args.host_ram:.0f} GiB RAM, ~{bw:.0f} GB/s HBM each)")
+    if interval > 1:
+        print(f"hybrid  : 1 full-attention layer in {interval} -> {n_attn_layer} of {n_layer} "
+              f"layers hold KV; the rest carry a fixed-size recurrent state")
     print(f"context : {args.ctx:,} tok, KV {args.kv_type} = {kv_tok / 1024:.0f} KiB/tok "
           f"-> {kv_seq / GiB:.1f} GiB per sequence\n")
 
@@ -165,9 +203,15 @@ def main() -> int:
 
     # --- throughput
     print()
-    per_node = node_throughput(weights, kv_seq, bw, eff_slots)
-    single = node_throughput(weights, kv_seq, bw, 1)
+    per_node = node_throughput(weights, kv_seq, bw, eff_slots, eff) * args.spec_gain
+    single = node_throughput(weights, kv_seq, bw, 1, eff) * args.spec_gain
+    print(f"bandwidth: {bw:.0f} GB/s x {eff * 100:.0f}% = {bw * eff:.0f} GB/s effective "
+          + ("(MEASURED on this box)" if eff_measured
+             else "(assumed - run scripts/svmi-bwprofile.py to measure)"))
     aggregate = per_node * replicas / max(1, groups) if groups > 1 else per_node * replicas
+    if args.spec_gain != 1.0:
+        print(f"spec    : MTP x{args.spec_gain:.2f} accepted/pass - costs no KV, so it is the "
+              "lever that survives deep context")
     print(f"decode  : {single:6.1f} tok/s single-stream per node "
           f"(bandwidth roof {bw * BW_EFFICIENCY / (weights / 1e9):.0f} at zero KV)")
     print(f"          {per_node:6.1f} tok/s per node at {eff_slots} slots")
@@ -177,8 +221,8 @@ def main() -> int:
         print(f"target  : {args.target:.0f} tok/s -> {verdict}")
         if aggregate < args.target:
             need_slots = eff_slots
-            while need_slots < 256 and node_throughput(weights, kv_seq, bw, need_slots) \
-                    * replicas < args.target:
+            while need_slots < 256 and node_throughput(weights, kv_seq, bw, need_slots, eff) \
+                    * replicas * args.spec_gain < args.target:
                 need_slots *= 2
             print(f"          would need ~{need_slots} slots/node (VRAM permitting), "
                   f"a smaller KV type, or more nodes")

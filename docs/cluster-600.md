@@ -64,6 +64,59 @@ many sequences share it, so per-node throughput is
 The crossover is ~64K. Above it, KV per sequence dominates the bandwidth budget
 and no amount of batching helps because the slots do not fit in the first place.
 
+### Hybrid models change these numbers entirely
+
+Qwen3.5/3.6 (and Qwen3-Next) are **hybrid SSM + attention**: `src/models/qwen35.cpp`
+sets `is_recr_impl[i] = (i + 1) % full_attn_interval != 0`, so only 1 layer in
+`full_attention_interval` keeps a growing KV cache - the rest carry a fixed-size
+recurrent state that does not scale with context. At the usual interval of 4 that
+is 16 of 64 layers, so KV per token is **4x smaller** than a dense model of the
+same shape, and the whole deep-context picture moves:
+
+| Context | KV type | KV/seq | Slots on one 40 GiB card | tok/s |
+| --- | --- | --- | --- | --- |
+| 250K | `q8_0` | 8.5 GiB | 2 | 96 |
+| 250K | `q4_0` | 4.5 GiB | 4 | 186 |
+| 500K | `q4_0` | 9.0 GiB | 2 | 93 |
+| 1M | `q4_0` | 18.0 GiB | 1 | 46 |
+
+Two consequences. **250K fits at `q8_0`**, so the `q4_0` K-fidelity problem and its
+mean-centering calibration are avoidable at that depth - take the quality for free.
+And **1M context fits one card**, which the dense arithmetic said needed a cluster.
+
+Pass the GGUF and the planner reads `full_attention_interval` from the file; with
+`--profile` give it `--full-attn-interval N` or it assumes a dense model.
+
+### Deep context on a dense model: 250K and 500K
+
+At these depths the card choice decides the answer, and it is the **8 GiB variant
+unlocked to 64 GiB** you want - not the 10 GiB variant unlocked to 40 GiB. A 40 GiB
+node has 20 GiB free after weights, which holds exactly one 250K sequence at `q4_0`
+and cannot hold a 500K one at all. A 64 GiB node has 44 GiB free: two 250K
+sequences, or one 500K.
+
+MTP speculation is the only lever left up here, because it adds accepted tokens per
+pass without adding a byte of KV. Figures below assume 1.75 accepted tokens/pass
+(`--spec-type draft-mtp`), `q4_0` KV, 10 nodes:
+
+| Context | Card | Slots/node | Aggregate | vs 600 |
+| --- | --- | --- | --- | --- |
+| 250K | 40 GiB | 1 | 464 tok/s | 77% - needs ~13 nodes |
+| 250K | **64 GiB** | 2 | **589 tok/s** | **98% - 10 nodes is the right count** |
+| 500K | 64 GiB | 1 | 295 tok/s | 49% - needs ~21 nodes |
+| 500K | 40 GiB | pipeline, 2 nodes/replica | 44 tok/s | do not do this |
+
+So: 250K at target throughput is a 10-node deployment on 64 GiB cards. 500K at
+target is a ~20-node deployment. 500K on 40 GiB cards forces a pipeline split that
+costs an order of magnitude - the KV no longer fits, and splitting it does not
+reduce the bytes each token must read, it only spreads them across a sequential
+chain of nodes.
+
+Host-RAM KV offload (`-nkvo`) is **not** a way out at these depths on this
+hardware: every token reads the whole KV, so 18-36 GiB per token over a 1-2 GB/s
+PCIe link is seconds per token, not milliseconds. On these cards KV has to live in
+VRAM.
+
 ## The topology this implies
 
 **Do not pipeline-split the model across nodes for throughput.** The weights fit

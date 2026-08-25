@@ -67,6 +67,13 @@ SVMI replaces both:
 | `GGML_SCHED_PREFETCH_EXPERTS=1` | accepted as a compatibility alias for `GGML_SCHED_STREAM_WEIGHTS` |
 | `GGML_CUDA_NO_MMVQ=1` | skip the dp4a vector kernels so small batches go to MMQ too (CMP cards; see below) |
 
+> An async H2D copy out of **pageable** host memory is synchronous - the driver stages
+> it through its own pinned buffer and blocks the caller, so the staging ring overlaps
+> nothing while still moving bytes at full PCIe rate. `--stream-weights` sets
+> `GGML_CUDA_REGISTER_HOST` for you; enabling streaming through
+> `GGML_SCHED_STREAM_WEIGHTS` alone does not, and the scheduler now warns when it sees
+> that combination.
+
 All of it is opt-in and token-identical: the same kernels run on the same data, only
 the transport is scheduled differently.
 
@@ -91,6 +98,13 @@ the transport is scheduled differently.
   optional second sweep against a `-DGGML_CUDA_DISABLE_DP4A=ON` build. If the
   crossover is real, the lever for these cards is concurrency and speculative
   decoding (batch-1 decode becomes batched verification), not kernel flags.
+- `scripts/svmi-bwprofile.py` — measures what the box actually sustains instead of
+  assuming it. Every planner figure rides on the fraction of theoretical bandwidth a
+  real decode loop achieves; this derives it from `llama-bench` (achieved GB/s =
+  bytes/token x measured tok/s), optionally benches the streamed path for the
+  resident-vs-streamed ratio, and writes a per-GPU JSON profile that
+  `svmi-cluster.py` picks up automatically. Method adapted from FreeToken's
+  `ft bench bw` (Apache-2.0, https://github.com/FlashML-org/FreeToken).
 - `scripts/svmi-verify.sh` — correctness gate: greedy-decodes the same prompt with and
   without streaming and diffs the tokens (byte-identical expected), with an optional
   `--ppl-file` perplexity equality check. This is the executable form of the
