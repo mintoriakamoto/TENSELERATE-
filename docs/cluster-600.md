@@ -64,7 +64,30 @@ many sequences share it, so per-node throughput is
 The crossover is ~64K. Above it, KV per sequence dominates the bandwidth budget
 and no amount of batching helps because the slots do not fit in the first place.
 
-### Deep context: 250K and 500K
+### Hybrid models change these numbers entirely
+
+Qwen3.5/3.6 (and Qwen3-Next) are **hybrid SSM + attention**: `src/models/qwen35.cpp`
+sets `is_recr_impl[i] = (i + 1) % full_attn_interval != 0`, so only 1 layer in
+`full_attention_interval` keeps a growing KV cache - the rest carry a fixed-size
+recurrent state that does not scale with context. At the usual interval of 4 that
+is 16 of 64 layers, so KV per token is **4x smaller** than a dense model of the
+same shape, and the whole deep-context picture moves:
+
+| Context | KV type | KV/seq | Slots on one 40 GiB card | tok/s |
+| --- | --- | --- | --- | --- |
+| 250K | `q8_0` | 8.5 GiB | 2 | 96 |
+| 250K | `q4_0` | 4.5 GiB | 4 | 186 |
+| 500K | `q4_0` | 9.0 GiB | 2 | 93 |
+| 1M | `q4_0` | 18.0 GiB | 1 | 46 |
+
+Two consequences. **250K fits at `q8_0`**, so the `q4_0` K-fidelity problem and its
+mean-centering calibration are avoidable at that depth - take the quality for free.
+And **1M context fits one card**, which the dense arithmetic said needed a cluster.
+
+Pass the GGUF and the planner reads `full_attention_interval` from the file; with
+`--profile` give it `--full-attn-interval N` or it assumes a dense model.
+
+### Deep context on a dense model: 250K and 500K
 
 At these depths the card choice decides the answer, and it is the **8 GiB variant
 unlocked to 64 GiB** you want - not the 10 GiB variant unlocked to 40 GiB. A 40 GiB
