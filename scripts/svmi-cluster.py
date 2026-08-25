@@ -96,17 +96,30 @@ def model_shape(args, ap):
         n_head_kv = fi(f"{arch}.attention.head_count_kv") or n_head
         weights = sum(int(t.n_bytes) for t in r.tensors)
         # hybrid (SSM + attention) models keep a KV cache only on the full-attention
-        # layers; the rest carry a fixed-size recurrent state. Qwen3.5/3.6 and
-        # Qwen3-Next mark this with full_attention_interval - see src/models/qwen35.cpp,
-        # is_recr_impl[i] = (i + 1) % full_attn_interval != 0
-        interval = fi(f"{arch}.full_attention_interval") or args.full_attn_interval
-        return n_layer, n_embd, n_head, n_head_kv, weights, Path(args.model).name, interval
+        # layers; the rest carry a fixed-size recurrent state. Resolve it exactly the
+        # way src/models/qwen35.cpp does: the explicit per-layer array wins, then the
+        # interval, and the engine's own fallback is 4 - not 1. Reading only the
+        # interval silently reverts to the dense assumption on a model that ships
+        # the array, which is the whole error this is here to avoid.
+        n_attn = 0
+        fld = r.get_field(f"{arch}.attention.recurrent_layers")
+        if fld is not None:
+            recr = [bool(fld.parts[i][0]) for i in fld.data]
+            n_attn = sum(1 for i, v in enumerate(recr[:n_layer]) if not v)
+        if n_attn == 0:
+            interval = fi(f"{arch}.full_attention_interval")
+            if interval == 0:
+                interval = (args.full_attn_interval if args.full_attn_interval > 1
+                            else (4 if str(arch).startswith("qwen3") else 1))
+            n_attn = max(1, n_layer // max(1, interval))
+        return n_layer, n_embd, n_head, n_head_kv, weights, Path(args.model).name, n_attn
     if not args.profile:
         ap.error("provide a GGUF path or --profile")
     n_layer, n_embd, n_head, n_head_kv, w_gib, params_b = MODEL_PROFILES[args.profile]
     weights = int(params_b * 1e9 * args.bpw / 8)
+    n_attn = max(1, n_layer // max(1, args.full_attn_interval))
     return (n_layer, n_embd, n_head, n_head_kv, weights,
-            f"{args.profile} @ {args.bpw} bpw", args.full_attn_interval)
+            f"{args.profile} @ {args.bpw} bpw", n_attn)
 
 
 def node_throughput(weights_b: float, kv_per_seq_b: float, bw_gbs: float, slots: int,
@@ -147,8 +160,7 @@ def main() -> int:
     if args.gpu not in GPU_PRESETS:
         ap.error(f"unknown GPU '{args.gpu}'; known: {', '.join(sorted(GPU_PRESETS))}")
 
-    n_layer, n_embd, n_head, n_head_kv, weights, name, interval = model_shape(args, ap)
-    n_attn_layer = max(1, n_layer // max(1, interval))
+    n_layer, n_embd, n_head, n_head_kv, weights, name, n_attn_layer = model_shape(args, ap)
     vram = GPU_PRESETS[args.gpu][0] * GiB
     bw = HBM_BW.get(args.gpu, DEFAULT_BW)
     eff, eff_measured = measured_efficiency(args.gpu)
@@ -160,9 +172,9 @@ def main() -> int:
     print(f"model   : {name}  ({weights / GiB:.1f} GiB weights, {n_layer} layers)")
     print(f"nodes   : {args.nodes}x {args.gpu}  ({vram / GiB:.0f} GiB VRAM, "
           f"{args.host_ram:.0f} GiB RAM, ~{bw:.0f} GB/s HBM each)")
-    if interval > 1:
-        print(f"hybrid  : 1 full-attention layer in {interval} -> {n_attn_layer} of {n_layer} "
-              f"layers hold KV; the rest carry a fixed-size recurrent state")
+    if n_attn_layer < n_layer:
+        print(f"hybrid  : {n_attn_layer} of {n_layer} layers hold KV; the rest carry a "
+              "fixed-size recurrent state")
     print(f"context : {args.ctx:,} tok, KV {args.kv_type} = {kv_tok / 1024:.0f} KiB/tok "
           f"-> {kv_seq / GiB:.1f} GiB per sequence\n")
 
