@@ -525,6 +525,88 @@ Two weight choices sit on top of that build:
 k-quant - but a 70B at ~70 GiB exceeds a single unlocked-64 card, so it is a
 two-card model (or a ~48B-class model on one). `INT8` is the point that fits.
 
+### Consumer GeForce: the CMP advice is the wrong advice here
+
+Everything above is written for mining cards, whose firmware breaks paths the
+spec sheet still advertises. A healthy GeForce is the opposite case, and copying
+the CMP flags onto one makes it slower:
+
+| | CMP (170HX / 90HX / 100-210) | Consumer GeForce |
+| --- | --- | --- |
+| FP16/BF16 tensor cores | gimped or absent | fast — the reason to buy the card |
+| `GGML_CUDA_FORCE_MMQ` | required | **regression** (costs prompt throughput) |
+| `GGML_CUDA_DISABLE_DP4A` | required on Ampere CMP | **regression** (dp4a is fine) |
+| `GGML_CUDA_NO_MMVQ=1` | worth measuring | pessimisation — MMVQ is faster here |
+
+llama.cpp already routes batch-1 quantized decode onto MMQ by itself. `FORCE_MMQ`
+only adds the *large-batch* case, which is exactly where cuBLAS wins on a card
+whose FP16 works. So the consumer presets leave cuBLAS available:
+
+```sh
+cmake --preset rtx-blackwell    # RTX 50-series, sm_120  (needs CUDA >= 12.8)
+cmake --preset rtx-ampere       # RTX 30-series, sm_86
+cmake --preset rtx-5070+3060    # one fat binary: sm_86 + sm_120
+```
+
+**CUDA 12.8 is a hard floor for Blackwell.** nvcc 12.6 and older cannot emit
+`sm_120` at all, and there is no older SASS for the card to fall back to.
+
+### Mixed-bandwidth multi-GPU: fill the fastest card first
+
+An RTX 5070 (672 GB/s) beside an RTX 3060 (360 GB/s) is not a 24 GiB GPU. Under
+the default `--split-mode layer`, a token walks every layer in order, so per-token
+weight-read time is `sum(bytes_i / bw_i)`. Minimising that under the per-card
+capacities is a linear program, and its optimum is greedy:
+
+> **Fill the fastest card to capacity, spill only the remainder to slower ones.**
+
+Two consequences that catch people out:
+
+- **A bandwidth-proportional `--tensor-split` is wrong.** For 17.6 GiB across a
+  5070+3060 the proportional answer is `0.65,0.35`; the optimal one is
+  `0.68,0.32` — fill the 5070's 12 GiB first, then spill 5.6 GiB.
+- **If the model fits on the fast card alone, the second card makes decode
+  slower.** A layer split buys capacity, never speed. Use
+  `CUDA_VISIBLE_DEVICES=0` and leave the 3060 out.
+
+`svmi-gpucheck.py` computes this for the box it is run on:
+
+```sh
+python3 scripts/svmi-gpucheck.py --model-gib 17.6
+```
+
+```
+mixed architectures (sm_86, sm_120) - build ONE fat binary, not one per card:
+  cmake --preset rtx-5070+3060
+
+placement (17.6 GiB of weights):
+  mixed bandwidth (RTX 5070 672GB/s > RTX 3060 360GB/s) - fill the fastest
+  card first, do NOT split proportionally:
+    --main-gpu 0 --tensor-split 0.68,0.32   # in fastest-first device order
+    expect ~1.28x the per-token weight-read time of an all-RTX 5070 box
+```
+
+`--tensor-split` is indexed by *visible-device order*, not by speed — reorder with
+`CUDA_VISIBLE_DEVICES` so device 0 is the fastest card.
+
+### `driver: N/A` — nothing works before this is fixed
+
+`inxi -G` reporting `driver: N/A` against an NVIDIA device means no kernel module
+is bound to it. `nvidia-smi` may still be installed (it ships in the userspace
+package), so its presence proves nothing. If the display is running on `llvmpipe`
+or the iGPU's `radeonsi` while a discrete card sits at `N/A`, CUDA is not
+available at all and every flag on this page is moot.
+
+```sh
+lsmod | grep nvidia        # empty = unbound
+python3 scripts/svmi-gpucheck.py   # reports the unbound driver instead of tracebacking
+```
+
+On Blackwell (RTX 50-series) the **open** kernel module is required — the
+proprietary legacy module does not support GB20x. A distribution kernel that has
+just been upgraded is the usual reason a previously working box comes back with
+`N/A`: the DKMS module has not been rebuilt against the new kernel.
+
 ### End-to-end: 70B on an unlocked 170HX
 
 ```bash
