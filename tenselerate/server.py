@@ -17,6 +17,7 @@ Bind is loopback-only and non-configurable to off-host on purpose.
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import time
 import uuid
@@ -148,8 +149,9 @@ def main() -> int:
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         ap.error("refusing to bind off-host: this dev engine is loopback-only")
     srv = build_server(args.host, args.port, args.config)
-    print(f"TENSELERATE reference engine ({args.config}) on "
-          f"http://{args.host}:{args.port}/v1  (dev — reference numerics, not the CUDA backend)")
+    sys.stderr.write(
+        f"TENSELERATE reference engine ({args.config}) on "
+        f"http://{args.host}:{args.port}/v1  (dev - reference numerics, not the CUDA backend)\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
