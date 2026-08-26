@@ -294,7 +294,11 @@ def report(cards: list[Card], model_gib: float = 0.0) -> None:
             print(f"  + {f}")
         print()
 
-    ccs = sorted({c.arch[0] for c in cards if c.arch[0]}, key=int)
+    # sort NUMERICALLY - as strings "120" sorts before "86". Done by sorting ints
+    # and mapping back rather than with key=int: passing the int constructor as a
+    # sort key widens the inferred element type to int()'s whole argument union,
+    # which then no longer satisfies str.join(Iterable[str]).
+    ccs = [str(n) for n in sorted({int(c.arch[0]) for c in cards if c.arch[0]})]
     if len(ccs) > 1:
         arch_list = ";".join(f"{cc}-real" for cc in ccs)
         print(f"mixed architectures (sm_{', sm_'.join(ccs)}) - build ONE fat binary, "
