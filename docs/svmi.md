@@ -646,6 +646,68 @@ Two notes specific to these machines:
   ≥ 12.8 for `sm_120`. If `inxi -G` shows `driver: N/A`, fix that first — nothing
   runs until it is.
 
+### Pushing both machines to the limit with this model
+
+The RavenX Chaos Agent is the `qwen3_5` **hybrid**: 64 layers, but only **16 are
+full-attention** — the other 48 are GDN linear-attention that keep a small fixed
+state instead of a growing KV cache. So KV accrues on 16 layers, not 64, and the
+per-token cost is a quarter of a dense 27B:
+
+| KV type | per token (16 full-attn layers, head_dim 256, 4 KV heads) | at native 256K |
+| --- | --- | --- |
+| f16 | 64 KiB | 16.0 GiB |
+| q8_0 | 34 KiB | 8.5 GiB |
+| q4_0 | 18 KiB | 4.5 GiB |
+
+Native context is **262,144 (256K)**; past that needs RoPE scaling (YaRN), so
+these ceilings stop at 256K — no rope. `./scripts/tenselerate-serve.sh --max`
+applies the right column for the machine it is on.
+
+**CMP 170HX (unlocked 64 GiB)** — weights are 15.4 GiB, leaving ~46 GiB for KV.
+One 256K sequence at q8_0 is 8.5 GiB, so the card holds several at once:
+
+| KV | single-stream max | or parallel 256K agents |
+| --- | --- | --- |
+| q8_0 | 256K (native cap) | **5** |
+| q4_0 | 256K (native cap) | **9** |
+
+`--max` runs **5 parallel 256K slots at q8_0** (~42 GiB of KV). A lone request
+still gets the full single-stream speed; the extra slots serve concurrent agents
+for free. Decode is ~58 tok/s at 8K, ~38 tok/s at a full 256K (weights + 8.5 GiB
+of KV read per token).
+
+**fallen (RTX 5070 + RTX 3060, 24 GiB)** — after weights and state, ~5.6 GiB for
+KV. This is where the hybrid earns its keep: a dense 27B could not hold anywhere
+near 256K in 24 GiB, but here:
+
+| KV | single-stream max |
+| --- | --- |
+| q8_0 | ~174K |
+| q4_0 | **256K (full native)** |
+
+`--max` runs **the full 256K native context, single stream, on q4_0 KV**. q4_0 K
+loses a little fidelity; recover most of it with the one-time per-channel bias
+from `tools/kv-mean-center` (see [kv-mean-center.md](kv-mean-center.md)). Decode
+is ~19 tok/s at 8K, ~13 tok/s at 256K.
+
+Two upsides this model leaves on the table for later, both hardware-gated:
+
+- **Built-in MTP.** `config.json` has `mtp_num_hidden_layers: 1` — a native
+  multi-token-prediction draft head for self-speculation (~1.2x decode at the
+  measured 60% acceptance). Whether the `Q4_K_M` GGUF ships that head is not
+  visible from the file listing; if it does, add `--spec-type draft-mtp`. Verify
+  on the box, since there is no sidecar to test against here.
+- **q4_0 → even more parallelism on the CMP.** 9 concurrent 256K agents fit at
+  q4_0; the script defaults `--max` to q8_0 for fidelity, but `CTK=q4_0 CTV=q4_0
+  ./scripts/tenselerate-serve.sh --max` on the 170HX trades a little quality for
+  nearly double the concurrent sessions.
+
+All figures above are computed from the exact geometry in `config.json`, not the
+planner's generic `27b` profile — that profile assumes a dense KV (all 64 layers,
+`head_dim = n_embd/n_head`) and overcounts this model's KV by about 4x. When you
+have the GGUF on disk, `scripts/svmi-plan.py model.gguf --gpu <card>` reads the
+real hparams and will agree with this table.
+
 ### Two machines, two sites: replicas, never a shard
 
 The fleet is two independent boxes on opposite sides of the continent, not one
