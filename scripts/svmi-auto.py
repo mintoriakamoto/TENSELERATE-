@@ -68,6 +68,19 @@ GPU_PRESETS = {  # vram GiB, effective PCIe GB/s (card's own link generation)
     "cmp170hx-64": (64, 2.0), "cmp170hx-40": (40, 2.0),
     "cmp100-210": (16, 0.25),   # Volta GV100, 16 GB HBM2 @ ~830 GB/s, PCIe 1.0 x1
 }
+# Named machines in this fleet, so both boxes can be planned without retyping
+# hardware: (gpus, host RAM GiB, description). GPU names must be GPU_PRESETS keys.
+# host RAM marked "assumed" is a default to override with --host-ram, not a
+# measured figure - only override-free entries were read off the actual machine.
+MACHINES = {
+    "fallen": (["5070", "3060"], 48.0,
+               "Ryzen 9 7950X / MSI MAG X870E / Ubuntu 26.04 - RTX 5070 + RTX 3060"),
+    "cmp-rig": (["cmp170hx-64"], 64.0,
+                "CMP 170HX after the cmpunlocker HBM2e unlock (host RAM assumed)"),
+    "cmp-rig-40": (["cmp170hx-40"], 64.0,
+                   "CMP 170HX 10 GiB variant unlocked to 40 GiB (host RAM assumed)"),
+}
+
 # firmware quirks that change how llama.cpp must be BUILT for a card
 DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
 INT8_QUIRK = "no usable FP16 path - quantize INT8 so attention runs on q8_0/MMQ"

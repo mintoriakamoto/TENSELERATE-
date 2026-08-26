@@ -589,6 +589,200 @@ placement (17.6 GiB of weights):
 `--tensor-split` is indexed by *visible-device order*, not by speed — reorder with
 `CUDA_VISIBLE_DEVICES` so device 0 is the fastest card.
 
+### Running the RavenX Chaos Agent for Hermes (both machines)
+
+The two boxes are used independently — each person runs the model locally and
+points [Hermes](https://127.0.0.1:8080) at their own machine. There is no link
+between them (see the next section for why that is the right call).
+
+**One command per machine**, after building `llama-server` for that box's preset:
+
+```sh
+./scripts/tenselerate-serve.sh
+```
+
+It downloads `RavenX-Chaos-Agent-Q4_K_M.gguf` (15.7 GB) on first run, reads the
+GPU from `nvidia-smi`, and serves an OpenAI-compatible endpoint on
+`http://127.0.0.1:8080/v1` with the model's own recommended flags: thinking
+**off** (`--jinja --reasoning-format none` — Qwen 3.8 otherwise spends the whole
+budget looping in reasoning), `--temp 0 --repeat-penalty 1.15`, and a `q8_0` KV
+cache. Placement is automatic:
+
+| Machine | What the script does |
+| --- | --- |
+| CMP 170HX (unlocked ≥ 24 GiB) | `-ngl 99` — the 15.7 GiB model is resident on the one card |
+| RTX 5070 + RTX 3060 | `-ngl 99 --tensor-split 0.68,0.32` — fills the 5070 first |
+
+Then point Hermes at the local server (identical on both machines):
+
+```sh
+hermes config set model.provider custom
+hermes config set model.base_url http://127.0.0.1:8080/v1
+hermes config set model.default \
+  deadbydawn101/RavenXAiLabs-Chaos-Agent-Qwen3.8-27B-Frontier-Intelligence-Injected-OBLITERATED-GGUF:Q4_K_M
+```
+
+The script sets `--alias` to exactly that `model.default` string, so the server
+answers to the id Hermes sends.
+
+**Build once, per box** (the model is stock `Q4_K_M`, but the *build* still has
+to match the card — see the preset sections above):
+
+```sh
+# CMP 170HX
+cmake --preset cmp170hx-int8   && cmake --build build-cmp170hx-int8   -j
+# RTX 5070 + RTX 3060
+cmake --preset rtx-5070+3060   && cmake --build build-rtx-5070+3060   -j
+```
+
+Two notes specific to these machines:
+
+- **CMP 170HX:** the model is `Q4_K_M`, so the resident weights sit on the
+  k-quant kernels, but the card still needs the `cmp170hx-int8` build — its FP16
+  path is unusable, so `FORCE_MMQ` keeps decode on the integer kernels either
+  way. And confirm `nvidia-smi` shows the unlocked size before serving: at the
+  factory 8/10 GiB the model does not fit, and the script warns about it.
+- **RTX 5070:** needs the driver actually bound (`lsmod | grep nvidia`) and CUDA
+  ≥ 12.8 for `sm_120`. If `inxi -G` shows `driver: N/A`, fix that first — nothing
+  runs until it is.
+
+### Pushing both machines to the limit with this model
+
+The RavenX Chaos Agent is the `qwen3_5` **hybrid**: 64 layers, but only **16 are
+full-attention** — the other 48 are GDN linear-attention that keep a small fixed
+state instead of a growing KV cache. So KV accrues on 16 layers, not 64, and the
+per-token cost is a quarter of a dense 27B:
+
+| KV type | per token (16 full-attn layers, head_dim 256, 4 KV heads) | at native 256K |
+| --- | --- | --- |
+| f16 | 64 KiB | 16.0 GiB |
+| q8_0 | 34 KiB | 8.5 GiB |
+| q4_0 | 18 KiB | 4.5 GiB |
+
+Native context is **262,144 (256K)**; past that needs RoPE scaling (YaRN), so
+these ceilings stop at 256K — no rope. `./scripts/tenselerate-serve.sh --max`
+applies the right column for the machine it is on.
+
+**CMP 170HX (unlocked 64 GiB)** — weights are 15.4 GiB, leaving ~46 GiB for KV.
+One 256K sequence at q8_0 is 8.5 GiB, so the card holds several at once:
+
+| KV | single-stream max | or parallel 256K agents |
+| --- | --- | --- |
+| q8_0 | 256K (native cap) | **5** |
+| q4_0 | 256K (native cap) | **9** |
+
+`--max` runs **5 parallel 256K slots at q8_0** (~42 GiB of KV). A lone request
+still gets the full single-stream speed; the extra slots serve concurrent agents
+for free. Decode is ~58 tok/s at 8K, ~38 tok/s at a full 256K (weights + 8.5 GiB
+of KV read per token).
+
+**fallen (RTX 5070 + RTX 3060, 24 GiB)** — after weights and state, ~5.6 GiB for
+KV. This is where the hybrid earns its keep: a dense 27B could not hold anywhere
+near 256K in 24 GiB, but here:
+
+| KV | single-stream max |
+| --- | --- |
+| q8_0 | ~174K |
+| q4_0 | **256K (full native)** |
+
+`--max` runs **the full 256K native context, single stream, on q4_0 KV**. q4_0 K
+loses a little fidelity; recover most of it with the one-time per-channel bias
+from `tools/kv-mean-center` (see [kv-mean-center.md](kv-mean-center.md)). Decode
+is ~19 tok/s at 8K, ~13 tok/s at 256K.
+
+Two upsides this model leaves on the table for later, both hardware-gated:
+
+- **Built-in MTP.** `config.json` has `mtp_num_hidden_layers: 1` — a native
+  multi-token-prediction draft head for self-speculation (~1.2x decode at the
+  measured 60% acceptance). Whether the `Q4_K_M` GGUF ships that head is not
+  visible from the file listing; if it does, add `--spec-type draft-mtp`. Verify
+  on the box, since there is no sidecar to test against here.
+- **q4_0 → even more parallelism on the CMP.** 9 concurrent 256K agents fit at
+  q4_0; the script defaults `--max` to q8_0 for fidelity, but `CTK=q4_0 CTV=q4_0
+  ./scripts/tenselerate-serve.sh --max` on the 170HX trades a little quality for
+  nearly double the concurrent sessions.
+
+All figures above are computed from the exact geometry in `config.json`, not the
+planner's generic `27b` profile — that profile assumes a dense KV (all 64 layers,
+`head_dim = n_embd/n_head`) and overcounts this model's KV by about 4x. When you
+have the GGUF on disk, `scripts/svmi-plan.py model.gguf --gpu <card>` reads the
+real hparams and will agree with this table.
+
+### Two machines, two sites: replicas, never a shard
+
+The fleet is two independent boxes on opposite sides of the continent, not one
+cluster:
+
+| Site | Hardware | Role |
+| --- | --- | --- |
+| `cmp-rig` | CMP 170HX unlocked to 64 GiB HBM2e | big-model site |
+| `fallen` | Ryzen 9 7950X, RTX 5070 + RTX 3060, 48 GiB RAM | consumer site |
+
+Both are named in `MACHINES`, so neither has to be retyped:
+
+```sh
+python3 scripts/svmi-net.py --list-machines
+python3 scripts/svmi-net.py --profile 27b --node cmp-rig --node fallen --nic wan-continental
+```
+
+That prints a refusal, not a plan, and the refusal is the useful part.
+
+**Do not layer-split a model across the WAN.** Two independent reasons, either
+one sufficient:
+
+1. **Security.** The RPC protocol is unauthenticated and unencrypted. Anything
+   that can reach the port can make the worker load a file and execute. On a LAN
+   that is a calculated risk; across the public internet it is a remote-code-
+   execution surface. `svmi-net.py` refuses to print a `--tensor-split` or a
+   worker command for a WAN link unless you pass `--force-rpc`, and even then it
+   binds `<tunnel-ip>` rather than `0.0.0.0`.
+
+2. **Physics.** A layer split pays a full round trip per node boundary *per
+   token*. Bandwidth is irrelevant — one decode activation row is a few KB — and
+   RTT is everything:
+
+   | Link | RTT | Decode ceiling, 1 boundary |
+   | --- | --- | --- |
+   | 1 GbE LAN | 0.35 ms | ~2,860 tok/s |
+   | WiFi 6 | 2.5 ms | ~400 tok/s |
+   | WAN, metro | 10 ms | ~100 tok/s |
+   | WAN, regional | 30 ms | ~33 tok/s |
+   | **WAN, continental** | **70 ms** | **~14 tok/s** |
+
+   Against that ceiling, each site standalone on a 27B:
+
+   ```
+   site 0 (cmp170hx-64, 64 GiB)   ~ 58.6 tok/s standalone  -> FASTER alone
+   site 1 (5070+3060,   24 GiB)   ~ 22.2 tok/s standalone  -> FASTER alone
+   ```
+
+   Both beat the shard by simply not sharding. Splitting is only worth a link
+   when *every* site is slower alone than the link's ceiling **and** none can
+   hold the model — otherwise it is a pure loss.
+
+**What to run instead** — one full replica per site, sharing nothing at runtime:
+
+```sh
+# big-model site
+python3 scripts/svmi-auto.py --profile 27b --gpu cmp170hx-64 --ctx 32768 --host-ram 64
+# consumer site (plans the fastest card; use gpucheck for placement across both)
+python3 scripts/svmi-auto.py --profile 27b --gpu 5070      --ctx 32768 --host-ram 48
+python3 scripts/svmi-gpucheck.py --model-gib 15.4
+```
+
+Route users to their nearest site. Replicas share nothing per token, so each
+site's throughput is its own and losing one costs capacity, not correctness.
+Only the GGUF has to reach both machines, once, by any file transfer you like.
+
+If you want one logical endpoint, put a plain HTTP proxy in front of the two
+`llama-server` instances. That routes whole **requests** — the RTT is paid once
+per request instead of once per token — which is exactly what a WAN can carry.
+
+The one thing this arrangement cannot do is make the two boxes into a single
+larger VRAM pool. That needs per-token traffic, and the link cannot carry it. A
+model that fits neither site alone has to be requantized, streamed (SVMI), or
+run only at the site that can hold it.
+
 ### `driver: N/A` — nothing works before this is fixed
 
 `inxi -G` reporting `driver: N/A` against an NVIDIA device means no kernel module

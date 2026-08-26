@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -40,9 +41,19 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 MODEL_PROFILES = _mod.MODEL_PROFILES
 GPU_PRESETS = _mod.GPU_PRESETS
+MACHINES = _mod.MACHINES
 Q8_BPE = _mod.Q8_BPE
 
-# effective GB/s on the wire (payload after TCP/IP overhead) and typical LAN RTT
+# VRAM read bandwidth, for "what would this site do on its own?"
+_cspec = importlib.util.spec_from_file_location("svmi_cluster", Path(__file__).parent / "svmi-cluster.py")
+assert _cspec is not None and _cspec.loader is not None
+_cmod = importlib.util.module_from_spec(_cspec)
+_cspec.loader.exec_module(_cmod)
+HBM_BW = _cmod.HBM_BW
+DEFAULT_BW = _cmod.DEFAULT_BW
+BW_EFFICIENCY = _cmod.BW_EFFICIENCY
+
+# effective GB/s on the wire (payload after TCP/IP overhead) and round-trip time.
 NIC_PRESETS = {
     "1gbe":   (0.112, 0.00035),
     "2.5gbe": (0.28,  0.00030),
@@ -50,13 +61,63 @@ NIC_PRESETS = {
     "10gbe":  (1.12,  0.00020),
     "wifi6":  (0.09,  0.00250),
     "tb4":    (2.50,  0.00010),  # thunderbolt/usb4 networking
+    # WAN links between separate SITES. Bandwidth is almost irrelevant here -
+    # one decode activation row is a few KB - and RTT is everything, because a
+    # layer split pays a full round trip per token per node boundary. Speed of
+    # light in fibre is ~200,000 km/s, so ~1 ms per 100 km each way BEFORE any
+    # router hop; these are typical measured figures, not the physical floor.
+    "wan-metro":       (0.30, 0.010),   # same city
+    "wan-regional":    (0.30, 0.030),   # ~1000 km
+    "wan-continental": (0.30, 0.070),   # coast to coast
 }
+# above this RTT the link is not a LAN and an RPC layer split is the wrong shape
+WAN_RTT_FLOOR = 0.005
+
+
+def site_standalone_tok_s(gpus: list[str], weights_bytes: float) -> tuple[float, float]:
+    """
+    (tok/s, VRAM GiB) this site would reach running the whole model ALONE.
+
+    Decode is bandwidth-bound once resident, and under a layer split a token
+    walks every card in order, so the site's effective read rate is the
+    capacity-weighted harmonic mean of its cards' bandwidths - not their sum.
+    """
+    vram = sum(GPU_PRESETS[g][0] for g in gpus)
+    if vram <= 0:
+        return 0.0, 0.0
+    # time to read `share` of the weights off each card, filling fastest first
+    ordered = sorted(gpus, key=lambda g: HBM_BW.get(g, DEFAULT_BW), reverse=True)
+    remaining = weights_bytes / GiB
+    seconds = 0.0
+    for g in ordered:
+        take = min(GPU_PRESETS[g][0], remaining)
+        bw = HBM_BW.get(g, DEFAULT_BW) * BW_EFFICIENCY
+        seconds += (take * 1.074) / bw          # GiB -> GB, then / (GB/s)
+        remaining -= take
+        if remaining <= 0:
+            break
+    if remaining > 0 or seconds <= 0:
+        return 0.0, vram                        # does not fit on this site
+    return 1.0 / seconds, vram
 
 
 def parse_node(spec: str) -> tuple[list[str], float]:
-    """'2080ti,2080ti:ram=8' -> (['2080ti','2080ti'], 8.0)"""
+    """
+    '2080ti,2080ti:ram=8' -> (['2080ti','2080ti'], 8.0)
+
+    A bare machine name from MACHINES also works ('fallen', 'cmp-rig'), with an
+    explicit ':ram=' still winning over the machine's recorded RAM.
+    """
     ram = 16.0
     parts = spec.split(":")
+    head = parts[0].strip()
+    if head in MACHINES:
+        m_gpus, m_ram, _desc = MACHINES[head]
+        gpus, ram = list(m_gpus), m_ram
+        for p in parts[1:]:
+            if p.startswith("ram="):
+                ram = float(p[4:])
+        return gpus, ram
     gpus = [g.strip() for g in parts[0].split(",") if g.strip()]
     for p in parts[1:]:
         if p.startswith("ram="):
@@ -67,11 +128,85 @@ def parse_node(spec: str) -> tuple[list[str], float]:
     return gpus, ram
 
 
+def self_test() -> int:
+    import io as _io
+    from contextlib import redirect_stdout
+
+    def run(argv: list[str]) -> str:
+        buf = _io.StringIO()
+        argv_save = sys.argv
+        sys.argv = ["svmi-net.py"] + argv
+        try:
+            with redirect_stdout(buf):
+                main()
+        finally:
+            sys.argv = argv_save
+        return buf.getvalue()
+
+    # 1. machine names resolve, and ':ram=' still overrides the recorded RAM
+    for mname, (gpus, ram, _d) in MACHINES.items():
+        assert parse_node(mname) == (list(gpus), ram), mname
+        for g in gpus:
+            assert g in GPU_PRESETS, (mname, g)
+    assert parse_node("fallen:ram=96")[1] == 96.0
+    assert parse_node("3090,3060:ram=32") == (["3090", "3060"], 32.0)
+
+    # 2. every WAN preset is above the floor, every LAN preset below it
+    for nic, (_bw, rtt) in NIC_PRESETS.items():
+        wan = nic.startswith("wan-")
+        assert (rtt >= WAN_RTT_FLOOR) == wan, (nic, rtt)
+
+    # 3. standalone throughput: fills the fastest card first, and reports
+    #    0 tok/s when the model cannot fit on that site at all
+    solo_cmp, vram_cmp = site_standalone_tok_s(["cmp170hx-64"], 15.4 * GiB)
+    solo_mix, vram_mix = site_standalone_tok_s(["5070", "3060"], 15.4 * GiB)
+    assert vram_cmp == 64 and vram_mix == 24, (vram_cmp, vram_mix)
+    assert solo_cmp > solo_mix > 0, (solo_cmp, solo_mix)
+    #    15.4 GiB fits inside the 5070's 12 GiB + 3.4 on the 3060, so the mixed
+    #    site must be SLOWER than an imaginary all-5070 site of the same size
+    solo_fast, _ = site_standalone_tok_s(["5070", "5070"], 15.4 * GiB)
+    assert solo_fast > solo_mix, (solo_fast, solo_mix)
+    assert site_standalone_tok_s(["3060"], 40.0 * GiB) == (0.0, 12), "overflow -> 0 tok/s"
+
+    # 4. a WAN link refuses to print a tensor-split, and says why
+    wan_out = run(["--profile", "27b", "--node", "cmp-rig", "--node", "fallen",
+                   "--nic", "wan-continental"])
+    assert "SEPARATE SITES" in wan_out, wan_out
+    #    match an emitted split ("--tensor-split 23.0,12.0"), not the prose that
+    #    explains one is deliberately withheld
+    assert not re.search(r"--tensor-split\s+[\d.]", wan_out), "WAN must not emit a split"
+    assert "ggml-rpc-server" not in wan_out, "WAN must not emit worker commands"
+    assert "unauthenticated" in wan_out and "round trip" in wan_out
+    assert "FITS the combined VRAM" not in wan_out, "combined VRAM is not a pool over a WAN"
+    #    the replica commands it prints must be runnable: profile KEY, not the
+    #    display name ("27b", never "27b (Q4_K_M-class profile)")
+    assert "--profile 27b --gpu" in wan_out, wan_out
+    assert "(Q4_K_M-class profile)" not in wan_out.split("What to do instead")[1]
+
+    # 5. --force-rpc emits commands, bound to a tunnel rather than 0.0.0.0
+    forced = run(["--profile", "27b", "--node", "cmp-rig", "--node", "fallen",
+                  "--nic", "wan-continental", "--force-rpc"])
+    assert "ggml-rpc-server -H <tunnel-ip>" in forced, forced
+    assert "-H 0.0.0.0" not in forced, "must not tell a WAN worker to bind 0.0.0.0"
+
+    # 6. LAN behaviour is untouched: split + workers on 0.0.0.0
+    lan = run(["--profile", "70b", "--node", "3090", "--node", "3060", "--nic", "1gbe"])
+    assert "SEPARATE SITES" not in lan
+    assert re.search(r"--tensor-split\s+[\d.]", lan), lan
+    assert "ggml-rpc-server -H 0.0.0.0" in lan
+
+    print("self-test OK: machine names resolve (+ram= override); WAN/LAN preset split")
+    print("              matches WAN_RTT_FLOOR; standalone tok/s fills fastest-first and")
+    print("              returns 0 on overflow; a WAN prints no tensor-split and no worker")
+    print("              commands; --force-rpc binds a tunnel, never 0.0.0.0; LAN unchanged.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("model", nargs="?", help="GGUF file (or use --profile)")
     ap.add_argument("--profile", choices=sorted(MODEL_PROFILES))
-    ap.add_argument("--node", action="append", required=True, metavar="GPUS[:ram=GiB]",
+    ap.add_argument("--node", action="append", metavar="GPUS[:ram=GiB]",
                     help="one machine: comma list of GPU presets, optional :ram=GiB "
                          "(first --node is the main host; repeat per machine)")
     ap.add_argument("--nic", choices=sorted(NIC_PRESETS), default="1gbe",
@@ -81,7 +216,27 @@ def main() -> int:
     ap.add_argument("--display-reserve", type=float, default=1.0, help="GiB held back on the main host GPU 0")
     ap.add_argument("--overhead", type=float, default=1.25, help="activation reserve GiB per node")
     ap.add_argument("--port-base", type=int, default=50052)
+    ap.add_argument("--force-rpc", action="store_true",
+                    help="print RPC commands even on a WAN link (use only inside a "
+                         "private tunnel - the protocol is unauthenticated)")
+    ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--list-machines", action="store_true",
+                    help="list the named machines usable as --node values")
     args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    if args.list_machines:
+        print("named machines (use as --node <name>, ':ram=' still overrides):\n")
+        for mname, (gpus, ram, desc) in sorted(MACHINES.items()):
+            vram = sum(GPU_PRESETS[g][0] for g in gpus)
+            print(f"  {mname:12} {'+'.join(gpus):16} {vram:3.0f} GiB VRAM  {ram:3.0f} GiB RAM")
+            print(f"  {'':12} {desc}")
+        return 0
+
+    if not args.node:
+        ap.error("at least one --node is required (or --list-machines)")
 
     if args.model:
         sys.path.insert(0, str(Path(__file__).parent.parent / "gguf-py"))
@@ -158,7 +313,12 @@ def main() -> int:
     print("          model load ships weight shards once over the same link "
           f"(~{weights / (net_bw * 1e9) / 60:.1f} min at {args.nic}; use rpc-server -c to cache on workers)\n")
 
-    if need > vram_total:
+    is_wan = net_rtt >= WAN_RTT_FLOOR
+    if is_wan:
+        # combined VRAM across sites is not a pool: reaching it costs per-token
+        # traffic this link cannot carry. Sizing is per site, below.
+        pass
+    elif need > vram_total:
         print("verdict : DOES NOT FIT the combined VRAM — options:")
         print("          - smaller quant (see svmi-auto.py requant lines: Q2_0 / Q1_0)")
         print("          - fewer ctx / q4_0 KV (-ctk q4_0 -ctv q4_0 --kv-mean-center kbias.gguf)")
@@ -173,8 +333,61 @@ def main() -> int:
             print(f"            ~{local_share / GiB:.1f} GiB streamed shard. Make the {best_ram:.0f} GiB-RAM node the")
             print("            main host (reorder --node) so the overflow streams from big RAM.")
         print()
-    else:
+    elif not is_wan:
         print("verdict : FITS the combined VRAM — fully resident distributed split\n")
+
+    # ---- a WAN link is not a slow LAN: do not shard across it ---------------
+    if is_wan:
+        print("verdict : SEPARATE SITES — do NOT layer-split across this link.\n")
+        print("  1. Security. The RPC protocol is unauthenticated and unencrypted: any host")
+        print("     that can reach the port can load a model file and execute on the worker.")
+        print("     Over a WAN that is a remote-code-execution surface, not a config choice.")
+        print("     No --tensor-split is printed for this link on purpose.\n")
+        print("  2. Physics. A layer split pays a full round trip per node boundary per token,")
+        print(f"     so this link alone caps decode at ~{net_cap:,.1f} tok/s before any compute:")
+        for ni, (gpus, _ram) in enumerate(nodes):
+            solo, vram = site_standalone_tok_s(gpus, weights)
+            label = f"site {ni} ({'+'.join(gpus)}, {vram:.0f} GiB)"
+            if solo <= 0:
+                print(f"       {label:38} cannot hold the model alone")
+            else:
+                verdict = "FASTER alone" if solo > net_cap else "slower alone"
+                print(f"       {label:38} ~{solo:5,.1f} tok/s standalone  -> {verdict}")
+        print("     Sharding is only worth the link when EVERY site is slower alone than")
+        print(f"     ~{net_cap:,.1f} tok/s and none can hold the model - otherwise it is a pure loss.\n")
+        print("  3. What to do instead — one full replica per site, no cross-site tensor traffic:")
+        for ni, (gpus, ram) in enumerate(nodes):
+            solo, _ = site_standalone_tok_s(gpus, weights)
+            if solo > 0:
+                sel = f"--profile {args.profile}" if args.profile else args.model
+                print(f"       site {ni}: python3 scripts/svmi-auto.py {sel} "
+                      f"--gpu {gpus[0]} --ctx {args.ctx} --host-ram {ram:.0f}")
+                if len(set(gpus)) > 1:
+                    # sized above against the FASTEST card, which is the right default:
+                    # under a layer split a slower second card buys capacity, not speed
+                    print(f"       {'':6}  ^ mixed cards ({'+'.join(gpus)}) - that plans the fastest one."
+                          f" For placement across both:")
+                    print(f"       {'':8}python3 scripts/svmi-gpucheck.py --model-gib "
+                          f"{weights / GiB:.1f}")
+            else:
+                sel = f"--profile {args.profile}" if args.profile else args.model
+                print(f"       site {ni}: does not fit on this site alone — requant or stream: "
+                      f"python3 scripts/svmi-auto.py {sel} --gpu {gpus[0]} --ctx {args.ctx}")
+        print("     Route users to their nearest site; replicas share nothing at run time, so")
+        print("     each one's throughput is its own and a site going down costs capacity, not")
+        print("     correctness. Only the GGUF has to reach both, once, by any file transfer.")
+        print("     If you genuinely need one logical endpoint, put a proxy in front of the two")
+        print("     llama-server instances - that routes whole REQUESTS (RTT paid once), which")
+        print("     is what a WAN can carry, unlike per-token activations.\n")
+        print("     Needing the two boxes as ONE larger pool of VRAM is the case this cannot")
+        print("     serve: that requires per-token traffic, and the link cannot carry it.")
+        print("     Put the big model on whichever site holds it, or shrink it to fit.\n")
+        if args.force_rpc:
+            print("  --force-rpc given: commands below anyway. Tunnel them (WireGuard/SSH)")
+            print("  and bind the workers to the tunnel interface, never 0.0.0.0.\n")
+        else:
+            print("  (--force-rpc prints the RPC commands anyway, for a private tunnel.)")
+            return 0
 
     # ---- commands ----------------------------------------------------------
     print("commands (trusted LAN only — the RPC protocol is unauthenticated!):\n")
@@ -183,7 +396,10 @@ def main() -> int:
     for ni in range(1, len(nodes)):
         gpus, _ = nodes[ni]
         print(f"  # worker{ni} ({'+'.join(gpus)}) — release binaries already include this")
-        print(f"  ggml-rpc-server -H 0.0.0.0 -p {port} -c")
+        # on a tunnelled WAN link the worker must bind the tunnel interface only;
+        # 0.0.0.0 would expose an unauthenticated port to everything that can route to it
+        bind = "<tunnel-ip>" if is_wan else "0.0.0.0"
+        print(f"  ggml-rpc-server -H {bind} -p {port} -c")
         rpc_list.append(f"<worker{ni}-ip>:{port}")
         port += 1
     split = ",".join(str(round(d[2] / GiB, 1)) for d in devices)
