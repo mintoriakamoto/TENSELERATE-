@@ -1,4 +1,4 @@
-name: CI (CMP INT8)
+name: CI (CUDA presets)
 # The all-integer CUDA configuration the CMP mining cards need: every matmul on
 # MMQ, no cuBLAS FP16 GEMM, and the prmt+dp2a emulation of the throttled dp4a.
 # Nothing else in the fleet compiles GGML_CUDA_FORCE_MMQ + GGML_CUDA_DISABLE_DP4A
@@ -76,3 +76,60 @@ jobs:
               grep -qE '^GGML_CUDA_DISABLE_DP4A:[A-Z]+=ON' "$cache" || { echo "DISABLE_DP4A not set"; exit 1; }
           fi
           echo "ok: $(grep -E '^GGML_CUDA(_FORCE_MMQ|_FORCE_CUBLAS|_DISABLE_DP4A):' "$cache" | tr '\n' ' ')"
+
+  consumer-cuda:
+    # The consumer GeForce presets are the mirror image of the CMP ones: cuBLAS is
+    # deliberately left ON, because these cards have working FP16/BF16 tensor cores
+    # and FORCE_MMQ would cost prompt throughput. This job exists to prove that
+    # stays true, and that the mixed Blackwell+Ampere fat binary actually links.
+    #
+    # CUDA 12.8 is the floor, not a preference: nvcc 12.6 cannot emit sm_120 at all.
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [rtx-blackwell, rtx-ampere, rtx-5070+3060]
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt update
+          apt install -y cmake build-essential ninja-build libgomp1 git libssl-dev
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: consumer-cuda-${{ matrix.preset }}
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build ${{ matrix.preset }}
+        run: |
+          cmake --preset ${{ matrix.preset }} \
+            -DLLAMA_FATAL_WARNINGS=ON \
+            -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+            -DGGML_CUDA_CUB_3DOT2=ON
+          cmake --build build-${{ matrix.preset }} --target llama-cli llama-quantize llama-batched-bench
+
+      - name: Confirm cuBLAS was left alone and the right SASS was emitted
+        run: |
+          set -e
+          cache=build-${{ matrix.preset }}/CMakeCache.txt
+          # the whole point of these presets: MMQ is NOT forced on healthy cards
+          grep -qE '^GGML_CUDA_FORCE_MMQ:[A-Z]+=ON' "$cache" && { echo "FORCE_MMQ is on"; exit 1; }
+          grep -qE '^GGML_CUDA_DISABLE_DP4A:[A-Z]+=ON' "$cache" && { echo "DP4A emulation is on"; exit 1; }
+          archs=$(grep -E '^CMAKE_CUDA_ARCHITECTURES:' "$cache" | cut -d= -f2)
+          case "${{ matrix.preset }}" in
+            rtx-blackwell)  expect="120-real" ;;
+            rtx-ampere)     expect="86-real" ;;
+            rtx-5070+3060)  expect="86-real;120-real" ;;
+          esac
+          [ "$archs" = "$expect" ] || { echo "arch mismatch: got '$archs' want '$expect'"; exit 1; }
+          echo "ok: archs=$archs, cuBLAS left available"

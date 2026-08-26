@@ -45,6 +45,14 @@
         "name": "cmp-dp4a", "hidden": true,
         "cacheVariables": { "GGML_CUDA_DISABLE_DP4A": "ON" }
     },
+    {
+        "description": "Healthy consumer GeForce: keep cuBLAS available. These cards have working FP16/BF16 tensor cores, so FORCE_MMQ (which the CMP presets need) is a prompt-processing REGRESSION here - MMQ still wins batch-1 decode and llama.cpp already picks it there on its own.",
+        "name": "cuda-consumer", "hidden": true,
+        "cacheVariables": {
+            "GGML_CUDA":   "ON",
+            "GGML_NATIVE": "OFF"
+        }
+    },
 
     {
         "name": "x64-windows-llvm", "hidden": true,
@@ -121,6 +129,22 @@
         "description": "CMP 100-210 (GV100, sm_70): FP16 is slower than FP32, but dp4a is not throttled.",
         "name": "cmp100-210-int8", "inherits": [ "base", "release", "cuda-int8" ],
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "70-real" }
+    },
+
+    {
+        "description": "RTX 50-series (Blackwell GB20x, sm_120). Needs CUDA >= 12.8; 12.6 and older cannot emit sm_120 at all.",
+        "name": "rtx-blackwell", "inherits": [ "base", "release", "cuda-consumer" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "120-real" }
+    },
+    {
+        "description": "RTX 30-series consumer (Ampere GA10x, sm_86). Unlike the CMP Ampere cards, dp4a is NOT throttled here - do not add cmp-dp4a.",
+        "name": "rtx-ampere", "inherits": [ "base", "release", "cuda-consumer" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "86-real" }
+    },
+    {
+        "description": "One binary for a mixed Blackwell+Ampere box (e.g. RTX 5070 GB205 + RTX 3060 GA106). Fat binary: both SASS targets, so either card runs without a JIT stall.",
+        "name": "rtx-5070+3060", "inherits": [ "base", "release", "cuda-consumer" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "86-real;120-real" }
     }
   ]
 }
