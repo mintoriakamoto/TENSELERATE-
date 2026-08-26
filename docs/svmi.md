@@ -589,6 +589,63 @@ placement (17.6 GiB of weights):
 `--tensor-split` is indexed by *visible-device order*, not by speed — reorder with
 `CUDA_VISIBLE_DEVICES` so device 0 is the fastest card.
 
+### Running the RavenX Chaos Agent for Hermes (both machines)
+
+The two boxes are used independently — each person runs the model locally and
+points [Hermes](https://127.0.0.1:8080) at their own machine. There is no link
+between them (see the next section for why that is the right call).
+
+**One command per machine**, after building `llama-server` for that box's preset:
+
+```sh
+./scripts/tenselerate-serve.sh
+```
+
+It downloads `RavenX-Chaos-Agent-Q4_K_M.gguf` (15.7 GB) on first run, reads the
+GPU from `nvidia-smi`, and serves an OpenAI-compatible endpoint on
+`http://127.0.0.1:8080/v1` with the model's own recommended flags: thinking
+**off** (`--jinja --reasoning-format none` — Qwen 3.8 otherwise spends the whole
+budget looping in reasoning), `--temp 0 --repeat-penalty 1.15`, and a `q8_0` KV
+cache. Placement is automatic:
+
+| Machine | What the script does |
+| --- | --- |
+| CMP 170HX (unlocked ≥ 24 GiB) | `-ngl 99` — the 15.7 GiB model is resident on the one card |
+| RTX 5070 + RTX 3060 | `-ngl 99 --tensor-split 0.68,0.32` — fills the 5070 first |
+
+Then point Hermes at the local server (identical on both machines):
+
+```sh
+hermes config set model.provider custom
+hermes config set model.base_url http://127.0.0.1:8080/v1
+hermes config set model.default \
+  deadbydawn101/RavenXAiLabs-Chaos-Agent-Qwen3.8-27B-Frontier-Intelligence-Injected-OBLITERATED-GGUF:Q4_K_M
+```
+
+The script sets `--alias` to exactly that `model.default` string, so the server
+answers to the id Hermes sends.
+
+**Build once, per box** (the model is stock `Q4_K_M`, but the *build* still has
+to match the card — see the preset sections above):
+
+```sh
+# CMP 170HX
+cmake --preset cmp170hx-int8   && cmake --build build-cmp170hx-int8   -j
+# RTX 5070 + RTX 3060
+cmake --preset rtx-5070+3060   && cmake --build build-rtx-5070+3060   -j
+```
+
+Two notes specific to these machines:
+
+- **CMP 170HX:** the model is `Q4_K_M`, so the resident weights sit on the
+  k-quant kernels, but the card still needs the `cmp170hx-int8` build — its FP16
+  path is unusable, so `FORCE_MMQ` keeps decode on the integer kernels either
+  way. And confirm `nvidia-smi` shows the unlocked size before serving: at the
+  factory 8/10 GiB the model does not fit, and the script warns about it.
+- **RTX 5070:** needs the driver actually bound (`lsmod | grep nvidia`) and CUDA
+  ≥ 12.8 for `sm_120`. If `inxi -G` shows `driver: N/A`, fix that first — nothing
+  runs until it is.
+
 ### Two machines, two sites: replicas, never a shard
 
 The fleet is two independent boxes on opposite sides of the continent, not one
