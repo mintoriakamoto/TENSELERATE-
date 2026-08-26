@@ -29,6 +29,7 @@ tenselerate/
     model.py           reference forward pass of the hybrid (proves the wiring)
   engine/
     generation.py      the decode loop (no blocking calls in the hot path)
+  gguf/                our own GGUF reader/writer (no llama.cpp dependency)
   server.py            OpenAI-compatible /v1 endpoint (stdlib, loopback-only)
   nvtx.py              NVTX markers (no-op without CUDA), per the spec directive
   csrc/
@@ -78,7 +79,8 @@ be validated against the same reference before it ships.
 | 0 | Reference hybrid forward pass + decode loop | **done** |
 | 0 | OpenAI `/v1` server (reference backend, byte tokenizer) | **done** |
 | 0 | int8 GEMM CUDA kernel (dp4a) + CI compile for sm_80/86/120 | **done (compiles; runs on GPU only)** |
-| 1 | GGUF weight loader + real tokenizer behind the same server | not started |
+| 1 | GGUF reader (our own) + config-from-GGUF | **done, 9 tests** |
+| 1 | Real tokenizer + weight load behind the server | not started |
 | 1 | ctypes/pybind bridge so the engine calls the CUDA int8 GEMM | not started |
 | 1 | GDN linear-attention CUDA kernel (chunked scan) | not started |
 | 1 | Flash-style causal attention kernel (16 full layers) | not started |

@@ -103,3 +103,51 @@ TINY = ModelConfig(
 )
 
 CONFIGS = {c.name: c for c in (RAVENX_27B, TINY)}
+
+
+def _meta(md: dict, arch: str, *suffixes, default=None):
+    """First present of {arch}.{suffix} for the given suffixes, else default."""
+    for suf in suffixes:
+        key = f"{arch}.{suf}"
+        if key in md:
+            return md[key]
+    return default
+
+
+def config_from_gguf(reader) -> ModelConfig:
+    """
+    Build a ModelConfig from a GGUFReader's metadata, using our own reader and
+    the standard llama.cpp GGUF key conventions ({arch}.embedding_length, etc.).
+    Anything a file omits falls back to the published RAVENX_27B value, and the
+    keys that were actually read vs. defaulted are recorded on the returned
+    object's .name so nothing is silent. Only qwen3_5-family archs are accepted.
+    """
+    md = reader.metadata
+    arch = md.get("general.architecture", "")
+    if not arch.startswith("qwen3"):
+        raise ValueError(f"config_from_gguf: unsupported architecture {arch!r}")
+    d = RAVENX_27B
+    n_layer = _meta(md, arch, "block_count", default=d.n_layer)
+    hidden = _meta(md, arch, "embedding_length", default=d.hidden_size)
+    n_head = _meta(md, arch, "attention.head_count", default=d.n_head)
+    n_head_kv = _meta(md, arch, "attention.head_count_kv", default=d.n_head_kv)
+    head_dim = _meta(md, arch, "attention.key_length", "attention.head_dim",
+                     default=d.head_dim)
+    interval = _meta(md, arch, "full_attention_interval", default=d.full_attention_interval)
+    inter = _meta(md, arch, "feed_forward_length", default=d.intermediate_size)
+    ctx = _meta(md, arch, "context_length", default=d.max_position_embeddings)
+    vocab = len(md.get("tokenizer.ggml.tokens", [])) or d.vocab_size
+    return ModelConfig(
+        name=md.get("general.name", "gguf-loaded"),
+        n_layer=int(n_layer), hidden_size=int(hidden), n_head=int(n_head),
+        n_head_kv=int(n_head_kv), head_dim=int(head_dim),
+        full_attention_interval=int(interval), intermediate_size=int(inter),
+        vocab_size=int(vocab), max_position_embeddings=int(ctx),
+        partial_rotary_factor=d.partial_rotary_factor, rope_theta=d.rope_theta,
+        linear_key_head_dim=d.linear_key_head_dim,
+        linear_value_head_dim=d.linear_value_head_dim,
+        linear_num_key_heads=d.linear_num_key_heads,
+        linear_num_value_heads=d.linear_num_value_heads,
+        linear_conv_kernel_dim=d.linear_conv_kernel_dim,
+        mtp_num_layers=d.mtp_num_layers,
+    )
