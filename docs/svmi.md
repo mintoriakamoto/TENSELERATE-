@@ -589,6 +589,81 @@ placement (17.6 GiB of weights):
 `--tensor-split` is indexed by *visible-device order*, not by speed — reorder with
 `CUDA_VISIBLE_DEVICES` so device 0 is the fastest card.
 
+### Two machines, two sites: replicas, never a shard
+
+The fleet is two independent boxes on opposite sides of the continent, not one
+cluster:
+
+| Site | Hardware | Role |
+| --- | --- | --- |
+| `cmp-rig` | CMP 170HX unlocked to 64 GiB HBM2e | big-model site |
+| `fallen` | Ryzen 9 7950X, RTX 5070 + RTX 3060, 48 GiB RAM | consumer site |
+
+Both are named in `MACHINES`, so neither has to be retyped:
+
+```sh
+python3 scripts/svmi-net.py --list-machines
+python3 scripts/svmi-net.py --profile 27b --node cmp-rig --node fallen --nic wan-continental
+```
+
+That prints a refusal, not a plan, and the refusal is the useful part.
+
+**Do not layer-split a model across the WAN.** Two independent reasons, either
+one sufficient:
+
+1. **Security.** The RPC protocol is unauthenticated and unencrypted. Anything
+   that can reach the port can make the worker load a file and execute. On a LAN
+   that is a calculated risk; across the public internet it is a remote-code-
+   execution surface. `svmi-net.py` refuses to print a `--tensor-split` or a
+   worker command for a WAN link unless you pass `--force-rpc`, and even then it
+   binds `<tunnel-ip>` rather than `0.0.0.0`.
+
+2. **Physics.** A layer split pays a full round trip per node boundary *per
+   token*. Bandwidth is irrelevant — one decode activation row is a few KB — and
+   RTT is everything:
+
+   | Link | RTT | Decode ceiling, 1 boundary |
+   | --- | --- | --- |
+   | 1 GbE LAN | 0.35 ms | ~2,860 tok/s |
+   | WiFi 6 | 2.5 ms | ~400 tok/s |
+   | WAN, metro | 10 ms | ~100 tok/s |
+   | WAN, regional | 30 ms | ~33 tok/s |
+   | **WAN, continental** | **70 ms** | **~14 tok/s** |
+
+   Against that ceiling, each site standalone on a 27B:
+
+   ```
+   site 0 (cmp170hx-64, 64 GiB)   ~ 58.6 tok/s standalone  -> FASTER alone
+   site 1 (5070+3060,   24 GiB)   ~ 22.2 tok/s standalone  -> FASTER alone
+   ```
+
+   Both beat the shard by simply not sharding. Splitting is only worth a link
+   when *every* site is slower alone than the link's ceiling **and** none can
+   hold the model — otherwise it is a pure loss.
+
+**What to run instead** — one full replica per site, sharing nothing at runtime:
+
+```sh
+# big-model site
+python3 scripts/svmi-auto.py --profile 27b --gpu cmp170hx-64 --ctx 32768 --host-ram 64
+# consumer site (plans the fastest card; use gpucheck for placement across both)
+python3 scripts/svmi-auto.py --profile 27b --gpu 5070      --ctx 32768 --host-ram 48
+python3 scripts/svmi-gpucheck.py --model-gib 15.4
+```
+
+Route users to their nearest site. Replicas share nothing per token, so each
+site's throughput is its own and losing one costs capacity, not correctness.
+Only the GGUF has to reach both machines, once, by any file transfer you like.
+
+If you want one logical endpoint, put a plain HTTP proxy in front of the two
+`llama-server` instances. That routes whole **requests** — the RTT is paid once
+per request instead of once per token — which is exactly what a WAN can carry.
+
+The one thing this arrangement cannot do is make the two boxes into a single
+larger VRAM pool. That needs per-token traffic, and the link cannot carry it. A
+model that fits neither site alone has to be requantized, streamed (SVMI), or
+run only at the site that can hold it.
+
 ### `driver: N/A` — nothing works before this is fixed
 
 `inxi -G` reporting `driver: N/A` against an NVIDIA device means no kernel module
