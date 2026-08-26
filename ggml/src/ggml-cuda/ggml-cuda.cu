@@ -1709,11 +1709,18 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
                                    src0->view_src;
 
     bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
-                             dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE &&
-                             !ggml_cuda_no_mmvq();
+                             dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
 
     // fusion is not universally faster on Pascal
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+
+    // only decline the fused MMVQ path when MMQ can actually take the tensor, matching
+    // ggml_cuda_should_use_mmvq(). Declining unconditionally would drop fusion for
+    // types MMQ does not support and still land on MMVQ, losing the fusion for nothing.
+    if (use_mul_mat_vec_q && ggml_cuda_no_mmvq() &&
+        ggml_cuda_should_use_mmq(src0->type, cc, src1->ne[1], /*n_experts =*/ 0)) {
+        return false;
+    }
     if (cc <= GGML_CUDA_CC_PASCAL) {
         return false;
     }

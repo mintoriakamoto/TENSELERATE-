@@ -117,6 +117,39 @@ hardware: every token reads the whole KV, so 18-36 GiB per token over a 1-2 GB/s
 PCIe link is seconds per token, not milliseconds. On these cards KV has to live in
 VRAM.
 
+
+### Anchoring the model to a real measurement
+
+The throughput model is validated against a published figure rather than only its own
+arithmetic: a 27B `Q4_K_S` on an RTX 5090 (1792 GB/s) decodes at **75 tok/s**
+single-stream, and `B * HBM_BW * eff / weights` predicts 79 at `eff = 0.65` - within
+5%. `svmi-cluster.py --self-test` asserts that anchor holds within 10%, so a drift in
+`BW_EFFICIENCY` fails the test instead of silently skewing every plan.
+
+**Speculation is the part that does not scale the way it looks.** The same setup goes
+75 -> 90 tok/s with 2-token MTP at 60% acceptance: **x1.20**, not the x1.60 that
+accepted-tokens-per-pass suggests, because the verify pass costs real work. Vendor
+claims of 2-3x are document-throughput figures under their own conditions. Use `x1.2`
+for interactive decode unless you have measured otherwise on your own hardware - it is
+the single easiest number in this document to overstate.
+
+### Model-side levers (Qwen3.5/3.6/3.8 family)
+
+These cost nothing and are larger than most kernel work:
+
+- **Reasoning effort.** These models inject a reasoning instruction from the chat
+  template and default to `xhigh`. Dropping it cuts thinking tokens sharply, and
+  llama.cpp can set it at runtime without editing the Jinja:
+  `--chat-template-kwargs '{"reasoning_effort":"low"}'` (or `medium`). Fewer thinking
+  tokens is a bigger end-to-end win than any flag in this repo.
+- **MTP wants a cold sampler.** Temperature above 1 and any repetition penalty degrade
+  draft acceptance. Keep `--temp 1.0` or lower and repetition penalty at 1.0 (off).
+- **Check acceptance before trusting MTP.** Below ~50% acceptance on 2 drafted tokens,
+  the MTP build is *slower* than the plain one - the drafting overhead stops paying for
+  itself. Switch to the non-MTP quant in that case.
+- Qwen's own thinking-mode sampler: `temp 1.0, top_p 0.95, top_k 20, min_p 0,
+  presence_penalty 0, repetition_penalty 1.0`.
+
 ## The topology this implies
 
 **Do not pipeline-split the model across nodes for throughput.** The weights fit

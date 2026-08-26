@@ -96,17 +96,30 @@ def model_shape(args, ap):
         n_head_kv = fi(f"{arch}.attention.head_count_kv") or n_head
         weights = sum(int(t.n_bytes) for t in r.tensors)
         # hybrid (SSM + attention) models keep a KV cache only on the full-attention
-        # layers; the rest carry a fixed-size recurrent state. Qwen3.5/3.6 and
-        # Qwen3-Next mark this with full_attention_interval - see src/models/qwen35.cpp,
-        # is_recr_impl[i] = (i + 1) % full_attn_interval != 0
-        interval = fi(f"{arch}.full_attention_interval") or args.full_attn_interval
-        return n_layer, n_embd, n_head, n_head_kv, weights, Path(args.model).name, interval
+        # layers; the rest carry a fixed-size recurrent state. Resolve it exactly the
+        # way src/models/qwen35.cpp does: the explicit per-layer array wins, then the
+        # interval, and the engine's own fallback is 4 - not 1. Reading only the
+        # interval silently reverts to the dense assumption on a model that ships
+        # the array, which is the whole error this is here to avoid.
+        n_attn = 0
+        fld = r.get_field(f"{arch}.attention.recurrent_layers")
+        if fld is not None:
+            recr = [bool(fld.parts[i][0]) for i in fld.data]
+            n_attn = sum(1 for i, v in enumerate(recr[:n_layer]) if not v)
+        if n_attn == 0:
+            interval = fi(f"{arch}.full_attention_interval")
+            if interval == 0:
+                interval = (args.full_attn_interval if args.full_attn_interval > 1
+                            else (4 if str(arch).startswith("qwen3") else 1))
+            n_attn = max(1, n_layer // max(1, interval))
+        return n_layer, n_embd, n_head, n_head_kv, weights, Path(args.model).name, n_attn
     if not args.profile:
         ap.error("provide a GGUF path or --profile")
     n_layer, n_embd, n_head, n_head_kv, w_gib, params_b = MODEL_PROFILES[args.profile]
     weights = int(params_b * 1e9 * args.bpw / 8)
+    n_attn = max(1, n_layer // max(1, args.full_attn_interval))
     return (n_layer, n_embd, n_head, n_head_kv, weights,
-            f"{args.profile} @ {args.bpw} bpw", args.full_attn_interval)
+            f"{args.profile} @ {args.bpw} bpw", n_attn)
 
 
 def node_throughput(weights_b: float, kv_per_seq_b: float, bw_gbs: float, slots: int,
@@ -132,9 +145,12 @@ def main() -> int:
     ap.add_argument("--target", type=float, default=0.0, help="aggregate tok/s to hit")
     ap.add_argument("--overhead", type=float, default=2.0, help="activation reserve GiB/node")
     ap.add_argument("--spec-gain", type=float, default=1.0,
-                    help="accepted tokens per verify pass with MTP speculation "
-                         "(--spec-type draft-mtp; 1.0 = off, 1.5-2.0 typical). At deep "
-                         "context this is the only lever that adds tok/s without adding KV")
+                    help="MEASURED end-to-end speedup from MTP speculation, not the raw "
+                         "acceptance rate. 1.0 = off. Anchor: a 27B Q4_K_S on a 5090 goes "
+                         "75 -> 90 tok/s with 2-token MTP at 60% acceptance, i.e. x1.20 - "
+                         "the verify pass is not free, so accepted-tokens-per-pass (x1.6 "
+                         "there) badly overstates it. Vendor figures of 2-3x are document "
+                         "throughput under their own conditions, not this ratio")
     ap.add_argument("--full-attn-interval", type=int, default=1,
                     help="hybrid models keep KV on 1 layer in N (Qwen3.5/3.6, Qwen3-Next: "
                          "typically 4); 1 = every layer, i.e. a dense model. Read from the "
@@ -147,8 +163,7 @@ def main() -> int:
     if args.gpu not in GPU_PRESETS:
         ap.error(f"unknown GPU '{args.gpu}'; known: {', '.join(sorted(GPU_PRESETS))}")
 
-    n_layer, n_embd, n_head, n_head_kv, weights, name, interval = model_shape(args, ap)
-    n_attn_layer = max(1, n_layer // max(1, interval))
+    n_layer, n_embd, n_head, n_head_kv, weights, name, n_attn_layer = model_shape(args, ap)
     vram = GPU_PRESETS[args.gpu][0] * GiB
     bw = HBM_BW.get(args.gpu, DEFAULT_BW)
     eff, eff_measured = measured_efficiency(args.gpu)
@@ -160,9 +175,9 @@ def main() -> int:
     print(f"model   : {name}  ({weights / GiB:.1f} GiB weights, {n_layer} layers)")
     print(f"nodes   : {args.nodes}x {args.gpu}  ({vram / GiB:.0f} GiB VRAM, "
           f"{args.host_ram:.0f} GiB RAM, ~{bw:.0f} GB/s HBM each)")
-    if interval > 1:
-        print(f"hybrid  : 1 full-attention layer in {interval} -> {n_attn_layer} of {n_layer} "
-              f"layers hold KV; the rest carry a fixed-size recurrent state")
+    if n_attn_layer < n_layer:
+        print(f"hybrid  : {n_attn_layer} of {n_layer} layers hold KV; the rest carry a "
+              "fixed-size recurrent state")
     print(f"context : {args.ctx:,} tok, KV {args.kv_type} = {kv_tok / 1024:.0f} KiB/tok "
           f"-> {kv_seq / GiB:.1f} GiB per sequence\n")
 
@@ -263,8 +278,14 @@ def self_test() -> int:
     # 3. profile shapes are present for the models the docs reference
     for p in ("27b", "70b"):
         assert p in MODEL_PROFILES, p
+    # 4. anchor the bandwidth model to a published measurement: a 27B Q4_K_S on an
+    #    RTX 5090 (1792 GB/s) decodes at 75 tok/s single-stream. Predicted throughput
+    #    must land within 10% of that, or BW_EFFICIENCY has drifted from reality.
+    w_q4ks = 27e9 * 4.37 / 8
+    pred = node_throughput(w_q4ks, 0.0, 1792.0, 1, BW_EFFICIENCY)
+    assert abs(pred - 75.0) / 75.0 < 0.10, f"bandwidth model off the 5090 anchor: {pred:.1f}"
     print("self-test OK: batching curve (near-linear then KV-bound), KV-dominated cap,")
-    print("              27b/70b profiles present")
+    print(f"              27b/70b profiles, 5090 anchor {pred:.0f} vs 75 tok/s measured")
     return 0
 
 

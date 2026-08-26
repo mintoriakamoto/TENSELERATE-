@@ -435,6 +435,12 @@ is `q8_0`. That is ~18% of the weights, so the file is ~15% larger than `Q4_K_M`
 
 - **quality**: attention is the part of a layer that `Q4_K_M` hurts most, and it
   is small enough that INT8 there costs less than a full step up in the body.
+
+> On a **hybrid** model (Qwen3.5/3.6/3.8, Qwen3-Next) only the full-attention layers
+> carry `attn_*` tensors - 16 of 64 at the usual interval - so `INT8` touches roughly
+> a quarter of what it does on a dense model. The size premium is correspondingly
+> smaller than the ~15% quoted here, and so is the quality gain. The 48 linear-attention
+> layers take the `Q4_K_M` body treatment either way (`ssm_conv1d` is never quantized).
 - **speed on cards with no usable FP16**: `q8_0` runs the integer MMQ/dp4a path,
   which is all the CMP mining cards (90HX, 170HX, 100-210) have. Pair it with
   `-DGGML_CUDA_DISABLE_DP4A=ON` on Ampere CMP cards and `-DGGML_CUDA_FORCE_MMQ=ON`

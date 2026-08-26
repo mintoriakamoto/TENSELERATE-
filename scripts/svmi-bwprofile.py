@@ -12,6 +12,10 @@ Method (after FreeToken's `ft bench bw`, Apache-2.0, https://github.com/FlashML-
   * decode is bandwidth-bound and reads weights + touched KV once per token, so
     achieved_GBs = bytes_per_token * measured_tok_s. Run llama-bench at a known
     batch size and the achieved bandwidth falls out of the token rate.
+    CAVEAT: this counts the WHOLE weight file as read per token, which is true for
+    a dense or hybrid model and FALSE for MoE, where only the routed experts are
+    touched. On an MoE model the figure overstates achieved bandwidth by roughly
+    n_expert/n_expert_used, so treat it as a dense-model measurement.
   * measure the STREAMED path the same way when the model does not fit resident,
     which gives the PCIe gather rate under real kernels rather than a linear copy.
   * the ratio of the two is what decides resident-vs-streamed, and the ratio is

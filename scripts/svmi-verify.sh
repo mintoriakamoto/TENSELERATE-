@@ -40,24 +40,38 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/svmi-verify.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
 PROMPT=${SVMI_PROMPT:-"The theory of relativity states that"}
 GEN=(-n "${SVMI_NGEN:-64}" -p "$PROMPT" --seed 1234 --temp 0 --no-display-prompt --simple-io -no-cnv)
 
 run_tokens() {
     # $1 = label; remaining = env assignments
     local label=$1; shift
-    env "$@" "$BIN" "${ARGS[@]}" "${GEN[@]}" 2>/dev/null > "/tmp/svmi-verify-$label.txt"
+    env "$@" "$BIN" "${ARGS[@]}" "${GEN[@]}" 2>"$WORK/$label.err" > "$WORK/$label.txt"
 }
 
 echo "== token-identity check (greedy, seed 1234) =="
 run_tokens baseline -u GGML_CUDA_REGISTER_HOST -u GGML_SCHED_STREAM_WEIGHTS
 run_tokens streamed GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_STREAM_WEIGHTS="$SLOTS"
 
-if diff -u /tmp/svmi-verify-baseline.txt /tmp/svmi-verify-streamed.txt > /tmp/svmi-verify.diff; then
-    echo "PASS: streamed output is byte-identical to baseline"
+# two runs that both produced nothing are byte-identical and prove nothing, so
+# require real output before the comparison is allowed to mean anything
+for label in baseline streamed; do
+    if [ ! -s "$WORK/$label.txt" ]; then
+        echo "FAIL: the $label run produced no output - the comparison would be vacuous" >&2
+        echo "      (exit status was 0; stderr follows)" >&2
+        tail -n 20 "$WORK/$label.err" >&2 || true
+        exit 1
+    fi
+done
+
+if diff -u "$WORK/baseline.txt" "$WORK/streamed.txt" > "$WORK/verify.diff"; then
+    echo "PASS: streamed output is byte-identical to baseline ($(wc -c < "$WORK/baseline.txt") bytes)"
 else
     echo "FAIL: streamed output diverged from baseline" >&2
-    cat /tmp/svmi-verify.diff >&2
+    cat "$WORK/verify.diff" >&2
     exit 1
 fi
 
@@ -73,8 +87,13 @@ if [ -n "$PPL_FILE" ]; then
         env "$@" "$PPL_BIN" "${ARGS[@]}" -f "$PPL_FILE" 2>/dev/null \
             | grep -oE 'PPL = [0-9.]+' | tail -1 | awk '{print $3}'
     }
-    P_BASE=$(ppl baseline -u GGML_CUDA_REGISTER_HOST -u GGML_SCHED_STREAM_WEIGHTS)
-    P_STREAM=$(ppl streamed GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_STREAM_WEIGHTS="$SLOTS")
+    P_BASE=$(ppl baseline -u GGML_CUDA_REGISTER_HOST -u GGML_SCHED_STREAM_WEIGHTS || true)
+    P_STREAM=$(ppl streamed GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_STREAM_WEIGHTS="$SLOTS" || true)
+    if [ -z "$P_BASE" ] || [ -z "$P_STREAM" ]; then
+        # empty on both sides compares equal, which would read as a pass
+        echo "FAIL: could not parse PPL from $PPL_BIN output (baseline='$P_BASE' streamed='$P_STREAM')" >&2
+        exit 1
+    fi
     echo "baseline PPL = $P_BASE"
     echo "streamed PPL = $P_STREAM"
     if [ "$P_BASE" = "$P_STREAM" ]; then
