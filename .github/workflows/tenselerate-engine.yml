@@ -1,0 +1,66 @@
+name: CI (TENSELERATE engine)
+# The native from-scratch engine: a CPU-testable reference (the oracle every
+# kernel is validated against) plus the CUDA kernels. This runs the reference
+# tests and the host GEMM check on any runner, and compiles the CUDA kernels in
+# a CUDA container so int8_gemm.cu is proven to build for the target archs. It
+# cannot RUN the kernels (no GPU on the runner) — that happens on the real cards.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['tenselerate/**', 'tests/tenselerate/**', '.github/workflows/tenselerate-engine.yml']
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ['tenselerate/**', 'tests/tenselerate/**', '.github/workflows/tenselerate-engine.yml']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  reference:
+    name: reference (cpu) — tests, lint, host gemm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install --quiet numpy pytest flake8 flake8-no-print "ty==0.0.35"
+      - name: flake8
+        run: flake8 tenselerate/ tests/tenselerate/
+      - name: ty type-check
+        run: ty check tenselerate/ tests/tenselerate/
+      - name: pytest (reference numerics + engine wiring)
+        run: PYTHONPATH=. pytest tests/tenselerate/ -q
+      - name: host int8 GEMM reference test
+        run: |
+          cmake -S tenselerate/csrc -B build-kernels -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-kernels --target tenselerate_gemm_test
+          ctest --test-dir build-kernels --output-on-failure
+
+  cuda-compile:
+    name: cuda kernels compile (sm_80/86/120)
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install build deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt update
+          apt install -y cmake build-essential ninja-build
+      - name: Compile CUDA kernels
+        run: |
+          cmake -S tenselerate/csrc -B build-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80-real;86-real;120-real"
+          cmake --build build-cuda
+      - name: Confirm the CUDA library and the host test both built
+        run: |
+          test -f build-cuda/libtenselerate_kernels.a || { echo "CUDA lib missing"; exit 1; }
+          ./build-cuda/tenselerate_gemm_test
+          echo "ok: int8_gemm.cu compiled for sm_80/86/120 and the reference test passed"
