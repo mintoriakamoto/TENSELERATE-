@@ -91,9 +91,14 @@ def rope_partial(
     if rot == 0:
         return x.copy()
     half = rot // 2
-    inv_freq = theta ** (-np.arange(0, half, dtype=f32) / half)
-    ang = positions.astype(f32)[:, None] * inv_freq[None, :]   # [seq, half]
-    cos, sin = np.cos(ang), np.sin(ang)
+    # Angle computed in float64: positions run to the millions at the 750K
+    # context floor, and float32 loses enough precision there that cos/sin of
+    # the rotation angle drift measurably. The rotation itself still applies
+    # in float32 - only the angle needs the wider type.
+    inv_freq = theta ** (-np.arange(0, half, dtype=np.float64) / half)
+    ang = positions.astype(np.float64)[:, None] * inv_freq[None, :]   # [seq, half]
+    cos = np.cos(ang).astype(f32)
+    sin = np.sin(ang).astype(f32)
     out = x.copy().astype(f32)
     x1 = out[..., 0:half].copy()      # snapshot: the writes below alias `out`
     x2 = out[..., half:rot].copy()

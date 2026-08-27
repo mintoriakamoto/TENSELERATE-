@@ -72,6 +72,30 @@ def test_rope_position_zero_is_identity():
     assert np.allclose(y, x, atol=1e-5)
 
 
+def test_rope_matches_float64_reference_at_large_absolute_positions():
+    """
+    Regression for float32 angle computation: at the positions the 750K context
+    floor actually reaches (hundreds of thousands), computing the rotation
+    angle entirely in float32 loses enough precision that cos/sin drift from
+    the true angle. Compare against an explicit float64 reference.
+    """
+    x = _rng(70).standard_normal((3, 256)).astype(f32)
+    pos = np.array([1, 500_000, 749_999], dtype=np.int64)
+    y = nx.rope_partial(x, pos, rotary_factor=0.25, theta=1.0e7)
+
+    rot = (256 // 4) - (256 // 4) % 2
+    half = rot // 2
+    inv_freq64 = 1.0e7 ** (-np.arange(0, half, dtype=np.float64) / half)
+    ang64 = pos.astype(np.float64)[:, None] * inv_freq64[None, :]
+    cos64, sin64 = np.cos(ang64), np.sin(ang64)
+    x1, x2 = x[:, :half].astype(np.float64), x[:, half:rot].astype(np.float64)
+    expect = x.copy().astype(f32)
+    expect[:, :half] = (x1 * cos64 - x2 * sin64).astype(f32)
+    expect[:, half:rot] = (x1 * sin64 + x2 * cos64).astype(f32)
+
+    assert np.allclose(y, expect, atol=1e-4)
+
+
 def test_rope_preserves_norm_and_only_touches_rotary_part():
     x = _rng(8).standard_normal((5, 256)).astype(f32)
     pos = np.arange(5, dtype=np.int64)
