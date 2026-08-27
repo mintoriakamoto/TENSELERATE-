@@ -61,6 +61,66 @@ The GDN recurrence is validated in two forms — sequential and chunked — that
 agree (`test_gdn_chunked_equals_sequential`). The chunked form is exactly what the
 CUDA kernel parallelizes over, so that test is the kernel's spec.
 
+## The 750,000-token floor
+
+TENSELERATE never runs below **750,000 tokens** of context. `MIN_CONTEXT_TOKENS`
+is a hard constant and `ModelConfig.validate_context()` refuses anything under it.
+
+That floor has one unavoidable consequence, and it is the interesting part. The
+model's trained rotary range is 262,144 tokens. Serving 750K with *full*
+attention would extrapolate positions, which needs YaRN/RoPE scaling — and we do
+not do RoPE scaling, because it costs quality. So the floor **forces** the
+windowed hybrid:
+
+- the **48 Gated-DeltaNet layers** carry long range in a fixed recurrent state
+  and have **no positional encoding at all** — unbounded by construction,
+  whether the sequence is 750K or 10M tokens;
+- the **16 full-attention layers** attend a bounded `attention_window` that never
+  exceeds the trained range, so no position is ever extrapolated.
+
+`needs_rope_scaling()` therefore returns `False` at *any* context on a windowed
+config, and a config with `attention_window=None` is refused at the floor rather
+than silently extrapolating.
+
+The window pays for itself twice. No position extrapolation, **and** a KV cache
+whose size stops growing with context:
+
+| context | KV (q8_0, 128K window) | RoPE scaling |
+| --- | --- | --- |
+| 750,000 | 4.25 GiB | no |
+| 1,000,000 | 4.25 GiB | no |
+| 10,000,000 | 4.25 GiB | no |
+
+Decode speed follows KV, so it is **constant at any context at or above the
+window**. That is the property that makes a 750K floor affordable at all.
+
+### The window is the throughput dial
+
+Each concurrent sequence carries its own windowed KV, so the window — not the
+context — is what caps batch size, and batch size is what buys aggregate
+throughput. On the unlocked CMP 170HX at the 750K floor:
+
+| window | KV/seq | max concurrent | aggregate |
+| --- | --- | --- | --- |
+| 131,072 | 4.25 GiB | 11 | ~160 tok/s |
+| 65,536 | 2.12 GiB | 22 | ~319 tok/s |
+| **32,768** | **1.06 GiB** | **44** | **~638 tok/s** |
+| 16,384 | 0.53 GiB | 88 | ~1,277 tok/s |
+
+**Context is 750,000 in every row.** The window trades exact-recall depth (how
+far back the full-attention layers see verbatim) for concurrency — never context
+length, which the GDN state carries regardless. `tenselerate plan` computes this
+table for the machine it is run on and refuses to print a batch size that would
+not fit in VRAM.
+
+Note the consumer box (24 GiB) fits the floor at a 128K window but only one
+sequence; it wants a narrower window to get useful concurrency.
+
+**The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
+stock model, whose full-attention layers are not windowed, so past 262,144 it
+would need RoPE scaling. The bridge therefore caps at the model's native 256K;
+the 750K floor is a property of the native engine.
+
 ## The int8 path, and the CMP
 
 Decode leans on int8 symmetric-quantized matmuls accumulated in int32 — the IMMA
@@ -80,12 +140,14 @@ be validated against the same reference before it ships.
 | 0 | OpenAI `/v1` server (reference backend, byte tokenizer) | **done** |
 | 0 | int8 GEMM CUDA kernel (dp4a) + CI compile for sm_80/86/120 | **done (compiles; runs on GPU only)** |
 | 1 | GGUF reader (our own) + config-from-GGUF | **done, 9 tests** |
+| 1 | 750K context floor + windowed hybrid attention (config + CLI) | **done, 10 tests** |
+| 1 | `tenselerate` CLI (update/info/plan/doctor/serve) | **done, 9 tests** |
 | 1 | Real tokenizer + weight load behind the server | not started |
 | 1 | ctypes/pybind bridge so the engine calls the CUDA int8 GEMM | not started |
 | 1 | GDN linear-attention CUDA kernel (chunked scan) | not started |
 | 1 | Flash-style causal attention kernel (16 full layers) | not started |
 | 2 | Paged KV manager (full layers) + fixed GDN-state pool | not started |
-| 2 | Continuous batching scheduler (steal vLLM's idea, our code) | not started |
+| 2 | Continuous batching scheduler — the 600 tok/s lever | not started |
 | 2 | IMMA `mma.sync` s8 GEMM — the CMP fast path | not started |
 | 3 | MTP self-speculation (the built-in draft head) | not started |
 | 3 | SVMI weight streaming for models that overflow VRAM | not started |
@@ -95,6 +157,16 @@ written against a reference that already exists, so each kernel lands with a
 correctness bar on day one instead of being debugged blind.
 
 ## Running it now
+
+```sh
+# the CLI — one entry point for everything
+python3 -m tenselerate info                    # geometry + the 750K floor
+python3 -m tenselerate plan --machine cmp170hx # what this box does at the floor
+python3 -m tenselerate doctor                  # driver/hardware check
+python3 -m tenselerate update                  # check for a new build
+python3 -m tenselerate update --source         # fast-forward and rebuild
+python3 -m tenselerate serve --port 8080       # the OpenAI /v1 endpoint
+```
 
 ```sh
 # reference tests (no GPU)
