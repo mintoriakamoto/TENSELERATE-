@@ -29,6 +29,8 @@ tenselerate/
     model.py           reference forward pass of the hybrid (proves the wiring)
   engine/
     generation.py      the decode loop (no blocking calls in the hot path)
+    kvpool.py          paged KV blocks for the windowed full-attention layers
+    scheduler.py       continuous batching: admit/retire every step
   gguf/                our own GGUF reader/writer (no llama.cpp dependency)
   server.py            OpenAI-compatible /v1 endpoint (stdlib, loopback-only)
   nvtx.py              NVTX markers (no-op without CUDA), per the spec directive
@@ -121,6 +123,38 @@ stock model, whose full-attention layers are not windowed, so past 262,144 it
 would need RoPE scaling. The bridge therefore caps at the model's native 256K;
 the 750K floor is a property of the native engine.
 
+## Continuous batching — the 600 tok/s lever
+
+Decode is bandwidth-bound: one pass reads *all* the weights no matter how many
+sequences are in flight. Running B sequences per step therefore costs barely more
+than running one and yields B times the tokens. That is the entire reason 600+
+tok/s is reachable on hardware whose single-stream ceiling is ~46.
+
+Static batching throws it away, because the whole batch waits for its slowest
+member. `tenselerate/engine/scheduler.py` admits and retires sequences **every
+step**, so a finished sequence's slot is refilled immediately.
+
+Two pools, matching the hybrid:
+
+- **paged KV blocks** (`engine/kvpool.py`) for the 16 windowed full-attention
+  layers — fixed-size, non-contiguous, so the pool cannot fragment;
+- a **fixed per-sequence GDN state** for the 48 linear layers, which never grows.
+
+**Admission is memory-first.** A sequence is admitted only when its *worst-case*
+footprint — a full window of KV — is already available. That is deliberate:
+admitting on current usage and hoping is how a server OOMs mid-generation, and a
+sequence killed at token 400,000 of a 750,000-token context has wasted more work
+than it ever produced. Over-admission raises `OutOfBlocks`; un-admittable work
+raises a deadlock error rather than spinning forever.
+
+The sliding window is what makes a 750K floor affordable here: a sequence's
+blocks stop accumulating once it reaches the window, so `total_tokens` runs past
+750,000 while `cached_tokens` holds flat and the pool never grows. That is pinned
+by `test_kv_is_bounded_while_context_runs_past_the_floor`.
+
+`tenselerate plan` asks the real `Scheduler` for its capacity rather than
+recomputing it, so the throughput table above and the engine can never disagree.
+
 ## The int8 path, and the CMP
 
 Decode leans on int8 symmetric-quantized matmuls accumulated in int32 — the IMMA
@@ -146,8 +180,8 @@ be validated against the same reference before it ships.
 | 1 | ctypes/pybind bridge so the engine calls the CUDA int8 GEMM | not started |
 | 1 | GDN linear-attention CUDA kernel (chunked scan) | not started |
 | 1 | Flash-style causal attention kernel (16 full layers) | not started |
-| 2 | Paged KV manager (full layers) + fixed GDN-state pool | not started |
-| 2 | Continuous batching scheduler — the 600 tok/s lever | not started |
+| 2 | Paged KV manager (full layers) + fixed GDN-state pool | **done, 16 tests** |
+| 2 | Continuous batching scheduler — the 600 tok/s lever | **done, 16 tests** |
 | 2 | IMMA `mma.sync` s8 GEMM — the CMP fast path | not started |
 | 3 | MTP self-speculation (the built-in draft head) | not started |
 | 3 | SVMI weight streaming for models that overflow VRAM | not started |

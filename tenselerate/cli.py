@@ -24,6 +24,7 @@ from tenselerate.config import (
     CONFIGS, MIN_CONTEXT_TOKENS, RAVENX_27B, TINY,
     ContextFloorError, RopeScalingRequired,
 )
+from tenselerate.engine.scheduler import Scheduler
 
 GiB = 1024 ** 3
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -151,7 +152,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # Each concurrent sequence carries its OWN windowed KV, so batch is capped by
     # memory, not just by bandwidth. Never report a batch that cannot be resident.
     free_for_kv = vram - weights - args.overhead_gib
-    max_batch = int(free_for_kv // kv) if kv > 0 else 0
+    # Ask the real scheduler, so this table and the engine can never disagree.
+    try:
+        sched = Scheduler(cfg, kv_budget_gib=free_for_kv)
+        max_batch = sched.max_concurrent
+    except ValueError:
+        max_batch = 0
     if max_batch < 1:
         _out("  (no room for even one sequence's KV - narrow the window)")
         return 1
