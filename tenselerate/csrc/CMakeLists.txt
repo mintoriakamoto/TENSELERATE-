@@ -31,6 +31,15 @@ if(CMAKE_CUDA_COMPILER)
     add_library(tenselerate_kernels STATIC int8_gemm.cu)
     target_include_directories(tenselerate_kernels PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(tenselerate_kernels PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+    # Shared library exposing the C ABI (tenselerate_int8_gemm) for ctypes -
+    # tenselerate/backend/int8_gemm.py dlopen's this, never the static target.
+    add_library(tenselerate_int8_gemm_c SHARED int8_gemm.cu)
+    target_include_directories(tenselerate_int8_gemm_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(tenselerate_int8_gemm_c PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON)
+
     message(STATUS "TENSELERATE: CUDA kernels enabled (arch ${CMAKE_CUDA_ARCHITECTURES})")
 else()
     message(STATUS "TENSELERATE: no CUDA compiler — building host reference test only")

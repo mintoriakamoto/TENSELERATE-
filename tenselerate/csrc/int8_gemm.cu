@@ -85,3 +85,54 @@ int int8_gemm_cuda(
 }
 
 }  // namespace tenselerate
+
+// C ABI bridge (see int8_gemm.h): owns the device buffers around
+// int8_gemm_cuda so a ctypes caller only ever touches host memory. Errors from
+// any CUDA call short-circuit and clean up what was already allocated.
+extern "C" int tenselerate_int8_gemm(
+    const int8_t* A, const float* a_scale,
+    const int8_t* B, const float* b_scale,
+    float* C, int M, int N, int K) {
+    if (K % 4 != 0) return -1;
+
+    int8_t *dA = nullptr, *dB = nullptr;
+    float *d_as = nullptr, *d_bs = nullptr, *dC = nullptr;
+    cudaError_t err = cudaSuccess;
+
+    auto fail = [&]() {
+        cudaFree(dA); cudaFree(dB); cudaFree(d_as); cudaFree(d_bs); cudaFree(dC);
+        return -2;
+    };
+
+    err = cudaMalloc(&dA, (size_t)M * K * sizeof(int8_t));
+    if (err != cudaSuccess) return fail();
+    err = cudaMalloc(&dB, (size_t)N * K * sizeof(int8_t));
+    if (err != cudaSuccess) return fail();
+    err = cudaMalloc(&d_as, (size_t)M * sizeof(float));
+    if (err != cudaSuccess) return fail();
+    err = cudaMalloc(&d_bs, (size_t)N * sizeof(float));
+    if (err != cudaSuccess) return fail();
+    err = cudaMalloc(&dC, (size_t)M * N * sizeof(float));
+    if (err != cudaSuccess) return fail();
+
+    err = cudaMemcpy(dA, A, (size_t)M * K * sizeof(int8_t), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) return fail();
+    err = cudaMemcpy(dB, B, (size_t)N * K * sizeof(int8_t), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) return fail();
+    err = cudaMemcpy(d_as, a_scale, (size_t)M * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) return fail();
+    err = cudaMemcpy(d_bs, b_scale, (size_t)N * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) return fail();
+
+    int rc = tenselerate::int8_gemm_cuda(dA, d_as, dB, d_bs, dC, M, N, K, nullptr);
+    if (rc != 0) { fail(); return rc; }
+
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) return fail();
+
+    err = cudaMemcpy(C, dC, (size_t)M * N * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) return fail();
+
+    cudaFree(dA); cudaFree(dB); cudaFree(d_as); cudaFree(d_bs); cudaFree(dC);
+    return 0;
+}
