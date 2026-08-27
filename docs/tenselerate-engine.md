@@ -34,11 +34,14 @@ tenselerate/
   gguf/                our own GGUF reader/writer (no llama.cpp dependency)
   server.py            OpenAI-compatible /v1 endpoint (stdlib, loopback-only)
   nvtx.py              NVTX markers (no-op without CUDA), per the spec directive
+  backend/
+    int8_gemm.py       ctypes bridge: CudaBackend / ReferenceBackend, get_backend()
   csrc/
     int8_gemm.h        int8 GEMM signature + portable C++ reference
-    int8_gemm.cu       CUDA int8 GEMM (dp4a tiled; IMMA is the next step)
+    int8_gemm.cu       CUDA int8 GEMM (dp4a tiled) + the C ABI bridge wrapper
+    int8_gemm_stub.cpp CPU stand-in for the bridge's C ABI (test fixture only)
     gemm_test.cpp      host test of the reference (runs with no GPU)
-    CMakeLists.txt     host test always; CUDA lib when a compiler is present
+    CMakeLists.txt     host test always; CUDA lib + shared lib when a compiler is present
 tests/tenselerate/     correctness tests, all CPU, all green in CI
 ```
 
@@ -165,6 +168,34 @@ validated, as the baseline. The CMP win comes from the `mma.sync` s8 IMMA kernel
 (CC ≥ 7.5) that replaces it on that hardware — that is a roadmap item, and it will
 be validated against the same reference before it ships.
 
+## The kernel bridge
+
+`tenselerate/backend/int8_gemm.py` is what turns a compiled CUDA kernel into
+something the engine actually calls. It is a thin ctypes layer, not a compiled
+Python extension, so importing the engine never needs a compile step - only
+going fast does.
+
+The C ABI is a host-pointer wrapper (`tenselerate_int8_gemm` in
+`csrc/int8_gemm.cu`/`.h`) around the device-pointer kernel from the int8 GEMM
+work: it owns the `cudaMalloc`/`Memcpy`/launch/`Memcpy`-back/`Free` sequence, so
+the Python side only ever touches ordinary NumPy arrays. It is built into its
+own `SHARED` CMake target (`tenselerate_int8_gemm_c`), separate from the static
+library the CUDA-only tests link, because ctypes needs a `dlopen`-able `.so`.
+
+`get_backend()` finds that library (searching this repo's `build-*` directories,
+or an exact path via `TENSELERATE_INT8_GEMM_LIB`) and returns a `CudaBackend`;
+with nothing found it returns the `ReferenceBackend` — the same NumPy path as
+before — automatically. Nothing calling `quantized_linear()` needs to know which
+one it got.
+
+**Validated without a GPU.** `int8_gemm_stub.cpp` implements the identical C ABI
+on the CPU (calls `int8_gemm_ref` instead of launching a kernel), compiled with
+plain `g++`. Pointing the bridge at it with `TENSELERATE_INT8_GEMM_LIB` exercises
+the *entire* marshaling path — pointer types, contiguity, error-code propagation
+— through the exact mechanism that will load the real `.so`, with only the
+computation swapped. `test_quantized_linear_stub_cuda_matches_reference_backend`
+is the claim that matters: swapping backends does not change the answer.
+
 ## Roadmap (honest ordering)
 
 | Phase | Item | Status |
@@ -177,7 +208,7 @@ be validated against the same reference before it ships.
 | 1 | 750K context floor + windowed hybrid attention (config + CLI) | **done, 10 tests** |
 | 1 | `tenselerate` CLI (update/info/plan/doctor/serve) | **done, 9 tests** |
 | 1 | Real tokenizer + weight load behind the server | not started |
-| 1 | ctypes/pybind bridge so the engine calls the CUDA int8 GEMM | not started |
+| 1 | ctypes bridge so the engine calls the CUDA int8 GEMM | **done, 16 tests** |
 | 1 | GDN linear-attention CUDA kernel (chunked scan) | not started |
 | 1 | Flash-style causal attention kernel (16 full layers) | not started |
 | 2 | Paged KV manager (full layers) + fixed GDN-state pool | **done, 16 tests** |

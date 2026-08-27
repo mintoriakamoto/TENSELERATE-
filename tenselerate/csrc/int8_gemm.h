@@ -34,12 +34,27 @@ inline void int8_gemm_ref(
     }
 }
 
-// CUDA entry point (defined in int8_gemm.cu). Pointers are device pointers.
-// Returns 0 on success. A no-op stub is provided when built without CUDA so the
-// symbol always links.
+// CUDA entry point (defined in int8_gemm.cu). Pointers are DEVICE pointers,
+// already allocated and copied by the caller. Returns 0 on success. Only
+// compiled into the tree when a CUDA compiler is present (see CMakeLists.txt);
+// nothing in this repo links it on a host-only build.
 int int8_gemm_cuda(
     const int8_t* dA, const float* d_a_scale,
     const int8_t* dB, const float* d_b_scale,
     float* dC, int M, int N, int K, void* stream);
 
 }  // namespace tenselerate
+
+// -----------------------------------------------------------------------
+// C ABI bridge for tenselerate/backend/int8_gemm.py (ctypes). HOST pointers:
+// this wrapper owns the cudaMalloc/Memcpy/launch/Memcpy-back/Free around
+// int8_gemm_cuda, so the Python side only ever deals with ordinary NumPy
+// arrays. Defined in int8_gemm.cu (CUDA build) and exported from the SHARED
+// library target (tenselerate_int8_gemm_c), never the static one.
+//
+// A[M,K] row-major, a_scale[M]; B[N,K] row-major, b_scale[N]; C[M,N] row-major.
+// Return: 0 success; -1 K not a multiple of 4; -2 a CUDA call failed.
+extern "C" int tenselerate_int8_gemm(
+    const int8_t* A, const float* a_scale,
+    const int8_t* B, const float* b_scale,
+    float* C, int M, int N, int K);

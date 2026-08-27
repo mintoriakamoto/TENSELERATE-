@@ -59,8 +59,18 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES="80-real;86-real;120-real"
           cmake --build build-cuda
-      - name: Confirm the CUDA library and the host test both built
+      - name: Confirm the CUDA libraries and the host test all built
         run: |
-          test -f build-cuda/libtenselerate_kernels.a || { echo "CUDA lib missing"; exit 1; }
+          test -f build-cuda/libtenselerate_kernels.a || { echo "static CUDA lib missing"; exit 1; }
+          test -f build-cuda/libtenselerate_int8_gemm_c.so || { echo "ctypes shared lib missing"; exit 1; }
+          nm -D build-cuda/libtenselerate_int8_gemm_c.so | grep -q tenselerate_int8_gemm \
+            || { echo "tenselerate_int8_gemm not exported from the shared lib"; exit 1; }
           ./build-cuda/tenselerate_gemm_test
-          echo "ok: int8_gemm.cu compiled for sm_80/86/120 and the reference test passed"
+          echo "ok: int8_gemm.cu compiled for sm_80/86/120, the shared lib exports the C ABI,"
+          echo "    and the reference test passed"
+      - name: Upload the shared library (for backend bridge smoke testing)
+        uses: actions/upload-artifact@v6
+        with:
+          name: tenselerate-int8-gemm-cuda-so
+          path: build-cuda/libtenselerate_int8_gemm_c.so
+          retention-days: 7
