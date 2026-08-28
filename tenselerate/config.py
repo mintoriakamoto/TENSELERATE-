@@ -1,12 +1,20 @@
 """
 Model configuration for the TENSELERATE engine.
 
-The reference target is the RavenX Chaos Agent — architecture `qwen3_5`, a hybrid
-of Gated-DeltaNet linear-attention layers and periodic full-attention layers.
+TENSELERATE serves exactly ONE model: the RavenX Chaos Agent (Qwen3.8-27B,
+architecture `qwen3_5`) — a hybrid of Gated-DeltaNet linear-attention layers and
+periodic full-attention layers. That is a product decision, the same kind as the
+context floor below: the engine is tuned around this one geometry (its 16-of-64
+attention split, its KV footprint, its window math), and every published number
+assumes it. Loading anything else is refused, not degraded — `config_from_gguf`
+raises `UnsupportedModelError` for any file whose architecture is not `qwen3_5`
+or whose geometry differs from `RAVENX_27B` in any field.
+
 `RAVENX_27B` mirrors the published config.json exactly; `TINY` is a smoke-scale
-model with the same *structure* (same full-attention period, same partial-rotary
-factor) used by the tests and the dev server so the whole pipeline runs end to
-end without the 15.7 GB weights.
+stand-in with the same *structure* (same full-attention period, same
+partial-rotary factor) used by the tests and the dev server so the whole
+pipeline runs end to end without the 15.7 GB weights. TINY is not a second
+supported model — it is never loadable from a GGUF file.
 
 TENSELERATE runs at a HARD FLOOR of 750,000 tokens of context (MIN_CONTEXT_TOKENS).
 That is a product decision, and it has one unavoidable engineering consequence:
@@ -32,6 +40,9 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 # Hard product floor: the engine never runs below this much context.
 MIN_CONTEXT_TOKENS = 750_000
+# Hard product lock: the only architecture and model this engine will load.
+SUPPORTED_ARCH = "qwen3_5"
+SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
 # Default bounded window for the full-attention layers. Must stay <= the model's
 # max_position_embeddings so no position is ever extrapolated (no YaRN/RoPE
 # scaling). 128K leaves headroom under the RavenX 256K trained range and keeps
@@ -46,6 +57,10 @@ class ContextFloorError(ValueError):
 
 class RopeScalingRequired(ValueError):
     """Raised when a configuration could only work by extrapolating positions."""
+
+
+class UnsupportedModelError(ValueError):
+    """Raised when a file is not the one model this engine serves."""
 
 
 @dataclass(frozen=True)
@@ -187,6 +202,33 @@ TINY = ModelConfig(
 CONFIGS = {c.name: c for c in (RAVENX_27B, TINY)}
 
 
+# The fields that identify Qwen3.8-27B. A file matching all of these IS the
+# supported model as far as the engine is concerned; a mismatch in any one of
+# them is a different model and is refused.
+_IDENTITY_FIELDS = (
+    "n_layer", "hidden_size", "n_head", "n_head_kv", "head_dim",
+    "full_attention_interval", "intermediate_size", "vocab_size",
+    "max_position_embeddings",
+)
+
+
+def validate_model(cfg: ModelConfig) -> ModelConfig:
+    """
+    Enforce the single-model lock: cfg must match RAVENX_27B in every identity
+    field. Returns cfg on success so it can be used inline.
+    """
+    mismatched = [
+        f"{f}={getattr(cfg, f)!r} (expected {getattr(RAVENX_27B, f)!r})"
+        for f in _IDENTITY_FIELDS
+        if getattr(cfg, f) != getattr(RAVENX_27B, f)
+    ]
+    if mismatched:
+        raise UnsupportedModelError(
+            f"TENSELERATE serves only {SUPPORTED_MODEL}; this file's geometry "
+            f"does not match: " + ", ".join(mismatched))
+    return cfg
+
+
 def _meta(md: dict, arch: str, *suffixes, default=None):
     """First present of {arch}.{suffix} for the given suffixes, else default."""
     for suf in suffixes:
@@ -200,14 +242,19 @@ def config_from_gguf(reader) -> ModelConfig:
     """
     Build a ModelConfig from a GGUFReader's metadata, using our own reader and
     the standard llama.cpp GGUF key conventions ({arch}.embedding_length, etc.).
-    Anything a file omits falls back to the published RAVENX_27B value, and the
-    keys that were actually read vs. defaulted are recorded on the returned
-    object's .name so nothing is silent. Only qwen3_5-family archs are accepted.
+    Anything a file omits falls back to the published RAVENX_27B value.
+
+    This is where the single-model lock is enforced: only architecture
+    `qwen3_5` is accepted, and the resulting geometry must match RAVENX_27B
+    exactly (validate_model), or UnsupportedModelError is raised.
     """
     md = reader.metadata
     arch = md.get("general.architecture", "")
-    if not arch.startswith("qwen3"):
-        raise ValueError(f"config_from_gguf: unsupported architecture {arch!r}")
+    if arch != SUPPORTED_ARCH:
+        raise UnsupportedModelError(
+            f"config_from_gguf: unsupported architecture {arch!r} - "
+            f"TENSELERATE serves only {SUPPORTED_MODEL} "
+            f"(architecture {SUPPORTED_ARCH!r})")
     d = RAVENX_27B
     n_layer = _meta(md, arch, "block_count", default=d.n_layer)
     hidden = _meta(md, arch, "embedding_length", default=d.hidden_size)
@@ -219,7 +266,7 @@ def config_from_gguf(reader) -> ModelConfig:
     inter = _meta(md, arch, "feed_forward_length", default=d.intermediate_size)
     ctx = _meta(md, arch, "context_length", default=d.max_position_embeddings)
     vocab = len(md.get("tokenizer.ggml.tokens", [])) or d.vocab_size
-    return ModelConfig(
+    return validate_model(ModelConfig(
         name=md.get("general.name", "gguf-loaded"),
         n_layer=int(n_layer), hidden_size=int(hidden), n_head=int(n_head),
         n_head_kv=int(n_head_kv), head_dim=int(head_dim),
@@ -232,4 +279,4 @@ def config_from_gguf(reader) -> ModelConfig:
         linear_num_value_heads=d.linear_num_value_heads,
         linear_conv_kernel_dim=d.linear_conv_kernel_dim,
         mtp_num_layers=d.mtp_num_layers,
-    )
+    ))

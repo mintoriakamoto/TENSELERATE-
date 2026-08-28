@@ -66,6 +66,19 @@ The GDN recurrence is validated in two forms — sequential and chunked — that
 agree (`test_gdn_chunked_equals_sequential`). The chunked form is exactly what the
 CUDA kernel parallelizes over, so that test is the kernel's spec.
 
+## One model only: Qwen3.8-27B
+
+TENSELERATE serves exactly one model — the RavenX Chaos Agent (Qwen3.8-27B,
+architecture `qwen3_5`). This is a hard limit, enforced at load time:
+`config_from_gguf()` raises `UnsupportedModelError` for any file whose
+architecture is not `qwen3_5` or whose geometry differs from the published 27B
+config in any field. The engine's design assumes this one geometry everywhere —
+the 16-of-64 attention split, the ~34 KiB/token KV rate, the window math, the
+scheduler's batch caps — so "close enough" models are refused rather than served
+with wrong numbers. `TINY` is a smoke-scale structural stand-in for tests and
+the dev server only; it is never loadable from a GGUF file
+(`tests/tenselerate/test_model_lock.py`).
+
 ## The 750,000-token floor
 
 TENSELERATE never runs below **750,000 tokens** of context. `MIN_CONTEXT_TOKENS`
