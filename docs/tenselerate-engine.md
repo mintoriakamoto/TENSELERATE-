@@ -116,14 +116,16 @@ window**. That is the property that makes a 1M floor affordable at all.
 
 Each concurrent sequence carries its own windowed KV, so the window — not the
 context — is what caps batch size, and batch size is what buys aggregate
-throughput. On the unlocked CMP 170HX at the 1M floor:
+throughput. On the deployment CMP 170HX (X10SRL-F primary x16 slot, unlocked
+to 80 GB, stable) at the 1M floor:
 
 | window | KV/seq | max concurrent | aggregate |
 | --- | --- | --- | --- |
-| 131,072 | 4.25 GiB | 11 | ~160 tok/s |
-| 65,536 | 2.12 GiB | 22 | ~319 tok/s |
-| **32,768** | **1.06 GiB** | **44** | **~638 tok/s** |
-| ~~16,384~~ | 0.53 GiB | 88 | ~1,277 tok/s — **refused: below the quality floor** |
+| 131,072 | 4.25 GiB | 14 | ~169 tok/s |
+| 65,536 | 2.12 GiB | 29 | ~339 tok/s |
+| **49,152** | **1.59 GiB** | **39** | **~453 tok/s** |
+| **32,768** | **1.06 GiB** | **59** | **~681 tok/s** |
+| ~~16,384~~ | 0.53 GiB | 118 | faster — **refused: below the quality floor** |
 
 **Context is 1,000,000 in every row.** The window trades exact-recall depth (how
 far back the full-attention layers see verbatim) for concurrency — never context
@@ -131,10 +133,12 @@ length, which the GDN state carries regardless. `tenselerate plan` computes this
 table for the machine it is run on and refuses to print a batch size that would
 not fit in VRAM.
 
-And the 600 is not a target, it is a **floor**: `MIN_DECODE_TOKS = 600` in
-`config.py`, enforced by `plan` the same way `MIN_CONTEXT_TOKENS` is. A machine
-meets the floor if *some* window reaches 600 tok/s aggregate at the context
-floor; `plan` reports the widest window that does. A machine that cannot reach
+And the number is not a target, it is a **floor**: `MIN_DECODE_TOKS = 400` —
+the stated product requirement, alongside the 1M context — in `config.py`,
+enforced by `plan` the same way `MIN_CONTEXT_TOKENS` is. A machine meets the
+floor if *some* window reaches 400 tok/s aggregate at the context floor;
+`plan` reports the widest window that does (49K on the deployment box, with
+32K available when there is load to soak it). A machine that cannot reach
 it at any window is refused (exit 3) rather than served slowly — and lowering
 the context is never offered as the way out
 (`tests/tenselerate/test_speed_floor.py`).
@@ -143,15 +147,18 @@ The dial has a stop. **Quality is not for sale**: `MIN_ATTENTION_WINDOW =
 32_768` is the narrowest window the engine will run, enforced by
 `validate_window()` and by `plan --attention-window`, and `plan` never offers a
 sub-floor window in its suggestions — even though (see the struck row above)
-one would be faster. 32K is chosen as the narrowest window that still meets the
-speed floor on the target machine, so the three floors — 1M context, 600 tok/s,
-32K recall — are simultaneously satisfiable, and
+one would be faster. 32K comfortably clears the speed floor on the deployment
+machine, so the three floors — 1M context, 400 tok/s, 32K recall — are
+simultaneously satisfiable, and
 `test_all_three_floors_are_simultaneously_satisfiable` pins that they stay so.
 The other half of the quality floor is already law elsewhere: no RoPE
 scaling/YaRN, ever (`needs_rope_scaling`).
 
-Note the consumer box (24 GiB) fits the floor at a 128K window but only one
-sequence; it wants a narrower window to get useful concurrency.
+The rest of the deployment box: the 2080 Ti pair (22 GiB pooled as one
+pipeline node, `--machine 2x2080ti`) tops out ~152 tok/s at the 32K window —
+below the floor, so it is a dev/failover node, not the server; the 3060 (x8)
+cannot hold the weights and stays the smoke-test card. PCIe 3.0 is irrelevant
+to decode: weights and KV are resident, nothing streams per token.
 
 **The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
 stock model, whose full-attention layers are not windowed, so past 262,144 it

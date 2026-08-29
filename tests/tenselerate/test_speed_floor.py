@@ -1,5 +1,5 @@
 """
-The 600 tok/s speed floor. Like the context floor and the model lock it is a
+The 400 tok/s speed floor (the stated product requirement, with 1M ctx). Like the context floor and the model lock it is a
 hard product limit: `tenselerate plan` refuses (exit 3) any machine that cannot
 reach MIN_DECODE_TOKS of aggregate decode at the context floor at ANY attention
 window. The window is the only dial - context never drops to buy speed.
@@ -20,8 +20,8 @@ def run(argv: list[str]) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
-def test_speed_floor_is_600():
-    assert MIN_DECODE_TOKS == 600
+def test_speed_floor_is_400():
+    assert MIN_DECODE_TOKS == 400
 
 
 def test_info_reports_the_speed_floor():
@@ -31,7 +31,7 @@ def test_info_reports_the_speed_floor():
 
 
 def test_cmp_meets_the_floor_at_a_narrower_window():
-    # at the default 128K window the CMP cannot reach 600, but a narrower
+    # at the default 128K window the CMP cannot reach the floor, but a narrower
     # window can - so plan succeeds and shows the window that gets there
     rc, out = run(["plan", "--machine", "cmp170hx"])
     assert rc == 0
@@ -40,7 +40,7 @@ def test_cmp_meets_the_floor_at_a_narrower_window():
 
 
 def test_consumer_box_is_refused_not_served_slowly():
-    # 24 GiB / ~500 GB/s cannot reach 600 tok/s at any window once the
+    # 24 GiB / ~500 GB/s cannot reach the floor at any window once the
     # weights are resident - the plan must refuse, not shrug
     rc, out = run(["plan", "--machine", "5070+3060"])
     assert rc == 3

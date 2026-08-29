@@ -45,7 +45,9 @@ MIN_CONTEXT_TOKENS = 1_000_000
 # floor, at SOME attention window. `tenselerate plan` enforces it: the window
 # is the dial that trades exact-recall depth for concurrency, and a box that
 # cannot reach the floor at any window is refused, not served slowly.
-MIN_DECODE_TOKS = 600
+# 400 is the stated product requirement (with 1M context); the 80 GB CMP
+# clears it at a 48K window (~453 tok/s) and does ~681 at the 32K floor.
+MIN_DECODE_TOKS = 400
 # Hard quality floor: the narrowest attention window the engine will run.
 # Speed is bought with concurrency and concurrency with a narrower window,
 # but below this much verbatim recall the answers degrade - and quality is

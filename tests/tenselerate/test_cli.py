@@ -67,7 +67,7 @@ def test_plan_never_reports_an_infeasible_batch():
     kv_gib = float(kv_line.split(":")[1].strip().split()[0])
     weights_line = next(ln for ln in out.splitlines() if ln.startswith("weights"))
     weights = float(weights_line.split(":")[1].strip().split()[0])
-    vram, overhead = 64.0, 1.5
+    vram, overhead = 80.0, 1.5
 
     batches = [int(ln.split("batch")[1].split(":")[0].strip())
                for ln in out.splitlines()
@@ -77,12 +77,13 @@ def test_plan_never_reports_an_infeasible_batch():
         assert weights + kv_gib * b + overhead <= vram, (b, out)
 
 
-def test_plan_shows_a_route_to_600_when_the_default_window_cannot():
+def test_plan_shows_a_route_to_the_floor_when_the_default_window_cannot():
+    from tenselerate.config import MIN_DECODE_TOKS
     rc, out = run(["plan", "--machine", "cmp170hx"])
     assert rc == 0
-    if "600+" not in out.split("ceiling here")[0]:
+    if f"{MIN_DECODE_TOKS}+" not in out.split("ceiling here")[0]:
         # it must then say what window would get there, at the same context
-        assert "reaches 600+" in out
+        assert f"reaches {MIN_DECODE_TOKS}+" in out
         assert "never context length" in out
 
 

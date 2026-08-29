@@ -114,9 +114,16 @@ def cmd_info(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # plan
 # --------------------------------------------------------------------------
-# (VRAM GiB, VRAM read GB/s) for the machines this engine targets
+# (VRAM GiB, VRAM read GB/s) for the machines this engine targets.
+# The deployment box is a Supermicro X10SRL-F (PCIe 3.0): the CMP 170HX -
+# unlocked to 80 GB, stable - in the primary x16 slot, the 2080 Ti pair and
+# the 3060 (x8) beside it. PCIe 3.0 is irrelevant to decode: weights and KV
+# are resident, nothing streams per token.
 MACHINE_HW = {
-    "cmp170hx": (64.0, 1490.0),
+    "cmp170hx": (80.0, 1490.0),
+    # the 2080 Ti pair as one pipeline node: 22 GiB pooled, both stages'
+    # HBM read overlapped under continuous batching (2 x 616 GB/s)
+    "2x2080ti": (22.0, 1232.0),
     "5070+3060": (24.0, 500.0),
     "5070": (12.0, 672.0),
     "3060": (12.0, 360.0),
@@ -201,7 +208,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         floor_met = False
         # only windows at or above the QUALITY floor are ever offered -
         # narrower ones would be faster, and are refused for exactly that trade
-        for w in (65_536, 32_768, 16_384, 8_192):
+        for w in (65_536, 49_152, 32_768, 16_384, 8_192):
             if w < MIN_ATTENTION_WINDOW:
                 continue
             kv_w = cfg.kv_bytes_per_token() * w / GiB
