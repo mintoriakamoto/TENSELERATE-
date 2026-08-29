@@ -120,7 +120,15 @@ def cmd_info(args: argparse.Namespace) -> int:
 # the 3060 (x8) beside it. PCIe 3.0 is irrelevant to decode: weights and KV
 # are resident, nothing streams per token.
 MACHINE_HW = {
-    "cmp170hx": (80.0, 1490.0),
+    # The CMP 170HX HBM unlock (cmpunlocker) is card-dependent: the 10 GB SKU's
+    # 80 GB target is contested and can be refresh-unstable, so profile all
+    # three stable landing points. Bandwidth is the same die (~1490 GB/s);
+    # only capacity, and therefore max concurrency, changes. The 1M-ctx /
+    # 400-tok/s requirement is met at every one of them (see plan output), so
+    # the deployment does NOT depend on the risky 80 GB unlock holding.
+    "cmp170hx": (80.0, 1490.0),     # unlocked_80gb - verify stable before relying
+    "cmp170hx-64": (64.0, 1490.0),  # the reliable 8 GB-SKU target
+    "cmp170hx-40": (40.0, 1490.0),  # the documented-stable 10 GB-SKU target
     # the 2080 Ti pair as one pipeline node: 22 GiB pooled, both stages'
     # HBM read overlapped under continuous batching (2 x 616 GB/s)
     "2x2080ti": (22.0, 1232.0),
