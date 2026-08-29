@@ -131,6 +131,14 @@ length, which the GDN state carries regardless. `tenselerate plan` computes this
 table for the machine it is run on and refuses to print a batch size that would
 not fit in VRAM.
 
+And the 600 is not a target, it is a **floor**: `MIN_DECODE_TOKS = 600` in
+`config.py`, enforced by `plan` the same way `MIN_CONTEXT_TOKENS` is. A machine
+meets the floor if *some* window reaches 600 tok/s aggregate at the context
+floor; `plan` reports the widest window that does. A machine that cannot reach
+it at any window is refused (exit 3) rather than served slowly — and lowering
+the context is never offered as the way out
+(`tests/tenselerate/test_speed_floor.py`).
+
 Note the consumer box (24 GiB) fits the floor at a 128K window but only one
 sequence; it wants a narrower window to get useful concurrency.
 

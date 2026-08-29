@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from tenselerate.config import (
-    CONFIGS, MIN_CONTEXT_TOKENS, RAVENX_27B, TINY,
+    CONFIGS, MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS, RAVENX_27B, TINY,
     ContextFloorError, RopeScalingRequired,
 )
 from tenselerate.engine.scheduler import Scheduler
@@ -86,6 +86,8 @@ def cmd_info(args: argparse.Namespace) -> int:
     _out(f"trained rotary   : {cfg.max_position_embeddings:,} tokens")
     _out("")
     _out(f"CONTEXT FLOOR    : {MIN_CONTEXT_TOKENS:,} tokens (hard minimum)")
+    _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS:,} tok/s aggregate (hard minimum, "
+         "enforced by `plan`)")
     win = cfg.attention_window
     _out(f"attention window : {win:,} tokens" if win else
          "attention window : unbounded (full attention)")
@@ -172,26 +174,45 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if max_batch not in shown:
         shown.append(max_batch)
     for b in shown:
-        mark = "  <- 600+" if agg(b) >= 600 else ""
+        mark = f"  <- {MIN_DECODE_TOKS}+" if agg(b) >= MIN_DECODE_TOKS else ""
         _out(f"  batch {b:>3}      : ~{agg(b):,.0f} tok/s{mark}")
 
+    # -- the speed floor ---------------------------------------------------
+    # The floor is a property of the machine: met if ANY window reaches
+    # MIN_DECODE_TOKS at the context floor. A box that cannot is refused.
     best = agg(max_batch)
     _out("")
-    if best < 600:
-        # what window would reach 600? KV per seq is linear in the window.
-        _out(f"ceiling here is ~{best:,.0f} tok/s. 600+ needs more concurrency, which")
-        _out("means a narrower attention window (KV per sequence is what caps batch):")
-        for w in (65_536, 32_768, 16_384):
+    if best >= MIN_DECODE_TOKS:
+        _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - met at this window")
+    else:
+        # what window would reach the floor? KV per seq is linear in the window.
+        _out(f"ceiling here is ~{best:,.0f} tok/s against the {MIN_DECODE_TOKS} "
+             "tok/s floor. More needs more")
+        _out("concurrency, which means a narrower attention window (KV per "
+             "sequence is what caps batch):")
+        floor_met = False
+        for w in (65_536, 32_768, 16_384, 8_192):
             kv_w = cfg.kv_bytes_per_token() * w / GiB
             mb = int((vram - weights - args.overhead_gib) // kv_w)
             if mb < 1:
                 continue
             a = bw * BW_EFFICIENCY / ((weights + kv_w * mb) * 1.074) * mb
-            flag = "  <- reaches 600+" if a >= 600 else ""
+            floor_met = floor_met or a >= MIN_DECODE_TOKS
+            flag = f"  <- reaches {MIN_DECODE_TOKS}+" if a >= MIN_DECODE_TOKS else ""
             _out(f"  window {w:>7,} -> KV {kv_w:5.2f} GiB, max batch {mb:>3}, "
                  f"~{a:,.0f} tok/s{flag}")
         _out("  (context stays at the floor in every row - the window trades")
         _out("   exact-recall depth for concurrency, never context length.)")
+        if not floor_met:
+            _out("")
+            _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - NOT reachable on "
+                 "this machine at any window.")
+            _out("This box cannot serve at the TENSELERATE floors. Use the other "
+                 "machine.")
+            _out("")
+            _out("Numbers are a bandwidth roofline at "
+                 f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
+            return 3
     _out("")
     _out("Numbers are a bandwidth roofline at "
          f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")

@@ -87,11 +87,15 @@ def test_plan_shows_a_route_to_600_when_the_default_window_cannot():
 
 
 def test_plan_on_the_consumer_box_still_holds_the_floor():
+    # may not fit (1), or fit but miss the speed floor (3) - but it must
+    # never lower the context to get there
     rc, out = run(["plan", "--machine", "5070+3060"])
-    assert rc in (0, 1)           # may not fit, but must not lower the context
+    assert rc in (0, 1, 3)
     assert f"{MIN_CONTEXT_TOKENS:,} tokens" in out
     if rc == 1:
         assert "the floor is fixed" in out
+    if rc == 3:
+        assert "NOT reachable" in out
 
 
 def test_serve_refuses_off_host():

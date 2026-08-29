@@ -40,6 +40,12 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 # Hard product floor: the engine never runs below this much context.
 MIN_CONTEXT_TOKENS = 1_000_000
+# Hard product speed floor: a machine serves TENSELERATE only if it can be
+# planned to this much aggregate decode throughput (tok/s) at the context
+# floor, at SOME attention window. `tenselerate plan` enforces it: the window
+# is the dial that trades exact-recall depth for concurrency, and a box that
+# cannot reach the floor at any window is refused, not served slowly.
+MIN_DECODE_TOKS = 600
 # Hard product lock: the only architecture and model this engine will load.
 SUPPORTED_ARCH = "qwen3_5"
 SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
