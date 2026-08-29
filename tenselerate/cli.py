@@ -143,6 +143,13 @@ def cmd_info(args: argparse.Namespace) -> int:
          "enforced by `plan`)")
     _out(f"QUALITY FLOOR    : window >= {MIN_ATTENTION_WINDOW:,} tokens, and no "
          "RoPE scaling, ever")
+    _out(f"                   quality holds across the FULL {MIN_CONTEXT_TOKENS:,}"
+         "+ context: the GDN")
+    _out("                   layers carry long range, the windowed attention "
+         "stays inside")
+    _out("                   the trained range, and sinks anchor it. The window "
+         "is")
+    _out("                   exact-recall DEPTH, not a cap on context quality.")
     win = cfg.attention_window
     _out(f"attention window : {win:,} tokens" if win else
          "attention window : unbounded (full attention)")
