@@ -16,7 +16,7 @@ Two pools, matching the hybrid:
 Admission is memory-first: a sequence is only admitted when its worst-case
 resident footprint - a full window of KV plus its GDN state - can be satisfied.
 That is deliberate. Admitting on current usage and hoping is how a server ends up
-OOM mid-generation, and a sequence killed at token 400,000 of a 750,000-token
+OOM mid-generation, and a sequence killed at token 400,000 of a 1,000,000-token
 context has wasted more work than it ever produced.
 
 Spec rule for the hot path: `step()` does no I/O, no locks, and no allocation
@@ -160,7 +160,7 @@ class Scheduler:
                 seq.n_generated += 1
                 seq.total_tokens += 1
                 # sliding window: KV stops growing once the window is full, which
-                # is why total_tokens can run to 750K+ on a bounded pool
+                # is why total_tokens can run to 1M+ on a bounded pool
                 seq.cached_tokens = min(seq.total_tokens,
                                         self.cfg.resident_kv_tokens)
                 produced += 1

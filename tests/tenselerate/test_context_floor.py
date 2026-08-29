@@ -1,5 +1,5 @@
 """
-The 750K context floor and the windowed-hybrid property that makes it possible
+The 1M context floor and the windowed-hybrid property that makes it possible
 without RoPE scaling. These are product invariants, not implementation details:
 if any of them break, the engine is no longer doing what it claims.
 """
@@ -17,43 +17,43 @@ from tenselerate.config import (
 GiB = 1024 ** 3
 
 
-def test_floor_is_750k():
-    assert MIN_CONTEXT_TOKENS == 750_000
+def test_floor_is_1m():
+    assert MIN_CONTEXT_TOKENS == 1_000_000
 
 
 def test_context_at_or_above_floor_is_accepted():
-    for ctx in (750_000, 1_000_000, 4_000_000):
+    for ctx in (1_000_000, 4_000_000, 10_000_000):
         assert RAVENX_27B.validate_context(ctx) == ctx
 
 
 def test_context_below_floor_is_rejected():
-    for ctx in (8192, 262_144, 749_999):
+    for ctx in (8192, 262_144, 749_999, 999_999):
         with pytest.raises(ContextFloorError):
             RAVENX_27B.validate_context(ctx)
 
 
 def test_default_window_stays_inside_the_trained_rotary_range():
-    # this is what makes "750K with no YaRN/RoPE scaling" true rather than a wish
+    # this is what makes "1M with no YaRN/RoPE scaling" true rather than a wish
     assert DEFAULT_ATTENTION_WINDOW <= RAVENX_27B.max_position_embeddings
 
 
 def test_no_rope_scaling_at_any_context_when_windowed():
-    for ctx in (750_000, 1_000_000, 10_000_000, 100_000_000):
+    for ctx in (1_000_000, 4_000_000, 10_000_000, 100_000_000):
         assert RAVENX_27B.needs_rope_scaling(ctx) is False
 
 
 def test_unwindowed_config_at_the_floor_demands_rope_scaling_and_is_refused():
-    # full attention over 750K would extrapolate past 262,144 trained positions
+    # full attention over 1M would extrapolate past 262,144 trained positions
     unwindowed = dataclasses.replace(RAVENX_27B, attention_window=None)
-    assert unwindowed.needs_rope_scaling(750_000) is True
+    assert unwindowed.needs_rope_scaling(1_000_000) is True
     with pytest.raises(RopeScalingRequired):
-        unwindowed.validate_context(750_000)
+        unwindowed.validate_context(1_000_000)
 
 
 def test_kv_is_constant_beyond_the_window():
     """The core payoff: KV size — and so decode speed — stops growing."""
     sizes = {RAVENX_27B.kv_bytes_for_context(c)
-             for c in (750_000, 1_000_000, 10_000_000)}
+             for c in (1_000_000, 4_000_000, 10_000_000)}
     assert len(sizes) == 1, sizes
     # and it is the window's worth, not the context's
     assert RAVENX_27B.kv_bytes_for_context(10_000_000) == \
@@ -83,4 +83,4 @@ def test_window_is_clamped_by_the_trained_range():
     # resident KV never exceeds what the model was actually trained to attend
     assert silly.resident_kv_tokens == RAVENX_27B.max_position_embeddings
     # ...and such a config is refused, because the window itself extrapolates
-    assert silly.needs_rope_scaling(750_000) is True
+    assert silly.needs_rope_scaling(1_000_000) is True

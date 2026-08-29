@@ -1,5 +1,5 @@
 """
-CLI behaviour: the subcommands exist, the 750K floor is enforced at the command
+CLI behaviour: the subcommands exist, the 1M floor is enforced at the command
 level, and `plan` never reports a batch size that could not fit in VRAM.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ def test_info_reports_the_floor_and_no_rope_scaling():
     assert f"{MIN_CONTEXT_TOKENS:,}" in out
     assert "rope scaling: no" in out
     # every listed context must be at or above the floor
-    assert "750,000" in out and "10,000,000" in out
+    assert "4,000,000" in out and "10,000,000" in out
 
 
 def test_plan_defaults_to_the_floor():

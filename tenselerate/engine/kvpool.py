@@ -8,7 +8,7 @@ two constraints:
     keep a fixed per-sequence state, allocated separately and never paged;
   * the full-attention layers are WINDOWED, so a sequence's KV stops growing once
     it reaches the window. Blocks past the window are recycled, which is what
-    lets a 750,000-token sequence hold a bounded, constant amount of KV.
+    lets a 1,000,000-token sequence hold a bounded, constant amount of KV.
 
 Blocks are fixed-size and non-contiguous, so a sequence never needs a contiguous
 run of memory and the pool does not fragment. Capacity is derived from a real

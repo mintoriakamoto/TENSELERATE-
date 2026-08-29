@@ -94,7 +94,7 @@ def cmd_info(args: argparse.Namespace) -> int:
          f"{cfg.n_full_attention_layers} caching layers only)")
     _out("")
     _out("KV is bounded by the window, so it does not grow with context:")
-    for ctx in (MIN_CONTEXT_TOKENS, 1_000_000, 10_000_000):
+    for ctx in (MIN_CONTEXT_TOKENS, 4_000_000, 10_000_000):
         kv = cfg.kv_bytes_for_context(ctx) / GiB
         scaling = "YES" if cfg.needs_rope_scaling(ctx) else "no"
         _out(f"  ctx {ctx:>12,}  ->  KV {kv:6.2f} GiB   rope scaling: {scaling}")

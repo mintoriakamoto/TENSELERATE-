@@ -16,15 +16,15 @@ partial-rotary factor) used by the tests and the dev server so the whole
 pipeline runs end to end without the 15.7 GB weights. TINY is not a second
 supported model — it is never loadable from a GGUF file.
 
-TENSELERATE runs at a HARD FLOOR of 750,000 tokens of context (MIN_CONTEXT_TOKENS).
+TENSELERATE runs at a HARD FLOOR of 1,000,000 tokens of context (MIN_CONTEXT_TOKENS).
 That is a product decision, and it has one unavoidable engineering consequence:
-750K is far beyond this model's trained rotary range (262,144), so serving it with
+1M is far beyond this model's trained rotary range (262,144), so serving it with
 *full* attention would require RoPE scaling (YaRN), which we do not do. The only
 way to have both is the hybrid window:
 
   * the 48 Gated-DeltaNet layers carry long-range memory in a fixed recurrent
     state and have NO positional encoding at all - they are unbounded by
-    construction, whether the sequence is 750K or 10M tokens;
+    construction, whether the sequence is 1M or 10M tokens;
   * the 16 full-attention layers attend a bounded WINDOW that never exceeds the
     trained rotary range, so no position is ever extrapolated.
 
@@ -39,7 +39,7 @@ from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Hard product floor: the engine never runs below this much context.
-MIN_CONTEXT_TOKENS = 750_000
+MIN_CONTEXT_TOKENS = 1_000_000
 # Hard product lock: the only architecture and model this engine will load.
 SUPPORTED_ARCH = "qwen3_5"
 SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
@@ -109,7 +109,7 @@ class ModelConfig:
         per_layer = 2 * self.n_head_kv * self.head_dim   # K and V
         return per_layer * self.n_full_attention_layers * bits_per_elem
 
-    # -- the 750K floor, and what makes it possible ------------------------
+    # -- the 1M floor, and what makes it possible ------------------------
     @property
     def resident_kv_tokens(self) -> int:
         """

@@ -1,7 +1,7 @@
 """
 Continuous batching + paged KV. These are the invariants that decide whether the
 engine survives a real workload: never over-admit, never leak a block, and keep
-750,000-token sequences alive on a bounded pool.
+1,000,000-token sequences alive on a bounded pool.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _sched(kv_gib=47.0, window=131_072):
 
 
 def test_max_concurrent_matches_the_planner():
-    """The CMP at the 750K floor, 128K window: ~11 concurrent sequences."""
+    """The CMP at the 1M floor, 128K window: ~11 concurrent sequences."""
     s = _sched(kv_gib=47.0, window=131_072)
     assert s.max_concurrent == 11, s.max_concurrent
 
@@ -123,7 +123,7 @@ def test_all_submitted_tokens_are_produced():
 def test_kv_is_bounded_while_context_runs_past_the_floor():
     """
     The payoff: a sequence's cached KV stops at the window while its real context
-    keeps growing past 750,000 tokens on a pool that never grows.
+    keeps growing past 1,000,000 tokens on a pool that never grows.
     """
     window = 32_768
     s = _sched(kv_gib=47.0, window=window)
@@ -136,7 +136,7 @@ def test_kv_is_bounded_while_context_runs_past_the_floor():
     assert seq.status is SeqStatus.RUNNING, "should not have retired yet"
     assert seq.total_tokens > MIN_CONTEXT_TOKENS, seq.total_tokens
     assert seq.cached_tokens == window, seq.cached_tokens
-    # a full window of blocks, and no more, for a 750,000+ token context
+    # a full window of blocks, and no more, for a 1,000,000+ token context
     assert len(seq.blocks) == s.blocks_per_seq
     assert s.pool.n_allocated <= s.pool.n_blocks
     # and the blocks come back when it finishes
