@@ -174,38 +174,6 @@ class ModelConfig:
         held = min(ctx, self.resident_kv_tokens)
         return self.kv_bytes_per_token(bits_per_elem) * held
 
-    def gdn_state_bytes(self, bytes_per_elem: float = 2.0) -> float:
-        """
-        Per-sequence Gated-DeltaNet recurrent state, over the 48 linear layers.
-        This is the engine's real long-range memory: a fixed matrix state per
-        value head (d_k x d_v) plus a short causal-conv state, and - unlike KV -
-        it does NOT depend on context length or the window at all. Default bpe
-        is bf16 (2 bytes); the state is precision-sensitive, so it is kept wider
-        than the q8_0 KV.
-
-        It is small (~75 MB at bf16) but it is the unit that a whole-system
-        memory tier pages: a parked session's footprint is window-KV + this.
-        """
-        per_head = self.linear_value_head_dim * self.linear_key_head_dim
-        matrix = self.linear_num_value_heads * per_head
-        conv_channels = (self.linear_num_key_heads * self.linear_key_head_dim
-                         + self.linear_num_value_heads * self.linear_value_head_dim)
-        conv = conv_channels * self.linear_conv_kernel_dim
-        return (matrix + conv) * self.n_linear_layers * bytes_per_elem
-
-    def parked_footprint_bytes(self, kv_bpe: float = 1.0625,
-                               gdn_bpe: float = 2.0) -> float:
-        """
-        The whole resident footprint of one session when it is not the active
-        one: a full window of KV plus its GDN state. Because BOTH terms are
-        bounded and fixed-size, this is a constant per session - which is what
-        lets a second memory tier (host RAM) hold a deterministic number of
-        parked sessions, the same memory-first admission the scheduler already
-        does for VRAM, extended to the whole system.
-        """
-        return (self.kv_bytes_for_context(self.resident_kv_tokens, kv_bpe)
-                + self.gdn_state_bytes(gdn_bpe))
-
     def needs_rope_scaling(self, ctx: int) -> bool:
         """
         True if serving `ctx` would extrapolate beyond the trained rotary range.
