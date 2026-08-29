@@ -54,6 +54,14 @@ MIN_DECODE_TOKS = 600
 # 32K is the narrowest window that still meets MIN_DECODE_TOKS on the target
 # machine, so the three floors are simultaneously satisfiable by design.
 MIN_ATTENTION_WINDOW = 32_768
+# Attention sinks (StreamingLLM, arXiv:2309.17453): softmax attention dumps
+# surplus probability mass on the first few tokens, so a sliding window that
+# evicts them collapses in quality. Keeping the first N tokens resident
+# forever fixes it for the cost of N tokens of KV (~136 KiB here). This is a
+# long-context method the no-RoPE-scaling rule PERMITS: sink positions are
+# 0..N-1 and cache positions are re-anchored, so the attended span is
+# window + sinks and stays inside the trained rotary range.
+ATTENTION_SINK_TOKENS = 4
 # Hard product lock: the only architecture and model this engine will load.
 SUPPORTED_ARCH = "qwen3_5"
 SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
@@ -120,6 +128,10 @@ class ModelConfig:
     # Bounded window for the full-attention layers. None = attend everything,
     # which is only legal while the sequence stays within max_position_embeddings.
     attention_window: int | None = DEFAULT_ATTENTION_WINDOW
+    # First N tokens pinned in the cache forever (attention sinks) - the
+    # quality fix for sliding-window eviction. Counted into the resident KV
+    # and into the no-extrapolation check alongside the window.
+    attention_sink_tokens: int = ATTENTION_SINK_TOKENS
 
     def is_full_attention(self, layer_idx: int) -> bool:
         """The 16-of-64 pattern: layers 3,7,11,... (1-indexed multiples of N)."""
@@ -152,7 +164,8 @@ class ModelConfig:
         """
         if self.attention_window is None:
             return self.max_position_embeddings
-        return min(self.attention_window, self.max_position_embeddings)
+        return min(self.attention_window + self.attention_sink_tokens,
+                   self.max_position_embeddings)
 
     def kv_bytes_for_context(self, ctx: int, bits_per_elem: float = 1.0625) -> float:
         """Total KV bytes to serve `ctx` tokens (constant once ctx > window)."""
@@ -166,7 +179,10 @@ class ModelConfig:
         long the sequence is, so a windowed config answers False at ANY ctx.
         """
         if self.attention_window is not None:
-            return self.attention_window > self.max_position_embeddings
+            # sinks sit at re-anchored positions 0..N-1, so the attended span
+            # is window + sinks; that whole span must stay inside the range
+            return (self.attention_window + self.attention_sink_tokens
+                    > self.max_position_embeddings)
         return ctx > self.max_position_embeddings
 
     def validate_context(self, ctx: int) -> int:

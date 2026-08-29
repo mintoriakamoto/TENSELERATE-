@@ -55,9 +55,10 @@ def test_kv_is_constant_beyond_the_window():
     sizes = {RAVENX_27B.kv_bytes_for_context(c)
              for c in (1_000_000, 4_000_000, 10_000_000)}
     assert len(sizes) == 1, sizes
-    # and it is the window's worth, not the context's
+    # and it is the window's worth (plus the pinned sinks), not the context's
     assert RAVENX_27B.kv_bytes_for_context(10_000_000) == \
-        RAVENX_27B.kv_bytes_per_token() * DEFAULT_ATTENTION_WINDOW
+        RAVENX_27B.kv_bytes_per_token() * \
+        (DEFAULT_ATTENTION_WINDOW + RAVENX_27B.attention_sink_tokens)
 
 
 def test_kv_at_the_floor_fits_both_target_machines():
