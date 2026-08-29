@@ -26,7 +26,7 @@ mesh survives a loss.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from tenselerate.config import ModelConfig
 from tenselerate.engine.scheduler import Scheduler

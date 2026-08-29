@@ -188,9 +188,9 @@ class ModelConfig:
         """
         per_head = self.linear_value_head_dim * self.linear_key_head_dim
         matrix = self.linear_num_value_heads * per_head
-        conv = (self.linear_num_key_heads * self.linear_key_head_dim +
-                self.linear_num_value_heads * self.linear_value_head_dim
-                ) * self.linear_conv_kernel_dim
+        conv_channels = (self.linear_num_key_heads * self.linear_key_head_dim
+                         + self.linear_num_value_heads * self.linear_value_head_dim)
+        conv = conv_channels * self.linear_conv_kernel_dim
         return (matrix + conv) * self.n_linear_layers * bytes_per_elem
 
     def parked_footprint_bytes(self, kv_bpe: float = 1.0625,
