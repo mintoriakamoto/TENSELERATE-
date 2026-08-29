@@ -1,15 +1,21 @@
 """
 The `tenselerate` command line.
 
-One entry point for the engine:
+One entry point for the whole lifecycle of the engine:
 
-    tenselerate update           check for and apply a new build
+    tenselerate install          build from this clone, then check the machine
+    tenselerate build            compile the engine end to end (kernels + server)
+    tenselerate boot             doctor, then serve — one-command bring-up
     tenselerate serve            run the OpenAI /v1 endpoint
+    tenselerate update           check for and apply a new build
     tenselerate info             model geometry, the context floor, KV sizing
     tenselerate plan             what this machine can do at a given context
     tenselerate doctor           hardware/driver check before anything else
 
 Run as `python -m tenselerate <cmd>` (or `tenselerate <cmd>` once installed).
+
+From a bare machine, one line clones and builds:
+    curl -fsSL https://raw.githubusercontent.com/mintoriakamoto/TENSELERATE-/main/scripts/tenselerate-build.sh | bash
 """
 
 from __future__ import annotations
@@ -20,9 +26,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import dataclasses
+
 from tenselerate.config import (
-    CONFIGS, MIN_CONTEXT_TOKENS, RAVENX_27B, TINY,
-    ContextFloorError, RopeScalingRequired,
+    CONFIGS, MIN_ATTENTION_WINDOW, MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS,
+    RAVENX_27B, TINY,
+    ContextFloorError, QualityFloorError, RopeScalingRequired, validate_window,
 )
 from tenselerate.engine.scheduler import Scheduler
 
@@ -32,6 +41,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _out(msg: str = "") -> None:
     sys.stdout.write(msg + "\n")
+
+
+# --------------------------------------------------------------------------
+# build / install
+# --------------------------------------------------------------------------
+def _run_build(mode_args: list[str]) -> int:
+    """Drive scripts/tenselerate-build.sh with the given flags."""
+    script = REPO_ROOT / "scripts" / "tenselerate-build.sh"
+    if not script.is_file():
+        _out(f"error: build script not found at {script}")
+        _out("Run from a clone, or bootstrap a bare machine with:")
+        _out("  curl -fsSL https://raw.githubusercontent.com/mintoriakamoto/"
+             "TENSELERATE-/main/scripts/tenselerate-build.sh | bash")
+        return 1
+    cmd = ["bash", str(script), *mode_args]
+    _out(f"$ {' '.join(cmd)}")
+    return subprocess.run(cmd, cwd=str(REPO_ROOT)).returncode
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    """Compile the engine end to end: the int8 kernels and the llama.cpp server."""
+    mode_args = []
+    if args.cpu:
+        mode_args.append("--cpu")
+    elif args.cuda:
+        mode_args.append("--cuda")
+    elif args.kernels:
+        mode_args.append("--kernels")
+    return _run_build(mode_args)
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Build from this clone, then run the hardware check — zero to ready."""
+    _out("TENSELERATE install: build, then verify the machine")
+    _out("")
+    rc = _run_build([] if not args.cpu else ["--cpu"])
+    if rc != 0:
+        _out("")
+        _out("build failed; fix the errors above, then re-run `tenselerate install`")
+        return rc
+    _out("")
+    _out("build ok - running doctor")
+    _out("")
+    return cmd_doctor(args)
 
 
 # --------------------------------------------------------------------------
@@ -86,6 +139,10 @@ def cmd_info(args: argparse.Namespace) -> int:
     _out(f"trained rotary   : {cfg.max_position_embeddings:,} tokens")
     _out("")
     _out(f"CONTEXT FLOOR    : {MIN_CONTEXT_TOKENS:,} tokens (hard minimum)")
+    _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS:,} tok/s aggregate (hard minimum, "
+         "enforced by `plan`)")
+    _out(f"QUALITY FLOOR    : window >= {MIN_ATTENTION_WINDOW:,} tokens, and no "
+         "RoPE scaling, ever")
     win = cfg.attention_window
     _out(f"attention window : {win:,} tokens" if win else
          "attention window : unbounded (full attention)")
@@ -94,7 +151,7 @@ def cmd_info(args: argparse.Namespace) -> int:
          f"{cfg.n_full_attention_layers} caching layers only)")
     _out("")
     _out("KV is bounded by the window, so it does not grow with context:")
-    for ctx in (MIN_CONTEXT_TOKENS, 1_000_000, 10_000_000):
+    for ctx in (MIN_CONTEXT_TOKENS, 4_000_000, 10_000_000):
         kv = cfg.kv_bytes_for_context(ctx) / GiB
         scaling = "YES" if cfg.needs_rope_scaling(ctx) else "no"
         _out(f"  ctx {ctx:>12,}  ->  KV {kv:6.2f} GiB   rope scaling: {scaling}")
@@ -107,9 +164,24 @@ def cmd_info(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # plan
 # --------------------------------------------------------------------------
-# (VRAM GiB, VRAM read GB/s) for the machines this engine targets
+# (VRAM GiB, VRAM read GB/s) for the machines this engine targets.
+# The deployment box is a Supermicro X10SRL-F (PCIe 3.0): the CMP 170HX -
+# unlocked to 80 GB, stable - in the primary x16 slot, the 2080 Ti pair and
+# the 3060 (x8) beside it. PCIe 3.0 is irrelevant to decode: weights and KV
+# are resident, nothing streams per token.
 MACHINE_HW = {
-    "cmp170hx": (64.0, 1490.0),
+    # The CMP 170HX HBM unlock (cmpunlocker) is card-dependent: the 10 GB SKU's
+    # 80 GB target is contested and can be refresh-unstable, so profile all
+    # three stable landing points. Bandwidth is the same die (~1490 GB/s);
+    # only capacity, and therefore max concurrency, changes. The 1M-ctx /
+    # 400-tok/s requirement is met at every one of them (see plan output), so
+    # the deployment does NOT depend on the risky 80 GB unlock holding.
+    "cmp170hx": (80.0, 1490.0),     # unlocked_80gb - verify stable before relying
+    "cmp170hx-64": (64.0, 1490.0),  # the reliable 8 GB-SKU target
+    "cmp170hx-40": (40.0, 1490.0),  # the documented-stable 10 GB-SKU target
+    # the 2080 Ti pair as one pipeline node: 22 GiB pooled, both stages'
+    # HBM read overlapped under continuous batching (2 x 616 GB/s)
+    "2x2080ti": (22.0, 1232.0),
     "5070+3060": (24.0, 500.0),
     "5070": (12.0, 672.0),
     "3060": (12.0, 360.0),
@@ -121,8 +193,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     cfg = CONFIGS[args.config]
     ctx = args.ctx
     try:
+        if args.attention_window is not None:
+            cfg = dataclasses.replace(
+                cfg, attention_window=validate_window(args.attention_window))
         cfg.validate_context(ctx)
-    except (ContextFloorError, RopeScalingRequired) as e:
+    except (ContextFloorError, QualityFloorError, RopeScalingRequired) as e:
         _out(f"error: {e}")
         return 2
 
@@ -172,26 +247,51 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if max_batch not in shown:
         shown.append(max_batch)
     for b in shown:
-        mark = "  <- 600+" if agg(b) >= 600 else ""
+        mark = f"  <- {MIN_DECODE_TOKS}+" if agg(b) >= MIN_DECODE_TOKS else ""
         _out(f"  batch {b:>3}      : ~{agg(b):,.0f} tok/s{mark}")
 
+    # -- the speed floor ---------------------------------------------------
+    # The floor is a property of the machine: met if ANY window reaches
+    # MIN_DECODE_TOKS at the context floor. A box that cannot is refused.
     best = agg(max_batch)
     _out("")
-    if best < 600:
-        # what window would reach 600? KV per seq is linear in the window.
-        _out(f"ceiling here is ~{best:,.0f} tok/s. 600+ needs more concurrency, which")
-        _out("means a narrower attention window (KV per sequence is what caps batch):")
-        for w in (65_536, 32_768, 16_384):
+    if best >= MIN_DECODE_TOKS:
+        _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - met at this window")
+    else:
+        # what window would reach the floor? KV per seq is linear in the window.
+        _out(f"ceiling here is ~{best:,.0f} tok/s against the {MIN_DECODE_TOKS} "
+             "tok/s floor. More needs more")
+        _out("concurrency, which means a narrower attention window (KV per "
+             "sequence is what caps batch):")
+        floor_met = False
+        # only windows at or above the QUALITY floor are ever offered -
+        # narrower ones would be faster, and are refused for exactly that trade
+        for w in (65_536, 49_152, 32_768, 16_384, 8_192):
+            if w < MIN_ATTENTION_WINDOW:
+                continue
             kv_w = cfg.kv_bytes_per_token() * w / GiB
             mb = int((vram - weights - args.overhead_gib) // kv_w)
             if mb < 1:
                 continue
             a = bw * BW_EFFICIENCY / ((weights + kv_w * mb) * 1.074) * mb
-            flag = "  <- reaches 600+" if a >= 600 else ""
+            floor_met = floor_met or a >= MIN_DECODE_TOKS
+            flag = f"  <- reaches {MIN_DECODE_TOKS}+" if a >= MIN_DECODE_TOKS else ""
             _out(f"  window {w:>7,} -> KV {kv_w:5.2f} GiB, max batch {mb:>3}, "
                  f"~{a:,.0f} tok/s{flag}")
         _out("  (context stays at the floor in every row - the window trades")
-        _out("   exact-recall depth for concurrency, never context length.)")
+        _out("   exact-recall depth for concurrency, never context length.")
+        _out(f"   windows under {MIN_ATTENTION_WINDOW:,} are not offered: "
+             "quality floor.)")
+        if not floor_met:
+            _out("")
+            _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - NOT reachable on "
+                 "this machine at any window.")
+            _out("This box cannot serve at the TENSELERATE floors. Use the other "
+                 "machine.")
+            _out("")
+            _out("Numbers are a bandwidth roofline at "
+                 f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
+            return 3
     _out("")
     _out("Numbers are a bandwidth roofline at "
          f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
@@ -253,11 +353,54 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# boot — one-command bring-up: doctor, then serve
+# --------------------------------------------------------------------------
+def cmd_boot(args: argparse.Namespace) -> int:
+    """
+    The single command to bring the engine up: run the hardware check first so
+    a bad driver/VRAM fails loud before anything binds, then serve. A failing
+    doctor stops the boot unless --force is given.
+    """
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        _out("refusing to bind off-host: this engine is loopback-only")
+        return 2
+    rc = cmd_doctor(args)
+    if rc != 0 and not args.force:
+        _out("")
+        _out("doctor reported a problem; not booting. Re-run with --force to")
+        _out("serve anyway (the reference backend runs without a GPU).")
+        return rc
+    _out("")
+    return cmd_serve(args)
+
+
+# --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="tenselerate", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
+
+    p_inst = sub.add_parser("install", help="build from this clone, then check the machine")
+    p_inst.add_argument("--cpu", action="store_true", help="force a CPU-only build")
+    p_inst.add_argument("--weights-gib", type=float, default=15.41)
+    p_inst.set_defaults(func=cmd_install)
+
+    p_bld = sub.add_parser("build", help="compile the engine end to end")
+    gb = p_bld.add_mutually_exclusive_group()
+    gb.add_argument("--cpu", action="store_true", help="force a CPU-only build")
+    gb.add_argument("--cuda", action="store_true", help="require CUDA (fail without nvcc)")
+    gb.add_argument("--kernels", action="store_true", help="only the int8 kernels")
+    p_bld.set_defaults(func=cmd_build)
+
+    p_boot = sub.add_parser("boot", help="doctor, then serve (one-command bring-up)")
+    p_boot.add_argument("--host", default="127.0.0.1")
+    p_boot.add_argument("--port", type=int, default=8080)
+    p_boot.add_argument("--config", default=TINY.name, choices=sorted(CONFIGS))
+    p_boot.add_argument("--weights-gib", type=float, default=15.41)
+    p_boot.add_argument("--force", action="store_true",
+                        help="serve even if doctor reports a problem")
+    p_boot.set_defaults(func=cmd_boot)
 
     p_up = sub.add_parser("update", help="check for / apply a new build")
     g = p_up.add_mutually_exclusive_group()
@@ -275,6 +418,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--machine", default="cmp170hx", choices=sorted(MACHINE_HW))
     p_plan.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
                         help=f"context tokens (floor {MIN_CONTEXT_TOKENS:,})")
+    p_plan.add_argument("--attention-window", type=int, default=None,
+                        help="full-attention window tokens (quality floor "
+                             f"{MIN_ATTENTION_WINDOW:,}, max the trained "
+                             "rotary range)")
     p_plan.add_argument("--weights-gib", type=float, default=15.41,
                         help="weight footprint (default: RavenX Q4_K_M)")
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)

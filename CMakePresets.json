@@ -142,9 +142,19 @@
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "86-real" }
     },
     {
+        "description": "RTX 20-series (Turing TU10x, sm_75, e.g. RTX 2080 Ti). Turing has int8 tensor cores (IMMA) and unthrottled dp4a, so the int8 path applies - not a CMP, so no cmp-dp4a.",
+        "name": "rtx-turing", "inherits": [ "base", "release", "cuda-consumer" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "75-real" }
+    },
+    {
         "description": "One binary for a mixed Blackwell+Ampere box (e.g. RTX 5070 GB205 + RTX 3060 GA106). Fat binary: both SASS targets, so either card runs without a JIT stall.",
         "name": "rtx-5070+3060", "inherits": [ "base", "release", "cuda-consumer" ],
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "86-real;120-real" }
+    },
+    {
+        "description": "The deployment box: CMP 170HX (sm_80) + 2x RTX 2080 Ti (sm_75) + RTX 3060 (sm_86). One fat binary with all three SASS targets so every card runs without a JIT stall. The CMP's dp4a is throttled but the Turing/Ampere cards' is not, so this uses cuda-int8 without cmp-dp4a-only tuning; run the CMP under its own cmp170hx-int8 preset when it is the sole card.",
+        "name": "deploy-cmp-2080ti-3060", "inherits": [ "base", "release", "cuda-int8" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "75-real;80-real;86-real" }
     }
   ]
 }

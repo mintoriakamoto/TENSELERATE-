@@ -1,5 +1,5 @@
 """
-CLI behaviour: the subcommands exist, the 750K floor is enforced at the command
+CLI behaviour: the subcommands exist, the 1M floor is enforced at the command
 level, and `plan` never reports a batch size that could not fit in VRAM.
 """
 from __future__ import annotations
@@ -23,10 +23,24 @@ def run(argv: list[str]) -> tuple[int, str]:
 def test_all_subcommands_parse():
     """Each documented subcommand is accepted by the parser (no private attrs)."""
     ap = build_parser()
-    for cmd in ("update", "info", "plan", "doctor", "serve"):
+    for cmd in ("install", "build", "boot", "update", "info", "plan",
+                "doctor", "serve"):
         ns = ap.parse_args([cmd])
         assert ns.command == cmd
         assert callable(ns.func)
+
+
+def test_boot_refuses_off_host_before_building_or_serving():
+    # boot binds a server, so it enforces the same loopback-only rule as serve
+    rc, out = run(["boot", "--host", "0.0.0.0"])
+    assert rc == 2
+    assert "loopback-only" in out
+
+
+def test_build_flags_are_mutually_exclusive():
+    ap = build_parser()
+    with pytest.raises(SystemExit):
+        ap.parse_args(["build", "--cpu", "--cuda"])
 
 
 def test_unlisted_subcommand_is_rejected():
@@ -41,7 +55,7 @@ def test_info_reports_the_floor_and_no_rope_scaling():
     assert f"{MIN_CONTEXT_TOKENS:,}" in out
     assert "rope scaling: no" in out
     # every listed context must be at or above the floor
-    assert "750,000" in out and "10,000,000" in out
+    assert "4,000,000" in out and "10,000,000" in out
 
 
 def test_plan_defaults_to_the_floor():
@@ -67,7 +81,7 @@ def test_plan_never_reports_an_infeasible_batch():
     kv_gib = float(kv_line.split(":")[1].strip().split()[0])
     weights_line = next(ln for ln in out.splitlines() if ln.startswith("weights"))
     weights = float(weights_line.split(":")[1].strip().split()[0])
-    vram, overhead = 64.0, 1.5
+    vram, overhead = 80.0, 1.5
 
     batches = [int(ln.split("batch")[1].split(":")[0].strip())
                for ln in out.splitlines()
@@ -77,21 +91,26 @@ def test_plan_never_reports_an_infeasible_batch():
         assert weights + kv_gib * b + overhead <= vram, (b, out)
 
 
-def test_plan_shows_a_route_to_600_when_the_default_window_cannot():
+def test_plan_shows_a_route_to_the_floor_when_the_default_window_cannot():
+    from tenselerate.config import MIN_DECODE_TOKS
     rc, out = run(["plan", "--machine", "cmp170hx"])
     assert rc == 0
-    if "600+" not in out.split("ceiling here")[0]:
+    if f"{MIN_DECODE_TOKS}+" not in out.split("ceiling here")[0]:
         # it must then say what window would get there, at the same context
-        assert "reaches 600+" in out
+        assert f"reaches {MIN_DECODE_TOKS}+" in out
         assert "never context length" in out
 
 
 def test_plan_on_the_consumer_box_still_holds_the_floor():
+    # may not fit (1), or fit but miss the speed floor (3) - but it must
+    # never lower the context to get there
     rc, out = run(["plan", "--machine", "5070+3060"])
-    assert rc in (0, 1)           # may not fit, but must not lower the context
+    assert rc in (0, 1, 3)
     assert f"{MIN_CONTEXT_TOKENS:,} tokens" in out
     if rc == 1:
         assert "the floor is fixed" in out
+    if rc == 3:
+        assert "NOT reachable" in out
 
 
 def test_serve_refuses_off_host():

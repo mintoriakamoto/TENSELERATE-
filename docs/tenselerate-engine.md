@@ -66,20 +66,33 @@ The GDN recurrence is validated in two forms — sequential and chunked — that
 agree (`test_gdn_chunked_equals_sequential`). The chunked form is exactly what the
 CUDA kernel parallelizes over, so that test is the kernel's spec.
 
-## The 750,000-token floor
+## One model only: Qwen3.8-27B
 
-TENSELERATE never runs below **750,000 tokens** of context. `MIN_CONTEXT_TOKENS`
+TENSELERATE serves exactly one model — the RavenX Chaos Agent (Qwen3.8-27B,
+architecture `qwen3_5`). This is a hard limit, enforced at load time:
+`config_from_gguf()` raises `UnsupportedModelError` for any file whose
+architecture is not `qwen3_5` or whose geometry differs from the published 27B
+config in any field. The engine's design assumes this one geometry everywhere —
+the 16-of-64 attention split, the ~34 KiB/token KV rate, the window math, the
+scheduler's batch caps — so "close enough" models are refused rather than served
+with wrong numbers. `TINY` is a smoke-scale structural stand-in for tests and
+the dev server only; it is never loadable from a GGUF file
+(`tests/tenselerate/test_model_lock.py`).
+
+## The 1,000,000-token floor
+
+TENSELERATE never runs below **1,000,000 tokens** of context. `MIN_CONTEXT_TOKENS`
 is a hard constant and `ModelConfig.validate_context()` refuses anything under it.
 
 That floor has one unavoidable consequence, and it is the interesting part. The
-model's trained rotary range is 262,144 tokens. Serving 750K with *full*
+model's trained rotary range is 262,144 tokens. Serving 1M with *full*
 attention would extrapolate positions, which needs YaRN/RoPE scaling — and we do
 not do RoPE scaling, because it costs quality. So the floor **forces** the
 windowed hybrid:
 
 - the **48 Gated-DeltaNet layers** carry long range in a fixed recurrent state
   and have **no positional encoding at all** — unbounded by construction,
-  whether the sequence is 750K or 10M tokens;
+  whether the sequence is 1M or 10M tokens;
 - the **16 full-attention layers** attend a bounded `attention_window` that never
   exceeds the trained range, so no position is ever extrapolated.
 
@@ -92,39 +105,65 @@ whose size stops growing with context:
 
 | context | KV (q8_0, 128K window) | RoPE scaling |
 | --- | --- | --- |
-| 750,000 | 4.25 GiB | no |
 | 1,000,000 | 4.25 GiB | no |
+| 4,000,000 | 4.25 GiB | no |
 | 10,000,000 | 4.25 GiB | no |
 
 Decode speed follows KV, so it is **constant at any context at or above the
-window**. That is the property that makes a 750K floor affordable at all.
+window**. That is the property that makes a 1M floor affordable at all.
 
 ### The window is the throughput dial
 
 Each concurrent sequence carries its own windowed KV, so the window — not the
 context — is what caps batch size, and batch size is what buys aggregate
-throughput. On the unlocked CMP 170HX at the 750K floor:
+throughput. On the deployment CMP 170HX (X10SRL-F primary x16 slot, unlocked
+to 80 GB, stable) at the 1M floor:
 
 | window | KV/seq | max concurrent | aggregate |
 | --- | --- | --- | --- |
-| 131,072 | 4.25 GiB | 11 | ~160 tok/s |
-| 65,536 | 2.12 GiB | 22 | ~319 tok/s |
-| **32,768** | **1.06 GiB** | **44** | **~638 tok/s** |
-| 16,384 | 0.53 GiB | 88 | ~1,277 tok/s |
+| 131,072 | 4.25 GiB | 14 | ~169 tok/s |
+| 65,536 | 2.12 GiB | 29 | ~339 tok/s |
+| **49,152** | **1.59 GiB** | **39** | **~453 tok/s** |
+| **32,768** | **1.06 GiB** | **59** | **~681 tok/s** |
+| ~~16,384~~ | 0.53 GiB | 118 | faster — **refused: below the quality floor** |
 
-**Context is 750,000 in every row.** The window trades exact-recall depth (how
+**Context is 1,000,000 in every row.** The window trades exact-recall depth (how
 far back the full-attention layers see verbatim) for concurrency — never context
 length, which the GDN state carries regardless. `tenselerate plan` computes this
 table for the machine it is run on and refuses to print a batch size that would
 not fit in VRAM.
 
-Note the consumer box (24 GiB) fits the floor at a 128K window but only one
-sequence; it wants a narrower window to get useful concurrency.
+And the number is not a target, it is a **floor**: `MIN_DECODE_TOKS = 400` —
+the stated product requirement, alongside the 1M context — in `config.py`,
+enforced by `plan` the same way `MIN_CONTEXT_TOKENS` is. A machine meets the
+floor if *some* window reaches 400 tok/s aggregate at the context floor;
+`plan` reports the widest window that does (49K on the deployment box, with
+32K available when there is load to soak it). A machine that cannot reach
+it at any window is refused (exit 3) rather than served slowly — and lowering
+the context is never offered as the way out
+(`tests/tenselerate/test_speed_floor.py`).
+
+The dial has a stop. **Quality is not for sale**: `MIN_ATTENTION_WINDOW =
+32_768` is the narrowest window the engine will run, enforced by
+`validate_window()` and by `plan --attention-window`, and `plan` never offers a
+sub-floor window in its suggestions — even though (see the struck row above)
+one would be faster. 32K comfortably clears the speed floor on the deployment
+machine, so the three floors — 1M context, 400 tok/s, 32K recall — are
+simultaneously satisfiable, and
+`test_all_three_floors_are_simultaneously_satisfiable` pins that they stay so.
+The other half of the quality floor is already law elsewhere: no RoPE
+scaling/YaRN, ever (`needs_rope_scaling`).
+
+The rest of the deployment box: the 2080 Ti pair (22 GiB pooled as one
+pipeline node, `--machine 2x2080ti`) tops out ~152 tok/s at the 32K window —
+below the floor, so it is a dev/failover node, not the server; the 3060 (x8)
+cannot hold the weights and stays the smoke-test card. PCIe 3.0 is irrelevant
+to decode: weights and KV are resident, nothing streams per token.
 
 **The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
 stock model, whose full-attention layers are not windowed, so past 262,144 it
 would need RoPE scaling. The bridge therefore caps at the model's native 256K;
-the 750K floor is a property of the native engine.
+the 1M floor is a property of the native engine.
 
 ## Continuous batching — the 600 tok/s lever
 
@@ -146,13 +185,13 @@ Two pools, matching the hybrid:
 **Admission is memory-first.** A sequence is admitted only when its *worst-case*
 footprint — a full window of KV — is already available. That is deliberate:
 admitting on current usage and hoping is how a server OOMs mid-generation, and a
-sequence killed at token 400,000 of a 750,000-token context has wasted more work
+sequence killed at token 400,000 of a 1,000,000-token context has wasted more work
 than it ever produced. Over-admission raises `OutOfBlocks`; un-admittable work
 raises a deadlock error rather than spinning forever.
 
-The sliding window is what makes a 750K floor affordable here: a sequence's
+The sliding window is what makes a 1M floor affordable here: a sequence's
 blocks stop accumulating once it reaches the window, so `total_tokens` runs past
-750,000 while `cached_tokens` holds flat and the pool never grows. That is pinned
+1,000,000 while `cached_tokens` holds flat and the pool never grows. That is pinned
 by `test_kv_is_bounded_while_context_runs_past_the_floor`.
 
 `tenselerate plan` asks the real `Scheduler` for its capacity rather than
@@ -205,7 +244,7 @@ is the claim that matters: swapping backends does not change the answer.
 | 0 | OpenAI `/v1` server (reference backend, byte tokenizer) | **done** |
 | 0 | int8 GEMM CUDA kernel (dp4a) + CI compile for sm_80/86/120 | **done (compiles; runs on GPU only)** |
 | 1 | GGUF reader (our own) + config-from-GGUF | **done, 9 tests** |
-| 1 | 750K context floor + windowed hybrid attention (config + CLI) | **done, 10 tests** |
+| 1 | 1M context floor + windowed hybrid attention (config + CLI) | **done, 10 tests** |
 | 1 | `tenselerate` CLI (update/info/plan/doctor/serve) | **done, 9 tests** |
 | 1 | Real tokenizer + weight load behind the server | not started |
 | 1 | ctypes bridge so the engine calls the CUDA int8 GEMM | **done, 16 tests** |
@@ -223,14 +262,27 @@ correctness bar on day one instead of being debugged blind.
 
 ## Running it now
 
+`tenselerate` is one entry point for the whole lifecycle — install, build, boot,
+serve, update — plus the info/plan/doctor introspection.
+
 ```sh
-# the CLI — one entry point for everything
-python3 -m tenselerate info                    # geometry + the 750K floor
+# zero to running on a bare box: clone + build in one line
+curl -fsSL https://raw.githubusercontent.com/mintoriakamoto/TENSELERATE-/main/scripts/tenselerate-build.sh | bash
+
+# ...or from a clone
+python3 -m tenselerate install                 # build end to end, then doctor
+python3 -m tenselerate build --cuda            # (re)compile: kernels + llama-server
+python3 -m tenselerate boot --port 8080        # doctor, then serve — one command
+```
+
+```sh
+# introspection / lifecycle
+python3 -m tenselerate info                    # geometry + the 1M / 400 / 32K floors
 python3 -m tenselerate plan --machine cmp170hx # what this box does at the floor
 python3 -m tenselerate doctor                  # driver/hardware check
-python3 -m tenselerate update                  # check for a new build
+python3 -m tenselerate update                  # check for a new build (exit 10 = update)
 python3 -m tenselerate update --source         # fast-forward and rebuild
-python3 -m tenselerate serve --port 8080       # the OpenAI /v1 endpoint
+python3 -m tenselerate serve --port 8080       # just the OpenAI /v1 endpoint
 ```
 
 ```sh
