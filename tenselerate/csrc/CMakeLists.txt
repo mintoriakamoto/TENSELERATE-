@@ -25,8 +25,11 @@ check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # 80 = CMP 170HX (GA100), 86 = RTX 3060, 120 = RTX 5070 (needs CUDA 12.8)
-        set(CMAKE_CUDA_ARCHITECTURES 80-real 86-real)
+        # The deployment fleet: 75 = RTX 2080 Ti (Turing), 80 = CMP 170HX
+        # (GA100), 86 = RTX 3060 (Ampere). 120 = RTX 5070 (Blackwell) is opt-in
+        # via a preset since it needs CUDA >= 12.8. Turing has int8 tensor cores
+        # and unthrottled dp4a, so the int8 path applies there too.
+        set(CMAKE_CUDA_ARCHITECTURES 75-real 80-real 86-real)
     endif()
     add_library(tenselerate_kernels STATIC int8_gemm.cu)
     target_include_directories(tenselerate_kernels PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
