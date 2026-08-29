@@ -20,9 +20,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import dataclasses
+
 from tenselerate.config import (
-    CONFIGS, MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS, RAVENX_27B, TINY,
-    ContextFloorError, RopeScalingRequired,
+    CONFIGS, MIN_ATTENTION_WINDOW, MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS,
+    RAVENX_27B, TINY,
+    ContextFloorError, QualityFloorError, RopeScalingRequired, validate_window,
 )
 from tenselerate.engine.scheduler import Scheduler
 
@@ -88,6 +91,8 @@ def cmd_info(args: argparse.Namespace) -> int:
     _out(f"CONTEXT FLOOR    : {MIN_CONTEXT_TOKENS:,} tokens (hard minimum)")
     _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS:,} tok/s aggregate (hard minimum, "
          "enforced by `plan`)")
+    _out(f"QUALITY FLOOR    : window >= {MIN_ATTENTION_WINDOW:,} tokens, and no "
+         "RoPE scaling, ever")
     win = cfg.attention_window
     _out(f"attention window : {win:,} tokens" if win else
          "attention window : unbounded (full attention)")
@@ -123,8 +128,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     cfg = CONFIGS[args.config]
     ctx = args.ctx
     try:
+        if args.attention_window is not None:
+            cfg = dataclasses.replace(
+                cfg, attention_window=validate_window(args.attention_window))
         cfg.validate_context(ctx)
-    except (ContextFloorError, RopeScalingRequired) as e:
+    except (ContextFloorError, QualityFloorError, RopeScalingRequired) as e:
         _out(f"error: {e}")
         return 2
 
@@ -191,7 +199,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         _out("concurrency, which means a narrower attention window (KV per "
              "sequence is what caps batch):")
         floor_met = False
+        # only windows at or above the QUALITY floor are ever offered -
+        # narrower ones would be faster, and are refused for exactly that trade
         for w in (65_536, 32_768, 16_384, 8_192):
+            if w < MIN_ATTENTION_WINDOW:
+                continue
             kv_w = cfg.kv_bytes_per_token() * w / GiB
             mb = int((vram - weights - args.overhead_gib) // kv_w)
             if mb < 1:
@@ -202,7 +214,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
             _out(f"  window {w:>7,} -> KV {kv_w:5.2f} GiB, max batch {mb:>3}, "
                  f"~{a:,.0f} tok/s{flag}")
         _out("  (context stays at the floor in every row - the window trades")
-        _out("   exact-recall depth for concurrency, never context length.)")
+        _out("   exact-recall depth for concurrency, never context length.")
+        _out(f"   windows under {MIN_ATTENTION_WINDOW:,} are not offered: "
+             "quality floor.)")
         if not floor_met:
             _out("")
             _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - NOT reachable on "
@@ -296,6 +310,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--machine", default="cmp170hx", choices=sorted(MACHINE_HW))
     p_plan.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
                         help=f"context tokens (floor {MIN_CONTEXT_TOKENS:,})")
+    p_plan.add_argument("--attention-window", type=int, default=None,
+                        help="full-attention window tokens (quality floor "
+                             f"{MIN_ATTENTION_WINDOW:,}, max the trained "
+                             "rotary range)")
     p_plan.add_argument("--weights-gib", type=float, default=15.41,
                         help="weight footprint (default: RavenX Q4_K_M)")
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)

@@ -123,7 +123,7 @@ throughput. On the unlocked CMP 170HX at the 1M floor:
 | 131,072 | 4.25 GiB | 11 | ~160 tok/s |
 | 65,536 | 2.12 GiB | 22 | ~319 tok/s |
 | **32,768** | **1.06 GiB** | **44** | **~638 tok/s** |
-| 16,384 | 0.53 GiB | 88 | ~1,277 tok/s |
+| ~~16,384~~ | 0.53 GiB | 88 | ~1,277 tok/s — **refused: below the quality floor** |
 
 **Context is 1,000,000 in every row.** The window trades exact-recall depth (how
 far back the full-attention layers see verbatim) for concurrency — never context
@@ -138,6 +138,17 @@ floor; `plan` reports the widest window that does. A machine that cannot reach
 it at any window is refused (exit 3) rather than served slowly — and lowering
 the context is never offered as the way out
 (`tests/tenselerate/test_speed_floor.py`).
+
+The dial has a stop. **Quality is not for sale**: `MIN_ATTENTION_WINDOW =
+32_768` is the narrowest window the engine will run, enforced by
+`validate_window()` and by `plan --attention-window`, and `plan` never offers a
+sub-floor window in its suggestions — even though (see the struck row above)
+one would be faster. 32K is chosen as the narrowest window that still meets the
+speed floor on the target machine, so the three floors — 1M context, 600 tok/s,
+32K recall — are simultaneously satisfiable, and
+`test_all_three_floors_are_simultaneously_satisfiable` pins that they stay so.
+The other half of the quality floor is already law elsewhere: no RoPE
+scaling/YaRN, ever (`needs_rope_scaling`).
 
 Note the consumer box (24 GiB) fits the floor at a 128K window but only one
 sequence; it wants a narrower window to get useful concurrency.

@@ -46,6 +46,14 @@ MIN_CONTEXT_TOKENS = 1_000_000
 # is the dial that trades exact-recall depth for concurrency, and a box that
 # cannot reach the floor at any window is refused, not served slowly.
 MIN_DECODE_TOKS = 600
+# Hard quality floor: the narrowest attention window the engine will run.
+# Speed is bought with concurrency and concurrency with a narrower window,
+# but below this much verbatim recall the answers degrade - and quality is
+# not for sale. Together with the no-RoPE-scaling rule this bounds the window
+# on BOTH sides: MIN_ATTENTION_WINDOW <= window <= trained rotary range.
+# 32K is the narrowest window that still meets MIN_DECODE_TOKS on the target
+# machine, so the three floors are simultaneously satisfiable by design.
+MIN_ATTENTION_WINDOW = 32_768
 # Hard product lock: the only architecture and model this engine will load.
 SUPPORTED_ARCH = "qwen3_5"
 SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
@@ -67,6 +75,25 @@ class RopeScalingRequired(ValueError):
 
 class UnsupportedModelError(ValueError):
     """Raised when a file is not the one model this engine serves."""
+
+
+class QualityFloorError(ValueError):
+    """Raised when a configuration would trade model quality for speed."""
+
+
+def validate_window(window: int) -> int:
+    """
+    Enforce the quality floor on an attention window. Returns the window on
+    success so it can be used inline. The upper bound (the trained rotary
+    range) is enforced separately by needs_rope_scaling/validate_context.
+    """
+    if window < MIN_ATTENTION_WINDOW:
+        raise QualityFloorError(
+            f"attention window {window:,} is below the TENSELERATE quality "
+            f"floor of {MIN_ATTENTION_WINDOW:,} tokens. Speed comes from "
+            f"concurrency at a window >= the floor, never from cutting "
+            f"recall depth further.")
+    return window
 
 
 @dataclass(frozen=True)
