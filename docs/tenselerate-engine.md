@@ -262,14 +262,27 @@ correctness bar on day one instead of being debugged blind.
 
 ## Running it now
 
+`tenselerate` is one entry point for the whole lifecycle — install, build, boot,
+serve, update — plus the info/plan/doctor introspection.
+
 ```sh
-# the CLI — one entry point for everything
-python3 -m tenselerate info                    # geometry + the 1M floor
+# zero to running on a bare box: clone + build in one line
+curl -fsSL https://raw.githubusercontent.com/mintoriakamoto/TENSELERATE-/main/scripts/tenselerate-build.sh | bash
+
+# ...or from a clone
+python3 -m tenselerate install                 # build end to end, then doctor
+python3 -m tenselerate build --cuda            # (re)compile: kernels + llama-server
+python3 -m tenselerate boot --port 8080        # doctor, then serve — one command
+```
+
+```sh
+# introspection / lifecycle
+python3 -m tenselerate info                    # geometry + the 1M / 400 / 32K floors
 python3 -m tenselerate plan --machine cmp170hx # what this box does at the floor
 python3 -m tenselerate doctor                  # driver/hardware check
-python3 -m tenselerate update                  # check for a new build
+python3 -m tenselerate update                  # check for a new build (exit 10 = update)
 python3 -m tenselerate update --source         # fast-forward and rebuild
-python3 -m tenselerate serve --port 8080       # the OpenAI /v1 endpoint
+python3 -m tenselerate serve --port 8080       # just the OpenAI /v1 endpoint
 ```
 
 ```sh

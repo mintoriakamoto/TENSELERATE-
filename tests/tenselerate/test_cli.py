@@ -23,10 +23,24 @@ def run(argv: list[str]) -> tuple[int, str]:
 def test_all_subcommands_parse():
     """Each documented subcommand is accepted by the parser (no private attrs)."""
     ap = build_parser()
-    for cmd in ("update", "info", "plan", "doctor", "serve"):
+    for cmd in ("install", "build", "boot", "update", "info", "plan",
+                "doctor", "serve"):
         ns = ap.parse_args([cmd])
         assert ns.command == cmd
         assert callable(ns.func)
+
+
+def test_boot_refuses_off_host_before_building_or_serving():
+    # boot binds a server, so it enforces the same loopback-only rule as serve
+    rc, out = run(["boot", "--host", "0.0.0.0"])
+    assert rc == 2
+    assert "loopback-only" in out
+
+
+def test_build_flags_are_mutually_exclusive():
+    ap = build_parser()
+    with pytest.raises(SystemExit):
+        ap.parse_args(["build", "--cpu", "--cuda"])
 
 
 def test_unlisted_subcommand_is_rejected():

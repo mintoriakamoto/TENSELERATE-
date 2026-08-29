@@ -1,15 +1,21 @@
 """
 The `tenselerate` command line.
 
-One entry point for the engine:
+One entry point for the whole lifecycle of the engine:
 
-    tenselerate update           check for and apply a new build
+    tenselerate install          build from this clone, then check the machine
+    tenselerate build            compile the engine end to end (kernels + server)
+    tenselerate boot             doctor, then serve — one-command bring-up
     tenselerate serve            run the OpenAI /v1 endpoint
+    tenselerate update           check for and apply a new build
     tenselerate info             model geometry, the context floor, KV sizing
     tenselerate plan             what this machine can do at a given context
     tenselerate doctor           hardware/driver check before anything else
 
 Run as `python -m tenselerate <cmd>` (or `tenselerate <cmd>` once installed).
+
+From a bare machine, one line clones and builds:
+    curl -fsSL https://raw.githubusercontent.com/mintoriakamoto/TENSELERATE-/main/scripts/tenselerate-build.sh | bash
 """
 
 from __future__ import annotations
@@ -35,6 +41,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _out(msg: str = "") -> None:
     sys.stdout.write(msg + "\n")
+
+
+# --------------------------------------------------------------------------
+# build / install
+# --------------------------------------------------------------------------
+def _run_build(mode_args: list[str]) -> int:
+    """Drive scripts/tenselerate-build.sh with the given flags."""
+    script = REPO_ROOT / "scripts" / "tenselerate-build.sh"
+    if not script.is_file():
+        _out(f"error: build script not found at {script}")
+        _out("Run from a clone, or bootstrap a bare machine with:")
+        _out("  curl -fsSL https://raw.githubusercontent.com/mintoriakamoto/"
+             "TENSELERATE-/main/scripts/tenselerate-build.sh | bash")
+        return 1
+    cmd = ["bash", str(script), *mode_args]
+    _out(f"$ {' '.join(cmd)}")
+    return subprocess.run(cmd, cwd=str(REPO_ROOT)).returncode
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    """Compile the engine end to end: the int8 kernels and the llama.cpp server."""
+    mode_args = []
+    if args.cpu:
+        mode_args.append("--cpu")
+    elif args.cuda:
+        mode_args.append("--cuda")
+    elif args.kernels:
+        mode_args.append("--kernels")
+    return _run_build(mode_args)
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Build from this clone, then run the hardware check — zero to ready."""
+    _out("TENSELERATE install: build, then verify the machine")
+    _out("")
+    rc = _run_build([] if not args.cpu else ["--cpu"])
+    if rc != 0:
+        _out("")
+        _out("build failed; fix the errors above, then re-run `tenselerate install`")
+        return rc
+    _out("")
+    _out("build ok - running doctor")
+    _out("")
+    return cmd_doctor(args)
 
 
 # --------------------------------------------------------------------------
@@ -303,11 +353,54 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# boot — one-command bring-up: doctor, then serve
+# --------------------------------------------------------------------------
+def cmd_boot(args: argparse.Namespace) -> int:
+    """
+    The single command to bring the engine up: run the hardware check first so
+    a bad driver/VRAM fails loud before anything binds, then serve. A failing
+    doctor stops the boot unless --force is given.
+    """
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        _out("refusing to bind off-host: this engine is loopback-only")
+        return 2
+    rc = cmd_doctor(args)
+    if rc != 0 and not args.force:
+        _out("")
+        _out("doctor reported a problem; not booting. Re-run with --force to")
+        _out("serve anyway (the reference backend runs without a GPU).")
+        return rc
+    _out("")
+    return cmd_serve(args)
+
+
+# --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="tenselerate", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
+
+    p_inst = sub.add_parser("install", help="build from this clone, then check the machine")
+    p_inst.add_argument("--cpu", action="store_true", help="force a CPU-only build")
+    p_inst.add_argument("--weights-gib", type=float, default=15.41)
+    p_inst.set_defaults(func=cmd_install)
+
+    p_bld = sub.add_parser("build", help="compile the engine end to end")
+    gb = p_bld.add_mutually_exclusive_group()
+    gb.add_argument("--cpu", action="store_true", help="force a CPU-only build")
+    gb.add_argument("--cuda", action="store_true", help="require CUDA (fail without nvcc)")
+    gb.add_argument("--kernels", action="store_true", help="only the int8 kernels")
+    p_bld.set_defaults(func=cmd_build)
+
+    p_boot = sub.add_parser("boot", help="doctor, then serve (one-command bring-up)")
+    p_boot.add_argument("--host", default="127.0.0.1")
+    p_boot.add_argument("--port", type=int, default=8080)
+    p_boot.add_argument("--config", default=TINY.name, choices=sorted(CONFIGS))
+    p_boot.add_argument("--weights-gib", type=float, default=15.41)
+    p_boot.add_argument("--force", action="store_true",
+                        help="serve even if doctor reports a problem")
+    p_boot.set_defaults(func=cmd_boot)
 
     p_up = sub.add_parser("update", help="check for / apply a new build")
     g = p_up.add_mutually_exclusive_group()
