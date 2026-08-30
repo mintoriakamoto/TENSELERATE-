@@ -145,7 +145,7 @@ jobs:
           ./build-xcframework.sh
 
       - name: Upload xcframework artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: llama-xcframework
           path: build-apple/llama.xcframework/
