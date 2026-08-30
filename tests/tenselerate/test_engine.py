@@ -5,6 +5,8 @@ pipeline is correct before any CUDA kernel exists.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from tenselerate.config import RAVENX_27B, TINY
@@ -43,7 +45,31 @@ def test_full_layers_grow_cache_linear_layers_do_not():
             # linear layer holds a FIXED-size state, no growing cache
             assert s.k_cache == [] and s.v_cache == []
             assert s.gdn_state is not None
-            assert s.gdn_state.shape == (TINY.n_head, TINY.head_dim, TINY.head_dim)
+            # GDN state geometry is the layer's OWN (linear_*) dims, not the
+            # full-attention layers' n_head/head_dim - see bug fix below.
+            assert s.gdn_state.shape == (
+                TINY.linear_num_value_heads, TINY.linear_value_head_dim,
+                TINY.linear_key_head_dim)
+
+
+def test_full_attention_cache_is_bounded_by_the_window():
+    """
+    Regression for the missing sliding-window eviction: a full-attention
+    layer's K/V cache must stop growing once it reaches cfg.resident_kv_tokens,
+    no matter how many more tokens are generated - that is the entire premise
+    of serving 750K+ tokens on a constant-size KV cache.
+    """
+    cfg = replace(TINY, attention_window=3, max_position_embeddings=4096)
+    m = ReferenceModel(cfg, seed=6)
+    st = m.new_state()
+    n_steps = 10
+    assert n_steps > cfg.resident_kv_tokens
+    for pos in range(n_steps):
+        m.step(pos % cfg.vocab_size, pos, st)
+    for li, s in enumerate(st):
+        if cfg.is_full_attention(li):
+            assert len(s.k_cache) == cfg.resident_kv_tokens
+            assert len(s.v_cache) == cfg.resident_kv_tokens
 
 
 def test_gdn_state_size_independent_of_sequence_length():
