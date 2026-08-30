@@ -1,10 +1,10 @@
 """
-The quality floor. Speed is bought with a narrower attention window, and the
-two previous floors (1M context, 600 tok/s) both push in that direction - this
-floor is the stop: the window never drops below MIN_ATTENTION_WINDOW, and RoPE
-scaling stays banned. 32K is the narrowest window that still meets the speed
-floor on the target machine, so all three floors are satisfiable at once - by
-design, and pinned here.
+The 32K quality floor: the narrowest attention window the engine will run, and
+no RoPE scaling. It is machine-independent. On the one supported box (dual
+2080 Ti) the speed floor is NOT met even at this window, so the context, speed,
+and quality floors are NOT all simultaneously satisfiable there - the box is
+below the speed standard by design, and the engine says so rather than
+loosening quality to compensate.
 """
 from __future__ import annotations
 
@@ -46,36 +46,40 @@ def test_validate_window_enforces_the_floor():
 
 
 def test_plan_refuses_a_window_below_the_floor():
-    rc, out = run(["plan", "--machine", "cmp170hx",
+    # quality is checked before the speed roofline, so a sub-floor window is
+    # exit 2 (quality) regardless of the machine
+    rc, out = run(["plan", "--machine", "2x2080ti",
                    "--attention-window", "16384"])
     assert rc == 2
     assert "quality" in out
 
 
-def test_plan_accepts_the_floor_window_and_meets_the_speed_floor():
-    rc, out = run(["plan", "--machine", "cmp170hx",
+def test_floor_window_passes_quality_but_box_still_misses_speed():
+    # at the 32K quality-floor window the window is accepted (no quality error),
+    # but the supported box still cannot reach 400 -> exit 3, not exit 2
+    rc, out = run(["plan", "--machine", "2x2080ti",
                    "--attention-window", str(MIN_ATTENTION_WINDOW)])
-    assert rc == 0
-    assert "met at this window" in out
+    assert rc == 3                       # below speed, not a quality refusal
+    assert "below the TENSELERATE quality floor" not in out
 
 
 def test_plan_never_offers_a_window_below_the_floor():
-    rc, out = run(["plan", "--machine", "cmp170hx"])
-    assert rc == 0
+    rc, out = run(["plan", "--machine", "2x2080ti"])
     assert "window  16,384" not in out and "window   8,192" not in out
     assert "quality floor" in out
 
 
-def test_all_three_floors_are_simultaneously_satisfiable():
-    """At the quality-floor window, the target machine reaches the speed
-    floor at the context floor - the floors cannot deadlock each other."""
-    vram, bw = MACHINE_HW["cmp170hx"]
+def test_floors_are_NOT_all_satisfiable_on_the_supported_box():
+    """The honest inversion: on the only supported box the speed floor is not
+    met even at the quality-floor window, so context+speed+quality do not all
+    hold at once. The bar stays; the box is reported below it."""
+    vram, bw = MACHINE_HW["2x2080ti"]
     weights, overhead = 15.41, 1.5
     kv = RAVENX_27B.kv_bytes_per_token() * MIN_ATTENTION_WINDOW / GiB
     b = int((vram - weights - overhead) // kv)
     agg = bw * BW_EFFICIENCY / ((weights + kv * b) * 1.074) * b
-    assert b >= 1
-    assert agg >= MIN_DECODE_TOKS, agg
+    assert b >= 1                        # it does serve (context floor holds)
+    assert agg < MIN_DECODE_TOKS         # ...but below the speed standard
 
 
 def test_info_reports_the_quality_floor():

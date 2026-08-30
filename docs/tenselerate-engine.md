@@ -2,8 +2,8 @@
 
 Our own way to host models. Not a llama.cpp fork, not a wrapper around vLLM or
 ExLlama — a from-scratch engine whose compute path we own end to end, built for
-the hardware we actually run: the CMP 170HX (no usable FP16, int8 tensor cores
-intact) and consumer GeForce, serving the `qwen3_5` hybrid.
+the one box we actually run: **dual RTX 2080 Ti** (Turing sm_75, int8 tensor
+cores, 22 GiB pooled) on a Ryzen 9 9950X, serving the `qwen3_5` hybrid.
 
 This document is the map and the honest status. It is deliberately blunt about
 what is real, what is a stub, and what is not written yet.
@@ -116,49 +116,44 @@ window**. That is the property that makes a 1M floor affordable at all.
 
 Each concurrent sequence carries its own windowed KV, so the window — not the
 context — is what caps batch size, and batch size is what buys aggregate
-throughput. On the deployment CMP 170HX (X10SRL-F primary x16 slot, unlocked
-to 80 GB, stable) at the 1M floor:
+throughput. The one supported box is the **dual RTX 2080 Ti** (Turing sm_75,
+22 GiB pooled, ~1232 GB/s; Ryzen 9 9950X, 32 GB DDR5, 1 TB NVMe + 250 GB OS
+SSD). At the 1M floor:
 
 | window | KV/seq | max concurrent | aggregate |
 | --- | --- | --- | --- |
-| 131,072 | 4.25 GiB | 14 | ~169 tok/s |
-| 65,536 | 2.12 GiB | 29 | ~339 tok/s |
-| **49,152** | **1.59 GiB** | **39** | **~453 tok/s** |
-| **32,768** | **1.06 GiB** | **59** | **~681 tok/s** |
-| ~~16,384~~ | 0.53 GiB | 118 | faster — **refused: below the quality floor** |
+| 131,072 | 4.25 GiB | 1 | ~38 tok/s |
+| 65,536 | 2.12 GiB | 2 | ~76 tok/s |
+| 49,152 | 1.59 GiB | 3 | ~111 tok/s |
+| **32,768** | **1.06 GiB** | **4** | **~152 tok/s** |
+| ~~16,384~~ | 0.53 GiB | 8 | faster — **refused: below the quality floor** |
 
 **Context is 1,000,000 in every row.** The window trades exact-recall depth (how
 far back the full-attention layers see verbatim) for concurrency — never context
 length, which the GDN state carries regardless. `tenselerate plan` computes this
-table for the machine it is run on and refuses to print a batch size that would
-not fit in VRAM.
+table for the machine and refuses to print a batch size that would not fit in
+the 22 GiB.
 
-And the number is not a target, it is a **floor**: `MIN_DECODE_TOKS = 400` —
-the stated product requirement, alongside the 1M context — in `config.py`,
-enforced by `plan` the same way `MIN_CONTEXT_TOKENS` is. A machine meets the
-floor if *some* window reaches 400 tok/s aggregate at the context floor;
-`plan` reports the widest window that does (49K on the deployment box, with
-32K available when there is load to soak it). A machine that cannot reach
-it at any window is refused (exit 3) rather than served slowly — and lowering
-the context is never offered as the way out
-(`tests/tenselerate/test_speed_floor.py`).
+The speed number is a **standard**, not a target that bends to the hardware:
+`MIN_DECODE_TOKS = 400` in `config.py`. The supported box tops out at
+**~152 tok/s** (32K window) — so it sits **below** that standard, and `plan`
+says so honestly (exit 3) rather than lowering the bar. Serving still works
+(`serve`/`boot` do not gate on the speed floor); `plan` is the advisory that
+the box is under the target. 1M context and the 32K quality floor hold; the
+400 speed floor does not — the three are **not** all satisfiable on this box,
+and the engine reports that truthfully (`tests/tenselerate/test_speed_floor.py`,
+`test_quality_floor.py`).
 
 The dial has a stop. **Quality is not for sale**: `MIN_ATTENTION_WINDOW =
 32_768` is the narrowest window the engine will run, enforced by
 `validate_window()` and by `plan --attention-window`, and `plan` never offers a
 sub-floor window in its suggestions — even though (see the struck row above)
-one would be faster. 32K comfortably clears the speed floor on the deployment
-machine, so the three floors — 1M context, 400 tok/s, 32K recall — are
-simultaneously satisfiable, and
-`test_all_three_floors_are_simultaneously_satisfiable` pins that they stay so.
-The other half of the quality floor is already law elsewhere: no RoPE
-scaling/YaRN, ever (`needs_rope_scaling`).
+one would be faster. The other half of the quality floor is already law
+elsewhere: no RoPE scaling/YaRN, ever (`needs_rope_scaling`).
 
-The rest of the deployment box: the 2080 Ti pair (22 GiB pooled as one
-pipeline node, `--machine 2x2080ti`) tops out ~152 tok/s at the 32K window —
-below the floor, so it is a dev/failover node, not the server; the 3060 (x8)
-cannot hold the weights and stays the smoke-test card. PCIe 3.0 is irrelevant
-to decode: weights and KV are resident, nothing streams per token.
+Both 2080 Ti are identical Turing cards, so the build is a single sm_75 SASS
+target (`--preset deploy-2x2080ti`) — no fat binary, no JIT stall. Turing has
+int8 tensor cores (IMMA) and unthrottled dp4a, so the int8 path applies.
 
 **The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
 stock model, whose full-attention layers are not windowed, so past 262,144 it
@@ -278,7 +273,7 @@ python3 -m tenselerate boot --port 8080        # doctor, then serve — one comm
 ```sh
 # introspection / lifecycle
 python3 -m tenselerate info                    # geometry + the 1M / 400 / 32K floors
-python3 -m tenselerate plan --machine cmp170hx # what this box does at the floor
+python3 -m tenselerate plan --machine 2x2080ti  # what the box does at the floor
 python3 -m tenselerate doctor                  # driver/hardware check
 python3 -m tenselerate update                  # check for a new build (exit 10 = update)
 python3 -m tenselerate update --source         # fast-forward and rebuild

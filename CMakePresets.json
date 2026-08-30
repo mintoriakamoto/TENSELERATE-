@@ -152,9 +152,9 @@
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "86-real;120-real" }
     },
     {
-        "description": "The deployment box: CMP 170HX (sm_80) + 2x RTX 2080 Ti (sm_75) + RTX 3060 (sm_86). One fat binary with all three SASS targets so every card runs without a JIT stall. The CMP's dp4a is throttled but the Turing/Ampere cards' is not, so this uses cuda-int8 without cmp-dp4a-only tuning; run the CMP under its own cmp170hx-int8 preset when it is the sole card.",
-        "name": "deploy-cmp-2080ti-3060", "inherits": [ "base", "release", "cuda-int8" ],
-        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "75-real;80-real;86-real" }
+        "description": "The one supported deployment box: dual RTX 2080 Ti (Turing, sm_75) on a Ryzen 9 9950X. Turing has int8 tensor cores (IMMA) and unthrottled dp4a, so this uses cuda-int8; a single sm_75 SASS target since both cards are identical - no JIT stall, no fat binary needed.",
+        "name": "deploy-2x2080ti", "inherits": [ "base", "release", "cuda-int8" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "75-real" }
     }
   ]
 }
