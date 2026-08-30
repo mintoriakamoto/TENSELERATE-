@@ -56,6 +56,18 @@ MIN_DECODE_TOKS = 400
 # 32K is the narrowest window that still meets MIN_DECODE_TOKS on the target
 # machine, so the three floors are simultaneously satisfiable by design.
 MIN_ATTENTION_WINDOW = 32_768
+# --------------------------------------------------------------------------
+# Acceleration dials - the two real levers that speed decode on a fixed box.
+# KV cache precision (bytes per element). q8_0 is the default; q4_0 halves the
+# KV footprint, so ~2x the concurrency the VRAM holds and ~2x aggregate - at a
+# quality cost that an A/B must settle, never adopted silently.
+KV_BITS_PER_ELEM = {8: 1.0625, 4: 0.5625}
+# MTP self-speculation: the model's built-in Multi-Token-Prediction draft head
+# proposes several tokens the main pass verifies in ONE step. Accepted tokens
+# are free, so throughput multiplies with NO quality cost - the verify
+# guarantees output identical to plain decode. 1.8x is a conservative modeling
+# assumption (scripts/svmi-* measures the real acceptance rate). Roadmap kernel.
+MTP_SPECULATIVE_SPEEDUP = 1.8
 # Attention sinks (StreamingLLM, arXiv:2309.17453): softmax attention dumps
 # surplus probability mass on the first few tokens, so a sliding window that
 # evicts them collapses in quality. Keeping the first N tokens resident
@@ -72,6 +84,14 @@ SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
 # scaling). 128K leaves headroom under the RavenX 256K trained range and keeps
 # the KV cache at a constant ~4.25 GiB regardless of total context length.
 DEFAULT_ATTENTION_WINDOW = 131_072
+# The DEEPEST window the engine will run - the trained rotary range, minus the
+# attention sinks that share it. The sinks sit at re-anchored positions 0..N-1,
+# so the attended span is window + sinks and that whole span must stay inside
+# max_position_embeddings; the largest window that satisfies it is therefore
+# max_position_embeddings - ATTENTION_SINK_TOKENS. This is the verbatim-recall
+# ceiling: past it a position would have to be extrapolated, which needs RoPE
+# scaling, which we never do. It only fits the 22 GiB box with q4_0 KV.
+MAX_ATTENTION_WINDOW = 262_144 - ATTENTION_SINK_TOKENS      # 262,140
 # ---------------------------------------------------------------------------
 
 
@@ -91,11 +111,15 @@ class QualityFloorError(ValueError):
     """Raised when a configuration would trade model quality for speed."""
 
 
-def validate_window(window: int) -> int:
+def validate_window(window: int, max_window: int = MAX_ATTENTION_WINDOW) -> int:
     """
-    Enforce the quality floor on an attention window. Returns the window on
-    success so it can be used inline. The upper bound (the trained rotary
-    range) is enforced separately by needs_rope_scaling/validate_context.
+    Enforce the window bounds on BOTH sides. The lower bound is the quality
+    floor (recall depth is not for sale); the upper bound is the deepest window
+    that still keeps every position inside the trained rotary range once the
+    attention sinks are counted (window + sinks <= max_position_embeddings), so
+    no position is ever extrapolated and RoPE scaling is never needed. Returns
+    the window on success so it can be used inline. `max_window` defaults to the
+    RavenX ceiling; pass a config's own `max_attention_window` for other geometry.
     """
     if window < MIN_ATTENTION_WINDOW:
         raise QualityFloorError(
@@ -103,6 +127,14 @@ def validate_window(window: int) -> int:
             f"floor of {MIN_ATTENTION_WINDOW:,} tokens. Speed comes from "
             f"concurrency at a window >= the floor, never from cutting "
             f"recall depth further.")
+    if window > max_window:
+        raise RopeScalingRequired(
+            f"attention window {window:,} exceeds the deepest no-RoPE window "
+            f"of {max_window:,} tokens (the trained rotary range minus the "
+            f"{ATTENTION_SINK_TOKENS} attention sinks that share it). A larger "
+            f"window would extrapolate positions, which needs RoPE scaling - "
+            f"and TENSELERATE never scales RoPE. Let the GDN layers carry the "
+            f"long range beyond this window instead.")
     return window
 
 
@@ -157,6 +189,15 @@ class ModelConfig:
         return per_layer * self.n_full_attention_layers * bits_per_elem
 
     # -- the 1M floor, and what makes it possible ------------------------
+    @property
+    def max_attention_window(self) -> int:
+        """
+        The deepest window this geometry can run without RoPE scaling: the
+        trained rotary range minus the sinks that share it, so window + sinks
+        never exceeds max_position_embeddings.
+        """
+        return self.max_position_embeddings - self.attention_sink_tokens
+
     @property
     def resident_kv_tokens(self) -> int:
         """

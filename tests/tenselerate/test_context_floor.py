@@ -61,13 +61,13 @@ def test_kv_is_constant_beyond_the_window():
         (DEFAULT_ATTENTION_WINDOW + RAVENX_27B.attention_sink_tokens)
 
 
-def test_kv_at_the_floor_fits_both_target_machines():
+def test_kv_at_the_floor_fits_the_supported_box():
     weights_gib = 15.41                      # RavenX Q4_K_M
     kv_gib = RAVENX_27B.kv_bytes_for_context(MIN_CONTEXT_TOKENS) / GiB
     total = weights_gib + kv_gib
     assert kv_gib < 5.0, kv_gib              # ~4.25 GiB at the 128K window
-    assert total < 24.0, total               # fits the 24 GiB 5070+3060 box
-    assert total < 64.0                      # and the unlocked CMP with room
+    # fits the one supported box: dual RTX 2080 Ti, 22 GiB pooled
+    assert total < 22.0, total
 
 
 def test_a_smaller_window_trades_recall_for_speed_not_context():
