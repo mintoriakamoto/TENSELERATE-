@@ -53,7 +53,7 @@ jobs:
 
       - name: Upload Llama.CPP Snapdragon Android Build Artifact
         if: ${{ always() && steps.build_llama_cpp_snapdragon_android.outcome == 'success' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: llama-cpp-android-arm64-snapdragon
           path: pkg-snapdragon/llama.cpp
@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload Llama.CPP Snapdragon Linux IoT Build Artifact
         if: ${{ always() && steps.build_llama_cpp_snapdragon_linux.outcome == 'success' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: llama-cpp-linux-arm64-snapdragon
           path: pkg-snapdragon/llama.cpp
@@ -109,7 +109,7 @@ jobs:
           path: pkg-snapdragon/llama.cpp
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
           cache: pip

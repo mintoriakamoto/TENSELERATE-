@@ -45,7 +45,7 @@ jobs:
           sudo chmod +x /usr/local/bin/git-clang-format
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
