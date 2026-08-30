@@ -29,9 +29,10 @@ from pathlib import Path
 import dataclasses
 
 from tenselerate.config import (
-    CONFIGS, KV_BITS_PER_ELEM, MIN_ATTENTION_WINDOW, MIN_CONTEXT_TOKENS,
-    MIN_DECODE_TOKS, MTP_SPECULATIVE_SPEEDUP, RAVENX_27B, TINY,
-    ContextFloorError, QualityFloorError, RopeScalingRequired, validate_window,
+    CONFIGS, KV_BITS_PER_ELEM, MAX_ATTENTION_WINDOW, MIN_ATTENTION_WINDOW,
+    MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS, MTP_SPECULATIVE_SPEEDUP, RAVENX_27B,
+    TINY, ContextFloorError, QualityFloorError, RopeScalingRequired,
+    validate_window,
 )
 from tenselerate.engine.scheduler import Scheduler
 
@@ -143,6 +144,11 @@ def cmd_info(args: argparse.Namespace) -> int:
          "enforced by `plan`)")
     _out(f"QUALITY FLOOR    : window >= {MIN_ATTENTION_WINDOW:,} tokens, and no "
          "RoPE scaling, ever")
+    _out(f"WINDOW CEILING   : window <= {MAX_ATTENTION_WINDOW:,} tokens "
+         "(deepest verbatim recall")
+    _out("                   without RoPE - the trained rotary range minus the "
+         "sinks;")
+    _out("                   fits the 22 GiB box only with q4_0 KV)")
     _out(f"                   quality holds across the FULL {MIN_CONTEXT_TOKENS:,}"
          "+ context: the GDN")
     _out("                   layers carry long range, the windowed attention "
@@ -219,7 +225,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     try:
         if args.attention_window is not None:
             cfg = dataclasses.replace(
-                cfg, attention_window=validate_window(args.attention_window))
+                cfg, attention_window=validate_window(
+                    args.attention_window, cfg.max_attention_window))
         cfg.validate_context(ctx)
     except (ContextFloorError, QualityFloorError, RopeScalingRequired) as e:
         _out(f"error: {e}")
@@ -452,8 +459,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"context tokens (floor {MIN_CONTEXT_TOKENS:,})")
     p_plan.add_argument("--attention-window", type=int, default=None,
                         help="full-attention window tokens (quality floor "
-                             f"{MIN_ATTENTION_WINDOW:,}, max the trained "
-                             "rotary range)")
+                             f"{MIN_ATTENTION_WINDOW:,}, deepest no-RoPE window "
+                             f"{MAX_ATTENTION_WINDOW:,})")
     p_plan.add_argument("--weights-gib", type=float, default=15.41,
                         help="weight footprint (default: RavenX Q4_K_M)")
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)

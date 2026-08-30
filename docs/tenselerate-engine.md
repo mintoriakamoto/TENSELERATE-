@@ -144,12 +144,24 @@ the box is under the target. 1M context and the 32K quality floor hold; the
 and the engine reports that truthfully (`tests/tenselerate/test_speed_floor.py`,
 `test_quality_floor.py`).
 
-The dial has a stop. **Quality is not for sale**: `MIN_ATTENTION_WINDOW =
-32_768` is the narrowest window the engine will run, enforced by
-`validate_window()` and by `plan --attention-window`, and `plan` never offers a
-sub-floor window in its suggestions — even though (see the struck row above)
-one would be faster. The other half of the quality floor is already law
-elsewhere: no RoPE scaling/YaRN, ever (`needs_rope_scaling`).
+The dial has a stop at **both** ends. **Quality is not for sale**:
+`MIN_ATTENTION_WINDOW = 32_768` is the narrowest window the engine will run,
+enforced by `validate_window()` and by `plan --attention-window`, and `plan`
+never offers a sub-floor window in its suggestions — even though (see the
+struck row above) one would be faster. At the top, the no-RoPE rule fixes a
+ceiling: `MAX_ATTENTION_WINDOW = 262_140` — the trained rotary range (262,144)
+minus the 4 attention sinks that share it, so `window + sinks` never
+extrapolates past the range. That is the **deepest verbatim recall the engine
+offers without RoPE scaling**; a window past it is refused (exit 2), not
+scaled. It fits the 22 GiB box only with q4_0 KV (~4.50 GiB, total 21.41 GiB
+resident) — at q8_0 the KV is 8.50 GiB and does not fit:
+
+```
+tenselerate plan --attention-window 262140 --kv-bits 4   # FITS, deepest recall
+```
+
+The other half of the quality floor is already law elsewhere: no RoPE
+scaling/YaRN, ever (`needs_rope_scaling`, `validate_window`).
 
 Both 2080 Ti are identical Turing cards, so the build is a single sm_75 SASS
 target (`--preset deploy-2x2080ti`) — no fat binary, no JIT stall. Turing has

@@ -15,8 +15,9 @@ import pytest
 
 from tenselerate.cli import BW_EFFICIENCY, MACHINE_HW, main
 from tenselerate.config import (
-    DEFAULT_ATTENTION_WINDOW, MIN_ATTENTION_WINDOW, MIN_DECODE_TOKS,
-    RAVENX_27B, QualityFloorError, validate_window,
+    ATTENTION_SINK_TOKENS, DEFAULT_ATTENTION_WINDOW, MAX_ATTENTION_WINDOW,
+    MIN_ATTENTION_WINDOW, MIN_DECODE_TOKS, RAVENX_27B, QualityFloorError,
+    RopeScalingRequired, validate_window,
 )
 
 GiB = 1024 ** 3
@@ -43,6 +44,56 @@ def test_validate_window_enforces_the_floor():
     for w in (16_384, 8_192, 1):
         with pytest.raises(QualityFloorError, match="quality"):
             validate_window(w)
+
+
+def test_window_ceiling_is_the_rotary_range_minus_the_sinks():
+    # the deepest no-RoPE window: trained rotary range minus the sinks that
+    # share it, so window + sinks never extrapolates past the range
+    assert MAX_ATTENTION_WINDOW == RAVENX_27B.max_position_embeddings - ATTENTION_SINK_TOKENS
+    assert MAX_ATTENTION_WINDOW == 262_140
+    assert RAVENX_27B.max_attention_window == MAX_ATTENTION_WINDOW
+
+
+def test_validate_window_enforces_the_ceiling():
+    # at the ceiling is fine; one token past it needs RoPE scaling -> refused
+    assert validate_window(MAX_ATTENTION_WINDOW) == MAX_ATTENTION_WINDOW
+    for w in (MAX_ATTENTION_WINDOW + 1, 300_000, 1_000_000):
+        with pytest.raises(RopeScalingRequired, match="never scales RoPE"):
+            validate_window(w)
+
+
+def test_plan_runs_at_the_262k_ceiling_with_q4_kv():
+    # the user's deepest-recall config: 262,140 window fits the 22 GiB box only
+    # with q4_0 KV, and is honestly below the speed floor (exit 3, not refused)
+    rc, out = run(["plan", "--machine", "2x2080ti",
+                   "--attention-window", str(MAX_ATTENTION_WINDOW),
+                   "--kv-bits", "4"])
+    assert rc == 3
+    assert "FITS" in out
+    assert "DOES NOT FIT" not in out
+
+
+def test_plan_refuses_a_window_above_the_ceiling():
+    # past the ceiling is a no-RoPE violation, checked before the roofline
+    rc, out = run(["plan", "--machine", "2x2080ti",
+                   "--attention-window", str(MAX_ATTENTION_WINDOW + 1)])
+    assert rc == 2
+    assert "never scales RoPE" in out
+
+
+def test_262k_ceiling_needs_q4_to_fit_the_box():
+    # at q8_0 the 262K window's KV does not fit 22 GiB - the ceiling is a
+    # q4_0-only config on this box, exactly as info says
+    rc, out = run(["plan", "--machine", "2x2080ti",
+                   "--attention-window", str(MAX_ATTENTION_WINDOW)])
+    assert "DOES NOT FIT" in out
+    assert rc == 1
+
+
+def test_info_reports_the_window_ceiling():
+    rc, out = run(["info"])
+    assert rc == 0
+    assert f"WINDOW CEILING   : window <= {MAX_ATTENTION_WINDOW:,}" in out
 
 
 def test_plan_refuses_a_window_below_the_floor():
