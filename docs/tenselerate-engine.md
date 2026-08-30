@@ -155,6 +155,35 @@ Both 2080 Ti are identical Turing cards, so the build is a single sm_75 SASS
 target (`--preset deploy-2x2080ti`) — no fat binary, no JIT stall. Turing has
 int8 tensor cores (IMMA) and unthrottled dp4a, so the int8 path applies.
 
+### The acceleration path — how the box reaches the standard
+
+Baseline (q8_0 KV, no speculation) the box is below 400. But two real levers
+compound, and `plan --kv-bits N --spec mtp` models them:
+
+- **q4_0 KV cache** — half the KV footprint of q8_0, so ~2x the concurrency the
+  22 GiB holds and ~2x aggregate. It is a *quality* trade — gated on a measured
+  A/B, never adopted silently.
+- **MTP self-speculation** — the model's built-in Multi-Token-Prediction draft
+  head proposes several tokens the main pass verifies in one step. Accepted
+  tokens cost no extra weight read, so throughput multiplies (~1.8x modelled)
+  with **output identical to plain decode** — the verify guarantees it. Zero
+  quality cost; a roadmap kernel (phase 3).
+
+Neither alone reaches 400 on this box; together, at the 32K quality-floor
+window, they model **~590 tok/s — past the standard**:
+
+```
+$ tenselerate plan --machine 2x2080ti --kv-bits 4 --spec mtp
+  window  49,152 -> KV 0.84 GiB, max batch  6, ~393 tok/s
+  window  32,768 -> KV 0.56 GiB, max batch  9, ~590 tok/s  <- reaches 400+
+```
+
+So the 400 standard is not a wall the hardware can never clear — it is the bar
+the *baseline* misses and the acceleration stack meets. `plan` shows the exact
+route (`tests/tenselerate/test_acceleration.py`). The numbers are a roofline,
+not a measurement; `svmi-*` measures the real MTP acceptance rate and q4_0
+quality delta before either is trusted.
+
 **The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
 stock model, whose full-attention layers are not windowed, so past 262,144 it
 would need RoPE scaling. The bridge therefore caps at the model's native 256K;

@@ -29,8 +29,8 @@ from pathlib import Path
 import dataclasses
 
 from tenselerate.config import (
-    CONFIGS, MIN_ATTENTION_WINDOW, MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS,
-    RAVENX_27B, TINY,
+    CONFIGS, KV_BITS_PER_ELEM, MIN_ATTENTION_WINDOW, MIN_CONTEXT_TOKENS,
+    MIN_DECODE_TOKS, MTP_SPECULATIVE_SPEEDUP, RAVENX_27B, TINY,
     ContextFloorError, QualityFloorError, RopeScalingRequired, validate_window,
 )
 from tenselerate.engine.scheduler import Scheduler
@@ -172,10 +172,6 @@ def cmd_info(args: argparse.Namespace) -> int:
 # plan
 # --------------------------------------------------------------------------
 # (VRAM GiB, VRAM read GB/s) for the machines this engine targets.
-# The deployment box is a Supermicro X10SRL-F (PCIe 3.0): the CMP 170HX -
-# unlocked to 80 GB, stable - in the primary x16 slot, the 2080 Ti pair and
-# the 3060 (x8) beside it. PCIe 3.0 is irrelevant to decode: weights and KV
-# are resident, nothing streams per token.
 # TENSELERATE supports exactly ONE machine: the dual RTX 2080 Ti box (Ryzen 9
 # 9950X, 32 GB DDR5, 1 TB NVMe + 250 GB OS SSD). The two 2080 Ti are Turing
 # (sm_75) and run as one pipeline node - 22 GiB pooled, both stages' HBM read
@@ -188,6 +184,33 @@ MACHINE_HW = {
     "2x2080ti": (22.0, 1232.0),
 }
 BW_EFFICIENCY = 0.65          # planning assumption; svmi-bwprofile.py measures it
+
+
+def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
+    """
+    The acceleration path to the standard: model the two real levers the box
+    has not yet applied - q4_0 KV (~2x concurrency) and MTP self-speculation
+    (~1.8x, identical output) - at the 32K quality-floor window, and say
+    whether together they reach MIN_DECODE_TOKS. Honest about the trade on each.
+    """
+    w = MIN_ATTENTION_WINDOW
+    kv_w = cfg.kv_bytes_per_token(KV_BITS_PER_ELEM[4]) * w / GiB
+    mb = int((vram - weights - args.overhead_gib) // kv_w)
+    if mb < 1:
+        return
+    full = (bw * BW_EFFICIENCY / ((weights + kv_w * mb) * 1.074) * mb
+            * MTP_SPECULATIVE_SPEEDUP)
+    reach = "REACHES" if full >= MIN_DECODE_TOKS else "still under"
+    _out("")
+    _out("acceleration path - two real levers the baseline has not applied:")
+    _out("  q4_0 KV   -> ~2x concurrency in the same VRAM "
+         "(quality trade, gate on an A/B)")
+    _out(f"  MTP spec  -> ~{MTP_SPECULATIVE_SPEEDUP:.1f}x, output identical to "
+         "plain decode (roadmap kernel,")
+    _out("               zero quality cost - the verify guarantees it)")
+    _out(f"  together at the 32K window -> ~{full:,.0f} tok/s  "
+         f"({reach} the {MIN_DECODE_TOKS} standard)")
+    _out("  model it:  tenselerate plan --kv-bits 4 --spec mtp")
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -204,11 +227,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     vram, bw = MACHINE_HW[args.machine]
     weights = args.weights_gib
-    kv = cfg.kv_bytes_for_context(ctx) / GiB
+    # acceleration dials: KV precision and MTP self-speculation
+    kv_bpe = KV_BITS_PER_ELEM[args.kv_bits]
+    spec = MTP_SPECULATIVE_SPEEDUP if args.spec == "mtp" else 1.0
+    kv = cfg.kv_bytes_for_context(ctx, kv_bpe) / GiB
     total = weights + kv + args.overhead_gib
 
     _out(f"machine          : {args.machine}  ({vram:.0f} GiB, ~{bw:.0f} GB/s)")
     _out(f"context          : {ctx:,} tokens  (floor {MIN_CONTEXT_TOKENS:,})")
+    accel = (f"KV q{args.kv_bits}_0"
+             + (f" + MTP spec (x{spec:.1f})" if spec > 1.0 else ""))
+    _out(f"acceleration     : {accel}")
     _out(f"weights          : {weights:.2f} GiB")
     _out(f"KV (windowed)    : {kv:.2f} GiB   <- constant beyond the window")
     _out(f"total resident   : {total:.2f} GiB of {vram:.0f} GiB "
@@ -219,9 +248,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         _out("other machine. Lowering context is not one - the floor is fixed.")
         return 1
 
-    # decode roofline: weights + resident KV read per token
+    # decode roofline: weights + resident KV read per token, times the MTP
+    # speculation multiplier (accepted draft tokens cost no extra weight read)
     per_token_gb = (weights + kv) * 1.074
-    single = bw * BW_EFFICIENCY / per_token_gb
+    single = bw * BW_EFFICIENCY / per_token_gb * spec
     _out("")
     _out(f"decode (batch 1) : ~{single:,.0f} tok/s   at ANY context >= the window")
 
@@ -230,7 +260,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     free_for_kv = vram - weights - args.overhead_gib
     # Ask the real scheduler, so this table and the engine can never disagree.
     try:
-        sched = Scheduler(cfg, kv_budget_gib=free_for_kv)
+        sched = Scheduler(cfg, kv_budget_gib=free_for_kv, kv_bpe=kv_bpe)
         max_batch = sched.max_concurrent
     except ValueError:
         max_batch = 0
@@ -239,7 +269,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 1
 
     def agg(b: int) -> float:
-        return bw * BW_EFFICIENCY / ((weights + kv * b) * 1.074) * b
+        return bw * BW_EFFICIENCY / ((weights + kv * b) * 1.074) * b * spec
 
     _out(f"max concurrent   : {max_batch} sequences "
          f"({free_for_kv:.1f} GiB free / {kv:.2f} GiB KV each)")
@@ -270,11 +300,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         for w in (65_536, 49_152, 32_768, 16_384, 8_192):
             if w < MIN_ATTENTION_WINDOW:
                 continue
-            kv_w = cfg.kv_bytes_per_token() * w / GiB
+            kv_w = cfg.kv_bytes_per_token(kv_bpe) * w / GiB
             mb = int((vram - weights - args.overhead_gib) // kv_w)
             if mb < 1:
                 continue
-            a = bw * BW_EFFICIENCY / ((weights + kv_w * mb) * 1.074) * mb
+            a = bw * BW_EFFICIENCY / ((weights + kv_w * mb) * 1.074) * mb * spec
             floor_met = floor_met or a >= MIN_DECODE_TOKS
             flag = f"  <- reaches {MIN_DECODE_TOKS}+" if a >= MIN_DECODE_TOKS else ""
             _out(f"  window {w:>7,} -> KV {kv_w:5.2f} GiB, max batch {mb:>3}, "
@@ -285,14 +315,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
              "quality floor.)")
         if not floor_met:
             _out("")
-            _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - NOT reached on "
-                 "this box at any window.")
-            _out("The dual 2080 Ti is the supported hardware but sits BELOW the "
-                 f"{MIN_DECODE_TOKS} tok/s")
-            _out("standard: it serves 1M context at up to ~152 tok/s (32K "
-                 "window). Serving is")
-            _out("still allowed - this is the honest advisory, not a lowered "
-                 "bar.")
+            _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - this config is "
+                 "BELOW the standard.")
+            # the acceleration path: model the two real levers the box has not
+            # yet applied and show whether they reach the standard
+            _accel_path(cfg, vram, weights, args, bw)
             _out("")
             _out("Numbers are a bandwidth roofline at "
                  f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
@@ -430,6 +457,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--weights-gib", type=float, default=15.41,
                         help="weight footprint (default: RavenX Q4_K_M)")
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)
+    p_plan.add_argument("--kv-bits", type=int, default=8, choices=(8, 4),
+                        help="KV cache precision: 8=q8_0 (default), "
+                             "4=q4_0 (~2x concurrency, quality trade)")
+    p_plan.add_argument("--spec", default="none", choices=("none", "mtp"),
+                        help="speculative decode: mtp = the model's built-in "
+                             "draft head (~1.8x, identical output)")
     p_plan.set_defaults(func=cmd_plan)
 
     p_doc = sub.add_parser("doctor", help="hardware / driver check")

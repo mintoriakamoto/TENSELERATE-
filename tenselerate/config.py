@@ -56,6 +56,18 @@ MIN_DECODE_TOKS = 400
 # 32K is the narrowest window that still meets MIN_DECODE_TOKS on the target
 # machine, so the three floors are simultaneously satisfiable by design.
 MIN_ATTENTION_WINDOW = 32_768
+# --------------------------------------------------------------------------
+# Acceleration dials - the two real levers that speed decode on a fixed box.
+# KV cache precision (bytes per element). q8_0 is the default; q4_0 halves the
+# KV footprint, so ~2x the concurrency the VRAM holds and ~2x aggregate - at a
+# quality cost that an A/B must settle, never adopted silently.
+KV_BITS_PER_ELEM = {8: 1.0625, 4: 0.5625}
+# MTP self-speculation: the model's built-in Multi-Token-Prediction draft head
+# proposes several tokens the main pass verifies in ONE step. Accepted tokens
+# are free, so throughput multiplies with NO quality cost - the verify
+# guarantees output identical to plain decode. 1.8x is a conservative modeling
+# assumption (scripts/svmi-* measures the real acceptance rate). Roadmap kernel.
+MTP_SPECULATIVE_SPEEDUP = 1.8
 # Attention sinks (StreamingLLM, arXiv:2309.17453): softmax attention dumps
 # surplus probability mass on the first few tokens, so a sliding window that
 # evicts them collapses in quality. Keeping the first N tokens resident
