@@ -69,7 +69,7 @@ jobs:
 
       - name: Python setup
         id: setup_python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           pip-install: -r tools/server/tests/requirements.txt
