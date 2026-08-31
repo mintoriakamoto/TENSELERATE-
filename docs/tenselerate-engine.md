@@ -196,6 +196,13 @@ route (`tests/tenselerate/test_acceleration.py`). The numbers are a roofline,
 not a measurement; `svmi-*` measures the real MTP acceptance rate and q4_0
 quality delta before either is trusted.
 
+The evidence base behind these dials — and the next Turing-native kernels to
+build (FlashQLA-SM75 GDN prefill, fp16 FlashAttention-2 for the windowed layers,
+KIVI 4-bit KV, EAGLE-3 vs the built-in MTP head) — is in
+[`research-turing-acceleration.md`](research-turing-acceleration.md), with the
+`sm_75` caveats and primary sources, and the dead ends (e.g. SageAttention,
+which dropped Turing) called out so we do not chase them.
+
 **The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
 stock model, whose full-attention layers are not windowed, so past 262,144 it
 would need RoPE scaling. The bridge therefore caps at the model's native 256K;
