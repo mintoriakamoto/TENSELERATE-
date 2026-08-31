@@ -23,7 +23,7 @@ jobs:
     name: reference (cpu) — tests, lint, host gemm
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install build deps
         env:
           DEBIAN_FRONTEND: noninteractive

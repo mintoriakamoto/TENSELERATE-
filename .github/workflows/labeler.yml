@@ -9,7 +9,7 @@ jobs:
       pull-requests: write
     runs-on: ubuntu-slim
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         repository: "ggml-org/llama.cpp"
     - uses: actions/labeler@v7
