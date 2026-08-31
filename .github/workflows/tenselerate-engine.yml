@@ -69,7 +69,7 @@ jobs:
           echo "ok: int8_gemm.cu compiled for sm_75 (RTX 2080 Ti), the shared lib exports the C ABI,"
           echo "    and the reference test passed"
       - name: Upload the shared library (for backend bridge smoke testing)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: tenselerate-int8-gemm-cuda-so
           path: build-cuda/libtenselerate_int8_gemm_c.so
