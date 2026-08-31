@@ -210,7 +210,8 @@ def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
     _out("")
     _out("acceleration path - two real levers the baseline has not applied:")
     _out("  q4_0 KV   -> ~2x concurrency in the same VRAM "
-         "(quality trade, gate on an A/B)")
+         "(4-bit is the validated KV")
+    _out("               floor - KIVI/KVQuant; an A/B confirms the RavenX delta)")
     _out(f"  MTP spec  -> ~{MTP_SPECULATIVE_SPEEDUP:.1f}x, output identical to "
          "plain decode (roadmap kernel,")
     _out("               zero quality cost - the verify guarantees it)")
@@ -466,7 +467,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)
     p_plan.add_argument("--kv-bits", type=int, default=8, choices=(8, 4),
                         help="KV cache precision: 8=q8_0 (default), "
-                             "4=q4_0 (~2x concurrency, quality trade)")
+                             "4=q4_0 (~2x concurrency; 4-bit is the "
+                             "literature-validated KV floor)")
     p_plan.add_argument("--spec", default="none", choices=("none", "mtp"),
                         help="speculative decode: mtp = the model's built-in "
                              "draft head (~1.8x, identical output)")
