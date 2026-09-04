@@ -186,8 +186,15 @@ def cmd_info(args: argparse.Namespace) -> int:
 # product standard: `plan` reports that honestly rather than lowering the bar
 # to flatter the hardware. Serving still works (serve/boot do not gate on the
 # speed floor); `plan` is the advisory that the box is under the target.
+# The Ampere target box is the vLLM path (see tenselerate.backends.vllm):
+# CMP 170HX (GA100, sm_80, HBM2e, ~1493 GB/s, VRAM shown at its unlocked 40 GiB
+# figure - stock 8 GiB cannot hold the weights) + RTX 3060 Ti (GA104, sm_86,
+# GDDR6, ~448 GB/s, 8 GiB). Pooled 48 GiB; the bandwidth is the sum under a
+# bandwidth-balanced 2-stage pipeline (PP=2, no NVLink), the same
+# perfectly-overlapped assumption the 2x2080ti row makes for its two cards.
 MACHINE_HW = {
     "2x2080ti": (22.0, 1232.0),
+    "cmp170hx+3060ti": (48.0, 1941.0),
 }
 BW_EFFICIENCY = 0.65          # planning assumption; svmi-bwprofile.py measures it
 
@@ -375,7 +382,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # serve
 # --------------------------------------------------------------------------
+def _serve_vllm(args: argparse.Namespace) -> int:
+    """Drive an upstream vLLM OpenAI server as the compute runtime (Ampere box)."""
+    from tenselerate.backends.vllm import build_vllm_serve_argv
+    try:
+        argv = build_vllm_serve_argv(
+            RAVENX_27B, ctx=args.ctx, host=args.host, port=args.port,
+            kv_bits=args.kv_bits, spec=args.spec)
+    except (ContextFloorError, QualityFloorError, RopeScalingRequired) as e:
+        _out(f"error: {e}")
+        return 2
+    _out("$ " + " ".join(argv))
+    if args.dry_run:
+        _out("")
+        _out("(dry run - vLLM not launched. Drop --dry-run to serve.)")
+        return 0
+    if shutil.which("vllm") is None:
+        _out("")
+        _out("error: `vllm` not found on PATH. Install it on the Ampere box, or")
+        _out("re-run with --dry-run to just print the command.")
+        return 1
+    return subprocess.run(argv).returncode
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
+    if args.backend == "vllm":
+        return _serve_vllm(args)
     from tenselerate.server import build_server
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         _out("refusing to bind off-host: this engine is loopback-only")
@@ -482,6 +514,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--host", default="127.0.0.1")
     p_srv.add_argument("--port", type=int, default=8080)
     p_srv.add_argument("--config", default=TINY.name, choices=sorted(CONFIGS))
+    p_srv.add_argument("--backend", default="reference",
+                       choices=("reference", "vllm"),
+                       help="compute runtime: reference (the native engine, "
+                            "any box) or vllm (the Ampere CMP170hx+3060ti path)")
+    p_srv.add_argument("--dry-run", action="store_true",
+                       help="vllm backend: print the vLLM command, do not launch")
+    p_srv.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
+                       help=f"vllm backend: context tokens (floor "
+                            f"{MIN_CONTEXT_TOKENS:,})")
+    p_srv.add_argument("--kv-bits", type=int, default=8, choices=(8, 4),
+                       help="vllm backend: 8=auto KV dtype, 4=fp8 KV")
+    p_srv.add_argument("--spec", default="none", choices=("none", "mtp"),
+                       help="vllm backend: mtp = built-in Qwen3-Next speculative")
     p_srv.set_defaults(func=cmd_serve)
 
     return ap
