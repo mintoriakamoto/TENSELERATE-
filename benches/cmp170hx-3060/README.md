@@ -57,7 +57,9 @@ claim is as unmeasured as the MTP one was.
 
 ## Still to measure
 
-- 2x256K aggregate decode, no spec (running)
+- 2x256K aggregate decode, no spec (running); model predicts 42-54 tok/s
+  aggregate with both windows full, 21-27 per stream (see "Serving Hercules" in
+  docs/rig-cmp170hx-3060.md for the slot table)
 - tokens-to-answer, DavidAU merge vs base Qwen3.8, same prompts - decides the model
 - `svmi-cmpbench` npl curve (aggregate scaling with concurrency; with speculation
   out, concurrency is the only remaining way to amortize the weight read)

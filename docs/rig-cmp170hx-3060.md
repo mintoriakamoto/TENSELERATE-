@@ -135,6 +135,54 @@ Weights choice: UD-Q4_K_M (~15.4 GiB) gives the fastest decode (fewer bytes/toke
 bandwidth-bound card) and the most KV headroom. Mixed-INT8 (~17.6 GiB, q8_0 attention
 over a Q4_K_M body) trades ~2 GiB of bandwidth for higher attention fidelity - A/B it.
 
+## Serving Hercules: slots, not batches
+
+Hercules is a fork of Nous Hermes Agent, so its load shape is Hermes': one
+sequential main loop per session, plus subagents that run **in parallel** (default
+`delegation.max_concurrent_children: 3`, no hard ceiling), plus one session per
+gateway chat if the messaging gateway is on. Each of those is an ordinary
+streaming `/v1/chat/completions` request - Hermes never sends `n > 1`, so there is
+no batch flag on the client side. Concurrency is entirely `llama-server`'s job:
+
+- `-np N` is the number of requests in flight; continuous batching (`-cb`) is
+  already the default and merges them into one decode step.
+- Without `--kv-unified`, `-c` is split evenly: each slot gets `c / N`. With
+  `--kv-unified`, `-c` is one shared pool and any slot may grow to the full
+  window while the others stay small - which is exactly a main session plus
+  short-lived subagents. Use it.
+- Per step the card reads weights + the KV that is actually live, so aggregate
+  throughput follows live tokens, not `N x window`.
+
+Hercules auto-compresses at 50% of the model's advertised window
+(`compression.threshold: 0.50`), so a session advertised at 262K lives at
+<= ~131K in practice.
+
+```
+llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf -ngl 999 --main-gpu 0 \
+  -c 1048576 -np 8 --kv-unified -cb -fa on \    # 8 slots sharing a 1M-token q4_0 pool (18 GiB)
+  -ctk q4_0 -ctv q4_0 \                          # q8_0 halves the pool to 512K; A/B the quality
+  --chat-template-kwargs '{"reasoning_effort":"low"}'   # biggest end-to-end lever on an agent loop
+```
+
+Sizing from the measured 33.3 tok/s single stream (550-710 GB/s achieved,
+Q4_K_M weights, all slots at their maximum window - the worst case):
+
+| slots x window | KV | VRAM | per stream | aggregate |
+| --- | --- | --- | --- | --- |
+| 1 x 256K | 4.5 GiB | 23 GiB | 26-33 tok/s | 26-33 |
+| 4 x 256K | 18 GiB | 37 GiB | 15-20 | 61-79 |
+| 4 x 64K | 4.5 GiB | 23 GiB | 26-33 | 103-133 |
+| 8 x 64K | 9 GiB | 28 GiB | 21-27 | 168-217 |
+| 16 x 32K | 9 GiB | 28 GiB | 21-27 | 336-434 |
+
+So: `-np 4` covers one operator with default delegation; `-np 8` covers
+orchestrator children or a couple of gateway chats; 16 slots only pays if
+sixteen sessions are genuinely decoding at once, and each of them then runs at
+~2/3 of single-stream speed. The main loop slows as subagents run - that is the
+trade, and the reason `reasoning_effort` matters more than any slot count.
+Closing the kernel gap (achieved bandwidth 37-48% of nominal) lifts every row
+by up to ~1.7x.
+
 ## Context and KV at 1M
 
 Context length and KV size are decoupled. Only 16 of the 64 layers are full-attention
