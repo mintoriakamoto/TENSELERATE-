@@ -25,7 +25,7 @@ check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # The supported box: CMP 170HX (GA100, sm_80) + RTX 3060 Ti (GA104,
+        # The supported box: CMP 170HX (GA100, sm_80) + RTX 3060 12 GiB (GA106,
         # sm_86), both Ampere. Both have int8 tensor cores (IMMA) and dp4a, so
         # the int8 path applies. Two-arch build, one -real per card. The Turing
         # 2080 Ti (sm_75) stays available via the rtx-turing preset.

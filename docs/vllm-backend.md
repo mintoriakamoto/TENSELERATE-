@@ -8,12 +8,12 @@ two backends:
 | backend | what it is | where it runs |
 | --- | --- | --- |
 | `reference` | the from-scratch NumPy/CUDA engine — the correctness oracle every kernel is checked against | any box, no GPU needed |
-| **`vllm`** | drives an upstream vLLM OpenAI server as the compute runtime | the **Ampere** box (CMP 170HX + RTX 3060 Ti) |
+| **`vllm`** | drives an upstream vLLM OpenAI server as the compute runtime | the **Ampere** box (CMP 170HX + RTX 3060 12 GiB) |
 
 ## Why vLLM, and why now
 
 The target box changed from the dual RTX 2080 Ti (**Turing, sm_75**) to
-**CMP 170HX (GA100, sm_80) + RTX 3060 Ti (GA104, sm_86)** — both **Ampere**.
+**CMP 170HX (GA100, sm_80) + RTX 3060 12 GiB (GA106, sm_86)** — both **Ampere**.
 That matters: vLLM runs the `qwen3_5` Gated-DeltaNet hybrid natively, with real
 Flash-Linear-Attention Triton kernels, FlashAttention-2, and int4/Marlin — all
 of which require Ampere+. On Turing those paths fall back or don't build; on
@@ -23,19 +23,19 @@ the reference engine stays the oracle.
 ## What the box can do
 
 The Ampere box **meets all three floors at once** — the first supported box that
-does. `tenselerate plan --machine cmp170hx+3060ti` at the 1M context floor:
+does. `tenselerate plan --machine cmp170hx+3060` at the 1M context floor:
 
 | window | max batch | aggregate | vs 400 floor |
 | --- | --- | --- | --- |
-| 131,072 | 7 | ~182 tok/s | under |
-| 65,536 | 14 | ~364 tok/s | under |
-| **49,152** | **19** | **~488 tok/s** | **meets** |
-| **32,768** | **29** | **~737 tok/s** | **meets** |
+| 131,072 | 8 | ~182 tok/s | under |
+| 65,536 | 16 | ~363 tok/s | under |
+| **49,152** | **22** | **~489 tok/s** | **meets** |
+| **32,768** | **33** | **~733 tok/s** | **meets** |
 
 So 1M context + the 32K quality floor + the 400 tok/s standard are all
 satisfiable here, at a 49K window or narrower. (Roofline at 65% bandwidth
-efficiency, pooled 48 GiB — the CMP's VRAM at its unlocked 40 GiB figure plus
-the 3060 Ti's 8 GiB — over a PP=2 pipeline; not a measurement.)
+efficiency, pooled 52 GiB — the CMP's VRAM at its unlocked 40 GiB figure plus
+the RTX 3060's 12 GiB — over a PP=2 pipeline; not a measurement.)
 
 ## Running it
 

@@ -31,7 +31,7 @@ def test_serves_the_one_model_via_vllm():
 
 
 def test_two_ampere_gpus_use_pipeline_not_tensor_parallel():
-    # heterogeneous CMP 170HX + 3060 Ti, no NVLink -> PP=2, never TP
+    # heterogeneous CMP 170HX + RTX 3060 12 GiB, no NVLink -> PP=2, never TP
     a = argv()
     assert a[a.index("--pipeline-parallel-size") + 1] == str(len(AMPERE_BOX))
     assert "--tensor-parallel-size" not in a

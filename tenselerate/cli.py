@@ -187,14 +187,14 @@ def cmd_info(args: argparse.Namespace) -> int:
 # to flatter the hardware. Serving still works (serve/boot do not gate on the
 # speed floor); `plan` is the advisory that the box is under the target.
 # The Ampere target box is the vLLM path (see tenselerate.backends.vllm):
-# CMP 170HX (GA100, sm_80, HBM2e, ~1493 GB/s, VRAM shown at its unlocked 40 GiB
-# figure - stock 8 GiB cannot hold the weights) + RTX 3060 Ti (GA104, sm_86,
-# GDDR6, ~448 GB/s, 8 GiB). Pooled 48 GiB; the bandwidth is the sum under a
-# bandwidth-balanced 2-stage pipeline (PP=2, no NVLink), the same
-# perfectly-overlapped assumption the 2x2080ti row makes for its two cards.
+# CMP 170HX (GA100, sm_80, HBM2e, ~1493 GB/s, unlocked to 40 GiB - stock 8 GiB
+# cannot hold the weights) + RTX 3060 12 GiB (GA106, sm_86, GDDR6, ~360 GB/s).
+# Pooled 52 GiB; the bandwidth is the sum under a bandwidth-balanced 2-stage
+# pipeline (PP=2, no NVLink), the same perfectly-overlapped assumption the
+# 2x2080ti row makes for its two cards.
 MACHINE_HW = {
     "2x2080ti": (22.0, 1232.0),
-    "cmp170hx+3060ti": (48.0, 1941.0),
+    "cmp170hx+3060": (52.0, 1853.0),
 }
 BW_EFFICIENCY = 0.65          # planning assumption; svmi-bwprofile.py measures it
 
@@ -517,7 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--backend", default="reference",
                        choices=("reference", "vllm"),
                        help="compute runtime: reference (the native engine, "
-                            "any box) or vllm (the Ampere CMP170hx+3060ti path)")
+                            "any box) or vllm (the Ampere CMP170hx+3060 path)")
     p_srv.add_argument("--dry-run", action="store_true",
                        help="vllm backend: print the vLLM command, do not launch")
     p_srv.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
