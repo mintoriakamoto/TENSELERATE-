@@ -39,10 +39,26 @@ the number to chase before any speculation lever.
 4. `svmi-bwprofile.py -m <gguf> --gpu cmp170hx-40` — persists the achieved
    GB/s so `plan`/`info` can stop using the 0.65 guess.
 
+| 2026-09-07 | decode, normal build + MTP (`--spec-type draft-mtp --spec-draft-n-max 5`) | 33.3 tok/s | llama-server, single stream, q8_0 KV | **no gain**; MTP acceptance measured at **7-11%** on the DavidAU merge |
+
+## MTP does not work on this model
+
+The DavidAU TURBO merge changed the trunk; the shipped MTP head was trained
+against the base Qwen3.8 trunk and now agrees with it only 7-11% of the time.
+Speculation throughput is `accepted / pass_time`; at ~1.1 accepted per pass
+there is nothing to amortize, and the doc's "up to 3.5x" (base model, aligned
+head) does not transfer. Every speculation lever in the plan - chain MTP, tree
+MTP, GDN-state forking - is gated on a drafter that agrees with THIS trunk.
+Options, cheapest first: an n-gram / prompt-lookup drafter (model-agnostic,
+lossless, only helps on copied spans); re-aligning the MTP head by distilling it
+against the merged trunk (small training job, head only); a base-model A/B on
+tokens-to-answer, since the merge was chosen for fewer thinking tokens and that
+claim is as unmeasured as the MTP one was.
+
 ## Still to measure
 
-- decode tok/s with `--spec-draft-n-max 5` (revised prediction from the measured
-  30 ms pass: ~90-110 if acceptance is ~3 per pass; MTP running now)
-- `svmi-cmpbench` npl curve (should be flat on this unit)
-- MTP acceptance per draft position (`svmi-bitspec`)
+- 2x256K aggregate decode, no spec (running)
+- tokens-to-answer, DavidAU merge vs base Qwen3.8, same prompts - decides the model
+- `svmi-cmpbench` npl curve (aggregate scaling with concurrency; with speculation
+  out, concurrency is the only remaining way to amortize the weight read)
 - UD-Q4_K_M vs mixed-INT8; q8_0 vs q4_0 KV at the 262K window
