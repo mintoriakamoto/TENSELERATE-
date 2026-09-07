@@ -65,18 +65,20 @@ def test_kv_at_the_floor_fits_the_supported_box():
     weights_gib = 15.41                      # RavenX Q4_K_M
     kv_gib = RAVENX_27B.kv_bytes_for_context(MIN_CONTEXT_TOKENS) / GiB
     total = weights_gib + kv_gib
-    assert kv_gib < 5.0, kv_gib              # ~4.25 GiB at the 128K window
-    # fits the one supported box: dual RTX 2080 Ti, 22 GiB pooled
-    assert total < 22.0, total
+    assert 8.0 < kv_gib < 9.0, kv_gib        # ~8.5 GiB at the locked 256K window
+    # fits the target box: CMP 170HX 40 GiB + RTX 3060 12 GiB = 52 GiB pooled
+    assert total < 52.0, total
 
 
-def test_a_smaller_window_trades_recall_for_speed_not_context():
-    """Shrinking the window cuts KV but must not cap context or need scaling."""
-    narrow = dataclasses.replace(RAVENX_27B, attention_window=32_768)
-    assert narrow.validate_context(1_000_000) == 1_000_000
-    assert narrow.needs_rope_scaling(1_000_000) is False
-    assert narrow.kv_bytes_for_context(1_000_000) < \
-        RAVENX_27B.kv_bytes_for_context(1_000_000)
+def test_a_narrower_window_is_refused_the_window_is_locked():
+    """The window is locked at max recall; narrowing it for speed is refused.
+    The context floor is independent of that - it holds at the locked window."""
+    from tenselerate.config import QualityFloorError, validate_window
+    with pytest.raises(QualityFloorError, match="LOCKED"):
+        validate_window(32_768)
+    # context still holds at the locked window, with no RoPE scaling
+    assert RAVENX_27B.validate_context(1_000_000) == 1_000_000
+    assert RAVENX_27B.needs_rope_scaling(1_000_000) is False
 
 
 def test_window_is_clamped_by_the_trained_range():

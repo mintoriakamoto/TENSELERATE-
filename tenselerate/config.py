@@ -40,22 +40,19 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 # Hard product floor: the engine never runs below this much context.
 MIN_CONTEXT_TOKENS = 1_000_000
-# Hard product speed floor: a machine serves TENSELERATE only if it can be
-# planned to this much aggregate decode throughput (tok/s) at the context
-# floor, at SOME attention window. `tenselerate plan` enforces it: the window
-# is the dial that trades exact-recall depth for concurrency, and a box that
-# cannot reach the floor at any window is refused, not served slowly.
-# 400 is the stated product requirement (with 1M context); the 80 GB CMP
-# clears it at a 48K window (~453 tok/s) and does ~681 at the 32K floor.
+# Speed target: the aggregate decode throughput (tok/s) at the context floor we
+# aim for. It is NO LONGER a hard gate. Quality is locked at the maximum recall
+# window (below), which caps concurrency, so on the target box the box runs
+# BELOW this number by design - `plan` reports the gap honestly rather than
+# narrowing the window to chase it. Quality won; speed takes what is left.
 MIN_DECODE_TOKS = 400
-# Hard quality floor: the narrowest attention window the engine will run.
-# Speed is bought with concurrency and concurrency with a narrower window,
-# but below this much verbatim recall the answers degrade - and quality is
-# not for sale. Together with the no-RoPE-scaling rule this bounds the window
-# on BOTH sides: MIN_ATTENTION_WINDOW <= window <= trained rotary range.
-# 32K is the narrowest window that still meets MIN_DECODE_TOKS on the target
-# machine, so the three floors are simultaneously satisfiable by design.
-MIN_ATTENTION_WINDOW = 32_768
+# Hard quality floor: the attention window the engine runs, and it is LOCKED at
+# the maximum no-RoPE recall - the trained rotary range minus the sinks. The
+# window is no longer a throughput dial: it does not narrow for concurrency,
+# ever. Verbatim recall is pinned at its deepest, and speed is whatever the
+# resulting KV footprint allows. MIN == MAX == the ceiling below, so the only
+# legal window is exactly this value.
+MIN_ATTENTION_WINDOW = 262_144 - 4          # == MAX_ATTENTION_WINDOW, 256K - sinks
 # --------------------------------------------------------------------------
 # Acceleration dials - the two real levers that speed decode on a fixed box.
 # KV cache precision (bytes per element). q8_0 is the default; q4_0 halves the
@@ -79,11 +76,12 @@ ATTENTION_SINK_TOKENS = 4
 # Hard product lock: the only architecture and model this engine will load.
 SUPPORTED_ARCH = "qwen3_5"
 SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
-# Default bounded window for the full-attention layers. Must stay <= the model's
-# max_position_embeddings so no position is ever extrapolated (no YaRN/RoPE
-# scaling). 128K leaves headroom under the RavenX 256K trained range and keeps
-# the KV cache at a constant ~4.25 GiB regardless of total context length.
-DEFAULT_ATTENTION_WINDOW = 131_072
+# The bounded window for the full-attention layers, locked at the maximum
+# no-RoPE recall: the RavenX 256K (262,144) trained range minus the sinks. This
+# is the only legal window (MIN == this == MAX), so "default" here means "the
+# fixed value". KV is a constant ~8.5 GiB (q8_0) / ~4.5 GiB (q4_0) at this
+# window, independent of total context length.
+DEFAULT_ATTENTION_WINDOW = 262_144 - 4      # 256K - sinks
 # The DEEPEST window the engine will run - the trained rotary range, minus the
 # attention sinks that share it. The sinks sit at re-anchored positions 0..N-1,
 # so the attended span is window + sinks and that whole span must stay inside
@@ -124,9 +122,9 @@ def validate_window(window: int, max_window: int = MAX_ATTENTION_WINDOW) -> int:
     if window < MIN_ATTENTION_WINDOW:
         raise QualityFloorError(
             f"attention window {window:,} is below the TENSELERATE quality "
-            f"floor of {MIN_ATTENTION_WINDOW:,} tokens. Speed comes from "
-            f"concurrency at a window >= the floor, never from cutting "
-            f"recall depth further.")
+            f"floor of {MIN_ATTENTION_WINDOW:,} tokens. The window is LOCKED at "
+            f"the maximum no-RoPE recall - it never narrows for speed, so "
+            f"{MIN_ATTENTION_WINDOW:,} is the only legal window.")
     if window > max_window:
         raise RopeScalingRequired(
             f"attention window {window:,} exceeds the deepest no-RoPE window "

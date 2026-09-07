@@ -140,22 +140,23 @@ def cmd_info(args: argparse.Namespace) -> int:
     _out(f"trained rotary   : {cfg.max_position_embeddings:,} tokens")
     _out("")
     _out(f"CONTEXT FLOOR    : {MIN_CONTEXT_TOKENS:,} tokens (hard minimum)")
-    _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS:,} tok/s aggregate (hard minimum, "
-         "enforced by `plan`)")
-    _out(f"QUALITY FLOOR    : window >= {MIN_ATTENTION_WINDOW:,} tokens, and no "
-         "RoPE scaling, ever")
-    _out(f"WINDOW CEILING   : window <= {MAX_ATTENTION_WINDOW:,} tokens "
-         "(deepest verbatim recall")
-    _out("                   without RoPE - the trained rotary range minus the "
-         "sinks;")
-    _out("                   fits the 22 GiB box only with q4_0 KV)")
+    _out(f"SPEED TARGET     : {MIN_DECODE_TOKS:,} tok/s aggregate (NOT a hard "
+         "gate; the locked")
+    _out("                   window keeps the box below it - speed takes what "
+         "recall leaves)")
+    _out(f"QUALITY FLOOR    : window LOCKED at {MIN_ATTENTION_WINDOW:,} tokens "
+         "(the max no-RoPE recall),")
+    _out("                   and no RoPE scaling, ever. The window never narrows "
+         "for speed:")
+    _out("                   verbatim recall is pinned at its deepest, and the "
+         "box takes")
+    _out("                   the throughput that leaves (below the speed target, "
+         "by design).")
     _out(f"                   quality holds across the FULL {MIN_CONTEXT_TOKENS:,}"
          "+ context: the GDN")
     _out("                   layers carry long range, the windowed attention "
          "stays inside")
-    _out("                   the trained range, and sinks anchor it. The window "
-         "is")
-    _out("                   exact-recall DEPTH, not a cap on context quality.")
+    _out("                   the trained range, and sinks anchor it.")
     win = cfg.attention_window
     _out(f"attention window : {win:,} tokens" if win else
          "attention window : unbounded (full attention)")
@@ -201,13 +202,13 @@ BW_EFFICIENCY = 0.65          # planning assumption; svmi-bwprofile.py measures 
 
 def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
     """
-    The acceleration path to the standard: model the two real levers the box
-    has not yet applied - q4_0 KV (~2x concurrency) and MTP self-speculation
-    (~1.8x, identical output) - at the 32K quality-floor window, and say
-    whether together they reach MIN_DECODE_TOKS. Honest about the trade on each.
+    The window is LOCKED at the max-recall value, so speed is not bought by
+    narrowing it - the only levers left are lossless: q4_0 KV (more concurrency)
+    and speculative decode (MTP, ~1.8x; EAGLE-3 higher). Model them at the fixed
+    window and say honestly how close they get to MIN_DECODE_TOKS - they do not
+    reach it here, because quality is pinned at maximum.
     """
-    w = MIN_ATTENTION_WINDOW
-    kv_w = cfg.kv_bytes_per_token(KV_BITS_PER_ELEM[4]) * w / GiB
+    kv_w = cfg.kv_bytes_for_context(args.ctx, KV_BITS_PER_ELEM[4]) / GiB
     mb = int((vram - weights - args.overhead_gib) // kv_w)
     if mb < 1:
         return
@@ -215,15 +216,14 @@ def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
             * MTP_SPECULATIVE_SPEEDUP)
     reach = "REACHES" if full >= MIN_DECODE_TOKS else "still under"
     _out("")
-    _out("acceleration path - two real levers the baseline has not applied:")
-    _out("  q4_0 KV   -> ~2x concurrency in the same VRAM "
+    _out("lossless levers at the locked window (they never touch quality):")
+    _out("  q4_0 KV   -> more concurrency in the same VRAM "
          "(4-bit is the validated KV")
     _out("               floor - KIVI/KVQuant; an A/B confirms the RavenX delta)")
     _out(f"  MTP spec  -> ~{MTP_SPECULATIVE_SPEEDUP:.1f}x, output identical to "
-         "plain decode (roadmap kernel,")
-    _out("               zero quality cost - the verify guarantees it)")
-    _out(f"  together at the 32K window -> ~{full:,.0f} tok/s  "
-         f"({reach} the {MIN_DECODE_TOKS} standard)")
+         "plain decode; EAGLE-3 higher")
+    _out(f"  together at the {cfg.attention_window:,} window -> ~{full:,.0f} "
+         f"tok/s  ({reach} the {MIN_DECODE_TOKS} target)")
     _out("  model it:  tenselerate plan --kv-bits 4 --spec mtp")
 
 
@@ -296,56 +296,32 @@ def cmd_plan(args: argparse.Namespace) -> int:
         mark = f"  <- {MIN_DECODE_TOKS}+" if agg(b) >= MIN_DECODE_TOKS else ""
         _out(f"  batch {b:>3}      : ~{agg(b):,.0f} tok/s{mark}")
 
-    # -- the speed floor ---------------------------------------------------
-    # The floor is a property of the machine: met if ANY window reaches
-    # MIN_DECODE_TOKS at the context floor. A box that cannot is refused.
+    # -- the speed target --------------------------------------------------
+    # The window is LOCKED at max recall, so there is no narrowing to chase the
+    # target - the box does what it does at this one window. Report the gap
+    # honestly; being under the target is the deliberate quality-over-speed lock.
     best = agg(max_batch)
     _out("")
     if best >= MIN_DECODE_TOKS:
-        _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - met at this window")
-    else:
-        # what window would reach the floor? KV per seq is linear in the window.
-        _out(f"ceiling here is ~{best:,.0f} tok/s against the {MIN_DECODE_TOKS} "
-             "tok/s floor. More needs more")
-        _out("concurrency, which means a narrower attention window (KV per "
-             "sequence is what caps batch):")
-        floor_met = False
-        # only windows at or above the QUALITY floor are ever offered -
-        # narrower ones would be faster, and are refused for exactly that trade
-        for w in (65_536, 49_152, 32_768, 16_384, 8_192):
-            if w < MIN_ATTENTION_WINDOW:
-                continue
-            kv_w = cfg.kv_bytes_per_token(kv_bpe) * w / GiB
-            mb = int((vram - weights - args.overhead_gib) // kv_w)
-            if mb < 1:
-                continue
-            a = bw * BW_EFFICIENCY / ((weights + kv_w * mb) * 1.074) * mb * spec
-            floor_met = floor_met or a >= MIN_DECODE_TOKS
-            flag = f"  <- reaches {MIN_DECODE_TOKS}+" if a >= MIN_DECODE_TOKS else ""
-            _out(f"  window {w:>7,} -> KV {kv_w:5.2f} GiB, max batch {mb:>3}, "
-                 f"~{a:,.0f} tok/s{flag}")
-        _out("  (context stays at the floor in every row - the window trades")
-        _out("   exact-recall depth for concurrency, never context length.")
-        _out(f"   windows under {MIN_ATTENTION_WINDOW:,} are not offered: "
-             "quality floor.)")
-        if not floor_met:
-            _out("")
-            _out(f"SPEED FLOOR      : {MIN_DECODE_TOKS} tok/s - this config is "
-                 "BELOW the standard.")
-            # the acceleration path: model the two real levers the box has not
-            # yet applied and show whether they reach the standard
-            _accel_path(cfg, vram, weights, args, bw)
-            _out("")
-            _out("Numbers are a bandwidth roofline at "
-                 f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
-            return 3
-    _out("")
-    _out("RECOMMENDED       : the default window + q4 KV + MTP is the deep-and-"
-         "fast sweet spot.")
-    _out("                    serve it with:  tenselerate serve --backend vllm")
+        _out(f"SPEED TARGET     : {MIN_DECODE_TOKS} tok/s - met at the locked "
+             f"{cfg.attention_window:,} window")
+        _out("")
+        _out("Numbers are a bandwidth roofline at "
+             f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
+        return 0
+    _out(f"SPEED TARGET     : {MIN_DECODE_TOKS} tok/s - the box does ~"
+         f"{best:,.0f} tok/s here, BELOW it.")
+    _out(f"The window is locked at {cfg.attention_window:,} (max verbatim "
+         "recall), so it never")
+    _out("narrows for speed - quality is pinned at maximum and the box takes "
+         "the throughput")
+    _out("that leaves. This is the deliberate quality-over-speed trade, not a "
+         "misconfiguration.")
+    _accel_path(cfg, vram, weights, args, bw)
     _out("")
     _out("Numbers are a bandwidth roofline at "
          f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
+    return 3
     return 0
 
 
@@ -492,13 +468,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_plan = sub.add_parser("plan", help="what this machine does at a context")
     p_plan.add_argument("--config", default=RAVENX_27B.name, choices=sorted(CONFIGS))
-    p_plan.add_argument("--machine", default="2x2080ti", choices=sorted(MACHINE_HW))
+    p_plan.add_argument("--machine", default="cmp170hx+3060",
+                        choices=sorted(MACHINE_HW))
     p_plan.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
                         help=f"context tokens (floor {MIN_CONTEXT_TOKENS:,})")
     p_plan.add_argument("--attention-window", type=int, default=None,
-                        help="full-attention window tokens (quality floor "
-                             f"{MIN_ATTENTION_WINDOW:,}, deepest no-RoPE window "
-                             f"{MAX_ATTENTION_WINDOW:,})")
+                        help=f"full-attention window (LOCKED at "
+                             f"{MAX_ATTENTION_WINDOW:,}, the max no-RoPE recall; "
+                             "only that value is legal - it never narrows)")
     p_plan.add_argument("--weights-gib", type=float, default=15.41,
                         help="weight footprint (default: RavenX Q4_K_M)")
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)
