@@ -506,11 +506,57 @@ def _serve_vllm(args: argparse.Namespace) -> int:
     return subprocess.run(argv).returncode
 
 
+def _serve_llamacpp(args: argparse.Namespace) -> int:
+    """Launch llama-server with the measured Hercules configuration.
+
+    Builds the argv from tenselerate.backends.llamacpp (the same code
+    scripts/hercules_serve.sh wraps), prints it, and either stops (--dry-run)
+    or execs the binary. The binary defaults to this clone's build/bin/
+    llama-server, falling back to PATH.
+
+    Returns:
+        0 on success or dry run, 1 if llama-server is not found, 2 on a
+        validation error (no --model, off-host bind, bad KV type or pool).
+    """
+    from tenselerate.backends.llamacpp import (
+        build_llama_server_argv, llama_server_env,
+    )
+    if not args.model:
+        _out("error: --backend llamacpp needs --model <path.gguf>")
+        return 2
+    binary = args.llama_server
+    if binary is None:
+        local = REPO_ROOT / "build" / "bin" / "llama-server"
+        binary = str(local) if local.is_file() else "llama-server"
+    try:
+        argv = build_llama_server_argv(
+            args.model, host=args.host, port=args.port, binary=binary,
+            slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
+            reasoning=args.reasoning)
+    except ValueError as e:
+        _out(f"error: {e}")
+        return 2
+    env = llama_server_env(no_mmvq=args.no_mmvq)
+    prefix = "GGML_CUDA_NO_MMVQ=1 " if args.no_mmvq else ""
+    _out("$ " + prefix + " ".join(argv))
+    if args.dry_run:
+        _out("")
+        _out("(dry run - llama-server not launched. Drop --dry-run to serve.)")
+        return 0
+    if shutil.which(binary) is None and not Path(binary).is_file():
+        _out("")
+        _out(f"error: `{binary}` not found. Build it with `tenselerate build`, or")
+        _out("re-run with --dry-run to just print the command.")
+        return 1
+    return subprocess.run(argv, env=env).returncode
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Start the OpenAI /v1 endpoint on the chosen backend.
 
-    Two backends:
+    Three backends:
     - reference (default): The native reference engine (CPU, any box, end-to-end valid).
+    - llamacpp: llama-server with the measured Hercules config (the CMP 170HX box).
     - vllm: Upstream vLLM (Ampere box only: CMP 170HX + RTX 3060).
 
     Binds loopback-only (127.0.0.1 or ::1) for security. Runs until interrupted.
@@ -524,6 +570,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     """
     if args.backend == "vllm":
         return _serve_vllm(args)
+    if args.backend == "llamacpp":
+        return _serve_llamacpp(args)
     from tenselerate.server import build_server
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         _out("refusing to bind off-host: this engine is loopback-only")
@@ -563,6 +611,58 @@ def cmd_boot(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+def _add_runtime_args(p: argparse.ArgumentParser) -> None:
+    """The backend selector and per-backend options shared by serve and boot."""
+    from tenselerate.backends.llamacpp import (
+        DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_REASONING, DEFAULT_SLOTS,
+        KV_TYPES, REASONING_LEVELS,
+    )
+    p.add_argument("--backend", default="reference",
+                   choices=("reference", "llamacpp", "vllm"),
+                   help="compute runtime: reference (the native engine, any "
+                        "box), llamacpp (llama-server with the measured "
+                        "Hercules config - the CMP170hx+3060 path), or vllm")
+    p.add_argument("--dry-run", action="store_true",
+                   help="llamacpp/vllm: print the launch command, do not launch")
+    # llamacpp backend - the measured Hercules configuration
+    p.add_argument("--model", default=None,
+                   help="llamacpp backend: path to the GGUF (required)")
+    p.add_argument("--slots", type=int, default=DEFAULT_SLOTS,
+                   help=f"llamacpp backend: parallel slots ({DEFAULT_SLOTS} = "
+                        "main loop + 3 subagents)")
+    p.add_argument("--ctx-pool", type=int, default=DEFAULT_CTX_POOL,
+                   help=f"llamacpp backend: shared KV pool in tokens "
+                        f"({DEFAULT_CTX_POOL:,}; --kv-unified)")
+    p.add_argument("--kv", default=DEFAULT_KV, choices=KV_TYPES,
+                   help=f"llamacpp backend: KV cache type ({DEFAULT_KV})")
+    p.add_argument("--reasoning", default=DEFAULT_REASONING,
+                   choices=REASONING_LEVELS,
+                   help="llamacpp backend: Qwen3.8 reasoning_effort "
+                        f"({DEFAULT_REASONING}; fewer thinking tokens)")
+    p.add_argument("--no-mmvq", action="store_true",
+                   help="llamacpp backend: set GGML_CUDA_NO_MMVQ=1 (force the "
+                        "tensor-core MMQ path at every batch width)")
+    p.add_argument("--llama-server", default=None,
+                   help="llamacpp backend: binary (default build/bin/llama-server, "
+                        "then PATH)")
+    # vllm backend
+    p.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
+                   help=f"vllm backend: context tokens (floor "
+                        f"{MIN_CONTEXT_TOKENS:,})")
+    p.add_argument("--kv-bits", type=int, default=4, choices=(8, 4),
+                   help="vllm backend: 4=fp8 KV (default, the recommended "
+                        "Ampere config), 8=auto KV dtype")
+    p.add_argument("--spec", default="none", choices=("none", "mtp", "eagle3"),
+                   help="vllm backend: none = plain decode (default: MTP measured "
+                        "7-11%% acceptance on the DavidAU merge, slower than plain), "
+                        "mtp = built-in Qwen3-Next draft head (lossless when the "
+                        "head matches the trunk), eagle3 = trained draft head "
+                        "(needs --eagle-model)")
+    p.add_argument("--eagle-model", default=None,
+                   help="vllm backend: EAGLE-3 draft-head repo/path "
+                        "(required when --spec eagle3)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the CLI argument parser with all subcommands.
 
@@ -601,6 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot.add_argument("--port", type=int, default=8080)
     p_boot.add_argument("--config", default=TINY.name, choices=sorted(CONFIGS))
     p_boot.add_argument("--weights-gib", type=float, default=15.41)
+    _add_runtime_args(p_boot)
     p_boot.add_argument("--force", action="store_true",
                         help="serve even if doctor reports a problem")
     p_boot.set_defaults(func=cmd_boot)
@@ -646,27 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--host", default="127.0.0.1")
     p_srv.add_argument("--port", type=int, default=8080)
     p_srv.add_argument("--config", default=TINY.name, choices=sorted(CONFIGS))
-    p_srv.add_argument("--backend", default="reference",
-                       choices=("reference", "vllm"),
-                       help="compute runtime: reference (the native engine, "
-                            "any box) or vllm (the Ampere CMP170hx+3060 path)")
-    p_srv.add_argument("--dry-run", action="store_true",
-                       help="vllm backend: print the vLLM command, do not launch")
-    p_srv.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
-                       help=f"vllm backend: context tokens (floor "
-                            f"{MIN_CONTEXT_TOKENS:,})")
-    p_srv.add_argument("--kv-bits", type=int, default=4, choices=(8, 4),
-                       help="vllm backend: 4=fp8 KV (default, the recommended "
-                            "Ampere config), 8=auto KV dtype")
-    p_srv.add_argument("--spec", default="none", choices=("none", "mtp", "eagle3"),
-                       help="vllm backend: none = plain decode (default: MTP measured "
-                            "7-11%% acceptance on the DavidAU merge, slower than plain), "
-                            "mtp = built-in Qwen3-Next draft head (lossless when the "
-                            "head matches the trunk), eagle3 = trained draft head "
-                            "(needs --eagle-model)")
-    p_srv.add_argument("--eagle-model", default=None,
-                       help="vllm backend: EAGLE-3 draft-head repo/path "
-                            "(required when --spec eagle3)")
+    _add_runtime_args(p_srv)
     p_srv.set_defaults(func=cmd_serve)
 
     return ap

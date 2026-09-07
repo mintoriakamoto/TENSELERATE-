@@ -161,10 +161,12 @@ Hercules auto-compresses at 50% of the model's advertised window
 <= ~131K in practice.
 
 ```
-llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf -ngl 999 --main-gpu 0 \
-  -c 1048576 -np 8 --kv-unified -cb -fa on \    # 8 slots sharing a 1M-token q4_0 pool (18 GiB)
-  -ctk q4_0 -ctv q4_0 \                          # q8_0 halves the pool to 512K; A/B the quality
-  --chat-template-kwargs '{"reasoning_effort":"low"}'   # biggest end-to-end lever on an agent loop
+tenselerate boot --backend llamacpp --model qwen3.8-27b-UD-Q4_K_M.gguf
+# = llama-server -ngl 999 --main-gpu 0 -fa on -c 524288 -np 4 --kv-unified -cb \
+#     -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --cache-reuse 256 \
+#     --chat-template-kwargs '{"reasoning_effort":"low"}'
+# --slots / --ctx-pool / --kv / --reasoning / --no-mmvq / --dry-run adjust it;
+# the argv is built in tenselerate/backends/llamacpp.py and pinned by tests.
 ```
 
 Sizing from the measured width sweep (N = 1..16, short prompts): ~18.5 ms of
