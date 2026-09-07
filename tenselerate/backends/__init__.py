@@ -10,7 +10,7 @@ and the `plan` advisor. That layer is backend-agnostic. Two backends exist:
   * `vllm`      - drives an upstream vLLM OpenAI server as the compute runtime.
     vLLM natively runs the `qwen3_5` Gated-DeltaNet hybrid with real Flash-
     Linear-Attention kernels, so on the Ampere target box (CMP 170HX + RTX
-    3060 Ti, sm_80 + sm_86) it is the production path. This module does not
+    3060 12 GiB, sm_80 + sm_86) it is the production path. This module does not
     import vLLM; it builds the `vllm serve` command line from the engine's
     config and floors so the launcher is unit-testable with no GPU present.
 """

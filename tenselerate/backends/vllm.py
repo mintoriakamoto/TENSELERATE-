@@ -2,8 +2,8 @@
 The vLLM backend: build the `vllm serve` command line for the RavenX model on
 the Ampere target box, with the engine's product floors baked in.
 
-Why vLLM here. The Ampere box - **CMP 170HX (GA100, sm_80, HBM2e) + RTX 3060 Ti
-(GA104, sm_86, GDDR6)** - is vLLM's home turf: FlashAttention-2, the Flash-
+Why vLLM here. The Ampere box - **CMP 170HX (GA100, sm_80, HBM2e) + RTX 3060
+12 GiB (GA106, sm_86, GDDR6)** - is vLLM's home turf: FlashAttention-2, the Flash-
 Linear-Attention Triton kernels for Gated-DeltaNet, and int4/Marlin all run on
 sm_80/sm_86. So unlike the Turing 2080 Ti, this box runs the `qwen3_5` hybrid on
 stock upstream vLLM. TENSELERATE keeps its identity - the single-model lock, the
@@ -57,12 +57,12 @@ class GpuTarget:
     vram_gib: float
 
 
-# The Ampere target: CMP 170HX (GA100) + RTX 3060 Ti (GA104). The CMP's VRAM is
-# its *unlocked* figure - stock 8 GiB cannot hold the 15.4 GiB weights, so the
-# box only serves 27B with the memory unlock applied (see docs/svmi).
+# The Ampere target: CMP 170HX (GA100) + RTX 3060 12 GiB (GA106). The CMP's
+# VRAM is its *unlocked* figure - stock 8 GiB cannot hold the 15.4 GiB weights,
+# so the box only serves 27B with the memory unlock applied (see docs/svmi).
 CMP170HX = GpuTarget(name="cmp170hx", sm="80", vram_gib=40.0)
-RTX3060TI = GpuTarget(name="rtx3060ti", sm="86", vram_gib=8.0)
-AMPERE_BOX = (CMP170HX, RTX3060TI)
+RTX3060 = GpuTarget(name="rtx3060", sm="86", vram_gib=12.0)
+AMPERE_BOX = (CMP170HX, RTX3060)
 
 
 def build_vllm_serve_argv(

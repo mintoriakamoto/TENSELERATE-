@@ -157,8 +157,8 @@
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "75-real" }
     },
     {
-        "description": "The Ampere deployment box: CMP 170HX (GA100, sm_80) + RTX 3060 Ti (GA104, sm_86). Both have int8 tensor cores (IMMA) and dp4a, so this uses cuda-int8; a two-target fat binary (one -real per card) so each runs its own SASS with no JIT stall. This is the vLLM-runtime box (see docs/vllm-backend.md).",
-        "name": "deploy-cmp170hx-3060ti", "inherits": [ "base", "release", "cuda-int8" ],
+        "description": "The Ampere deployment box: CMP 170HX (GA100, sm_80) + RTX 3060 12 GiB (GA106, sm_86). Both have int8 tensor cores (IMMA) and dp4a, so this uses cuda-int8; a two-target fat binary (one -real per card) so each runs its own SASS with no JIT stall. This is the vLLM-runtime box (see docs/vllm-backend.md).",
+        "name": "deploy-cmp170hx-3060", "inherits": [ "base", "release", "cuda-int8" ],
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "80-real;86-real" }
     }
   ]
