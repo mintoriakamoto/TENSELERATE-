@@ -126,8 +126,9 @@ llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf \
   -c 1000000 \                                      # the 1M floor; GDN carries range past the window
   -ctk q8_0 -ctv q8_0 -fa on \                      # ~8.5 GiB KV at the 262K window
   -b 2048 -ub 512 \                                 # chunked prefill (memory-safe on 32 GiB / 12 GiB)
-  -md qwen3.8-27b-mtp-draft.gguf --spec-draft-n-max 5 \  # MTP self-spec: biggest decode lever
   -t 16
+# No MTP on the DavidAU merge: measured 7-11% acceptance, 14.9 tok/s vs 33.5 plain.
+# For the Hercules-shaped multi-slot config see "Serving Hercules" below.
 # window stays <= 262,140 (engine-enforced). Do NOT pass --swa-full (removes the window).
 ```
 

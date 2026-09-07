@@ -117,8 +117,4 @@ Predicted step times from the model, short prompts (add KV per full slot):
 - per-op profile of one decode step (`nsys profile` on llama-bench `-n 16`) to
   confirm the 11.5 ms sits in the recurrent layers and see how many kernels it is
 - tokens-to-answer, DavidAU merge vs base Qwen3.8 (decides the model)
-- UD-Q4_K_M vs mixed-INT8; q8_0 vs q4_0 KV
-- tokens-to-answer, DavidAU merge vs base Qwen3.8, same prompts - decides the model
-- `svmi-cmpbench` npl curve (aggregate scaling with concurrency; with speculation
-  out, concurrency is the only remaining way to amortize the weight read)
 - UD-Q4_K_M vs mixed-INT8; q8_0 vs q4_0 KV at the 262K window
