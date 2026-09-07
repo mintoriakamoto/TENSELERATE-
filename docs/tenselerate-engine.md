@@ -227,6 +227,19 @@ this does **not** yet have is a CUDA attention kernel: the vLLM backend cannot
 be handed a custom `QK^T`, so this ships only in the native engine, and no
 speedup number is claimed until it is measured on the cards.
 
+At the 262K window the KV read is ~9 GB of the ~25 GB a decode token moves, so
+the reference also carries **provable-mass page skipping**
+(`numerics.decode_attention_page_skip`, `ReferenceModel(page_skip_eps=...)`):
+per 64-key page it stores coordinate-wise (min, max) of K, bounds every logit in
+the page from above, and skips pages whose bounded share of the row is below
+`eps` (default 2^-24: below fp32 resolution, so the result is the dense row up
+to summation order). It is a proof, not a top-k heuristic — and the proof has a
+price the tests pin: a page is skippable only when the row max clears its bound
+by `ln(64/eps)` ≈ 21 scaled logits. Rows peaked that hard skip >90% of pages;
+rows with a realistic peak of a few units skip nothing. Whether real Qwen3.8
+attention rows at 262K clear that gap is an empirical question for the box, and
+the bytes saved are exactly the fraction that does.
+
 ## The kernel bridge
 
 `tenselerate/backend/int8_gemm.py` is what turns a compiled CUDA kernel into

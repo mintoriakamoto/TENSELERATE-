@@ -43,6 +43,18 @@ def test_int8_qk_model_tracks_float_model():
     assert rel < 0.05, rel
 
 
+def test_page_skip_model_is_bit_close_to_dense_model():
+    m_d = ReferenceModel(TINY, seed=1)
+    m_p = ReferenceModel(TINY, seed=1, page_skip_eps=2.0 ** -24)
+    st_d, st_p = m_d.new_state(), m_p.new_state()
+    toks = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3]
+    for pos, tok in enumerate(toks):
+        ld = m_d.step(tok, pos, st_d)
+        lp = m_p.step(tok, pos, st_p)
+    assert np.allclose(lp, ld, atol=1e-4, rtol=1e-4)
+    assert np.argmax(lp) == np.argmax(ld)
+
+
 def test_full_layers_grow_cache_linear_layers_do_not():
     m = ReferenceModel(TINY, seed=2)
     st = m.new_state()
