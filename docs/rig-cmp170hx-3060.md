@@ -51,15 +51,23 @@ FP16, BF16, and Tensor Cores - and the HBM2e geometry (10 GiB -> 40 GiB). It is 
 older capacity-only unlock, so the throttled-compute workarounds (`--fmad=false`,
 forced MMQ, dp4a-disable) do NOT apply here.
 
-Caveats that survive the unlock:
-- **Tensor Cores keep a 256 fixed-cycle MMA throttle**: single-instruction latency is
-  pinned at 256 cycles and cannot be hidden by ILP/pipeline overlap. So prefill /
-  compute-bound GEMM underperforms a real A100; decode (bandwidth-bound) is unaffected.
+Caveats that NO unlock removes (dispatch-level gating and OTP fuses, not firmware):
+- **Tensor Cores keep a 256-cycle MMA gate**: only 4 warps/SM can issue tensor-core
+  instructions and single-MMA latency is pinned at 256 cycles, so FP16 tensor-core
+  throughput is only ~1/32 of theoretical peak (170th-Street benchmarks). Prefill /
+  compute-bound GEMM stays weak even unlocked -> keep latency-sensitive prefill on the
+  3060. Decode (bandwidth-bound) is unaffected.
 - **PCIe stays Gen2** (Gen3/4 blocked by OTP fuse `FUSE_PCIE_GEN23_DIS`): ~2 GB/s on
-  the software patch, ~8 GB/s with the 12-capacitor x16 hardware mod. Still keep the
-  model resident; do not stream weights.
-- **The unlock is volatile**: a systemd daemon reapplies it after every reboot / driver
-  reload (nvidia-open 580 / 610.43.0x). Re-check `nvidia-smi` after any driver change.
+  the software patch, ~8 GB/s with the 12-capacitor x16 hardware mod. Keep the model
+  resident; do not stream weights.
+
+Unlock method (persistence tradeoff): this box runs the d3dx9 daemon-based unlock,
+which reapplies after every reboot / driver reload (nvidia-open 580 / 610.43.0x) -
+re-check `nvidia-smi` after any driver change. Alternatives with the same result:
+abobasixseven/unlock-cmp-170hx (in-driver kernel patches for 610.43.03 - cleaner, no
+BootROM exploit or daemon race), or the thaurock vBIOS flash (persistent, no daemon,
+but carries brick risk). 40 GiB is the confirmed-stable target for the 10 GiB card;
+an 80 GiB target is claimed but unconfirmed - not worth the risk, the 27B fits in 40.
 
 If a given card is only capacity-unlocked (FP32 still ~1/32, no tensor cores), use the
 throttled-card path instead: `--fmad=false` + `-DCMAKE_CUDA_ARCHITECTURES=80`, INT8/MMQ,
@@ -184,9 +192,12 @@ Then confirm token-identity with `scripts/svmi-verify.sh` before trusting a long
 ## Sources
 
 - d3dx9/cmpunlocker - GA100 fuse-map reset via the Falcon BootROM .fwsignature_ga100 bug (2026-07)
+- amoghmunikote/cmpunlocker - SM + HBM2e restore, 40/80 GB targets
+- abobasixseven/unlock-cmp-170hx - in-driver kernel patches for 610.43.03 (no BootROM exploit)
+- thaurock-x/CMP-170HX-64GB-Unlocked-VBIOS - standalone 64 GB vBIOS flash (persistent)
 - Tom's Hardware - software mod unlocks 64 GB on the CMP 170HX
 - DevQuasar - "the almost A100": CMP 170HX unlocked
-- 170th-Street benchmarks - the 256-cycle tensor-core MMA throttle
+- 170th-Street benchmarks - FP16 tensor-core ~1/32 peak (256-cycle MMA + 4-warp gate)
 - arXiv:2505.03782 - Exploration of Cryptocurrency Mining-Specific GPUs in AI: CMP 170HX (throttled/capacity-only state)
 - niconiconi - CMP 170HX review / performance lockdown workaround
 - Ferrox Labs Field Manual No.12 - Maximising Qwen3.8 on a 5090 Laptop
