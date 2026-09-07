@@ -340,6 +340,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
                  f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
             return 3
     _out("")
+    _out("RECOMMENDED       : the default window + q4 KV + MTP is the deep-and-"
+         "fast sweet spot.")
+    _out("                    serve it with:  tenselerate serve --backend vllm")
+    _out("")
     _out("Numbers are a bandwidth roofline at "
          f"{BW_EFFICIENCY:.0%} efficiency, not a measurement.")
     return 0
@@ -388,8 +392,9 @@ def _serve_vllm(args: argparse.Namespace) -> int:
     try:
         argv = build_vllm_serve_argv(
             RAVENX_27B, ctx=args.ctx, host=args.host, port=args.port,
-            kv_bits=args.kv_bits, spec=args.spec)
-    except (ContextFloorError, QualityFloorError, RopeScalingRequired) as e:
+            kv_bits=args.kv_bits, spec=args.spec, eagle_model=args.eagle_model)
+    except (ContextFloorError, QualityFloorError, RopeScalingRequired,
+            ValueError) as e:
         _out(f"error: {e}")
         return 2
     _out("$ " + " ".join(argv))
@@ -523,10 +528,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,
                        help=f"vllm backend: context tokens (floor "
                             f"{MIN_CONTEXT_TOKENS:,})")
-    p_srv.add_argument("--kv-bits", type=int, default=8, choices=(8, 4),
-                       help="vllm backend: 8=auto KV dtype, 4=fp8 KV")
-    p_srv.add_argument("--spec", default="none", choices=("none", "mtp"),
-                       help="vllm backend: mtp = built-in Qwen3-Next speculative")
+    p_srv.add_argument("--kv-bits", type=int, default=4, choices=(8, 4),
+                       help="vllm backend: 4=fp8 KV (default, the recommended "
+                            "Ampere config), 8=auto KV dtype")
+    p_srv.add_argument("--spec", default="mtp", choices=("none", "mtp", "eagle3"),
+                       help="vllm backend: mtp = built-in Qwen3-Next speculative "
+                            "(default, lossless), eagle3 = trained draft head "
+                            "(needs --eagle-model), none = plain decode")
+    p_srv.add_argument("--eagle-model", default=None,
+                       help="vllm backend: EAGLE-3 draft-head repo/path "
+                            "(required when --spec eagle3)")
     p_srv.set_defaults(func=cmd_serve)
 
     return ap

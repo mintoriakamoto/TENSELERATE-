@@ -40,10 +40,20 @@ the RTX 3060's 12 GiB — over a PP=2 pipeline; not a measurement.)
 ## Running it
 
 ```
-tenselerate serve --backend vllm            # launch vLLM for the RavenX model
+tenselerate serve --backend vllm            # the recommended config, out of the box
 tenselerate serve --backend vllm --dry-run  # just print the vllm command
-tenselerate serve --backend vllm --kv-bits 4 --spec mtp
 ```
+
+**The defaults are the deep-and-fast sweet spot for the Ampere box:** `--kv-bits 4`
+(fp8 KV), `--spec mtp` (lossless speculative), `--gpu-memory-utilization 0.92`,
+`--max-num-seqs 16`. At the default 131K window that plans to **~616 tok/s** at
+15 streams with 131K of verbatim recall - past the 400 floor with depth to
+spare. Override any of them (`--kv-bits 8`, `--spec none`, `--spec eagle3
+--eagle-model <head>`).
+
+To trade depth for raw throughput, a narrower window gives far more concurrency
+(32K -> ~2,476 tok/s aggregate); to trade throughput for the deepest no-RoPE
+recall, 262K -> ~167 tok/s. Context stays 1M+ in every case (the GDN state).
 
 The launcher (`tenselerate/backends/vllm.py`) builds the `vllm serve` argv and
 enforces the engine's floors **before vLLM starts** — a sub-floor context or an
@@ -58,7 +68,8 @@ never the contract.
 | no-RoPE window | *(none)* | intrinsic to the model config; vLLM manages the hybrid KV itself. We still validate the window against the quality floor/ceiling |
 | two heterogeneous GPUs, no NVLink | `--pipeline-parallel-size 2` | **pipeline**, never tensor-parallel — TP wants ~equal GPUs on a fast link, which this box is not |
 | `--kv-bits 4` | `--kv-cache-dtype fp8` | vLLM has **no int4 KV**; fp8 is its footprint lever. 8→`auto`. The KIVI int4 KV in the research roadmap is not a vLLM feature today |
-| `--spec mtp` | `--speculative-config {qwen3_next_mtp}` | vLLM's built-in Qwen3-Next MTP speculative decode |
+| `--spec mtp` | `--speculative-config {qwen3_next_mtp}` | vLLM's built-in Qwen3-Next MTP speculative decode (default, lossless) |
+| `--spec eagle3 --eagle-model <head>` | `--speculative-config {eagle3, model}` | trained EAGLE-3 draft head - higher acceptance than MTP, still lossless; needs a head (none public for this model yet) |
 
 The one honesty flag: **the CMP 170HX ships with 8 GiB**, which cannot hold the
 15.4 GiB Q4_K_M weights — the 40 GiB figure assumes the memory unlock is applied
