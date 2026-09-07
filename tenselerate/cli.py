@@ -519,7 +519,7 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
         validation error (no --model, off-host bind, bad KV type or pool).
     """
     from tenselerate.backends.llamacpp import (
-        build_llama_server_argv, llama_server_env,
+        build_llama_server_argv, env_prefix, llama_server_env,
     )
     if not args.model:
         _out("error: --backend llamacpp needs --model <path.gguf>")
@@ -536,8 +536,13 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
     except ValueError as e:
         _out(f"error: {e}")
         return 2
-    env = llama_server_env(no_mmvq=args.no_mmvq)
-    prefix = "GGML_CUDA_NO_MMVQ=1 " if args.no_mmvq else ""
+    try:
+        env = llama_server_env(no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max)
+        prefix = "".join(f"{k}={v} " for k, v in env_prefix(
+            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max).items())
+    except ValueError as e:
+        _out(f"error: {e}")
+        return 2
     _out("$ " + prefix + " ".join(argv))
     if args.dry_run:
         _out("")
@@ -646,9 +651,13 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: model id the agent addresses "
                         f"({DEFAULT_ALIAS}); Hermes model.default must match")
     p.add_argument("--mtp-draft", type=int, default=DEFAULT_MTP_DRAFT,
-                   help="llamacpp backend: MTP draft depth on an -MTP- GGUF "
-                        "(0 = off; 1 measured +35%% on this merge; deeper loses "
-                        "until the head is retrained)")
+                   help="llamacpp backend: MTP draft depth (default: 1 when the GGUF "
+                        "name carries -MTP-, else 0; 1 measured +13..38%% on this "
+                        "merge, deeper loses until the head is retrained)")
+    p.add_argument("--mmvq-max", type=int, default=None,
+                   help="llamacpp backend: GGML_CUDA_MMVQ_MAX - widest batch kept on "
+                        "the dp4a vector path (0..8); 1 keeps single-token decode "
+                        "there and routes draft verification to MMQ tensor cores")
     p.add_argument("--llama-server", default=None,
                    help="llamacpp backend: binary (default build/bin/llama-server, "
                         "then PATH)")

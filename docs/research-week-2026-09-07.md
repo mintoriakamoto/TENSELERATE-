@@ -60,6 +60,17 @@ does not work on this model" is a claim about the fork, not the model.
 | [#25173](https://github.com/ggml-org/llama.cpp/pull/25173) DSpark | Jul 28 | see above |
 | [#27342](https://github.com/ggml-org/llama.cpp/pull/27342) DFlash2 | Aug 27 | see above |
 
+Two more from the OpenCode session's scan: [hanxiao/L4](https://github.com/hanxiao)
+routes speculative verification to the MMQ tensor cores with a per-width
+threshold (+16% at width 3+) - this fork now has the same knob as
+`GGML_CUDA_MMVQ_MAX`; and Qwen's own fused GDN kernels (FlashQLA) are
+sm_90+ only, so the 170HX's GDN cost is a missing Ampere kernel, not a
+hardware limit. KGP Talkie's 45-config sweep on a 5090 gives the healthy-head
+MTP acceptance curve (0.86/0.77/0.67 by position, optimum n-max 3) and finds
+q4_0 KV fastest *there* (136.7 vs q8_0 128.3) - on sm_80 that comparison is
+confounded by the quantized-KV vector-kernel path (`benches/`), so it does not
+transfer without the f16-KV measurement.
+
 Adaptive draft length (`--spec-draft-adaptive`, a
 [fork](https://github.com/LaurentZuijdwijk/llama.cpp), not upstream) keeps
 acceptance at 96% where a fixed n=7 collapses to 18%; relevant once a drafter

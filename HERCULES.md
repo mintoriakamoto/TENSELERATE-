@@ -20,7 +20,9 @@ draft depth 1 (`--mtp-draft 1`, +35% measured on this merge; deeper loses),
 needs from an OpenAI-compatible server - `--jinja` (without it llama-server
 ignores `tools` and the reasoning_effort template kwarg), `--reasoning-format
 deepseek`, `--no-context-shift`, `--alias tenselerate`. `--dry-run` prints the
-command; `--no-mmvq` sets `GGML_CUDA_NO_MMVQ=1` once its runs confirm it.
+command; `--no-mmvq` sets `GGML_CUDA_NO_MMVQ=1`; `--mmvq-max 1` sets the fork's
+`GGML_CUDA_MMVQ_MAX=1` (batch-1 decode stays on the dp4a path, draft
+verification goes to the tensor cores).
 Sizing and the slot table: `docs/rig-cmp170hx-3060.md`, "Serving Hercules".
 
 ## Hermes side (`~/.hermes/config.yaml`)
@@ -64,6 +66,7 @@ right-hand column is what they cost or save on this box.
 | `compression.threshold` | 0.50 | leave; every compaction is a prompt-cache miss (~70 s at 60K), so fewer is better, not lower |
 | `compression.proactive_prune_tokens` | 0 (off) | leave off unless contexts bloat; pruning rewrites earlier messages = cache miss |
 | `tool_output.max_bytes` / `max_lines` | 50000 / 2000 | 20000 / 800: tool results are what grow the context toward compaction |
+| **system prompt size** (toolsets, skills, memory) | Hermes ships ~35K tokens of system prompt with every toolset enabled | `agent.disabled_toolsets` for anything Hercules does not use, trim skills, keep `memory.memory_char_limit` / `user_char_limit` at defaults: 35K is ~40 s of prefill on every cache miss and ~2.3 GB of KV per slot at q8_0 |
 | `terminal.timeout` | 180 s | raise for long builds/tests; this is tool time, not model time |
 | `terminal.backend`, `container_cpu`, `container_memory` | local, 1, 5120 | if sandboxing in Docker, give it real cores (4-8) - tool latency is wall-clock on the agent loop |
 | `agent.max_turns` | none | cap runaway loops (e.g. 60) |

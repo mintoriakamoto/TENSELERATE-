@@ -9,7 +9,9 @@
 # Usage: bash scripts/hercules_serve.sh MODEL.gguf [extra tenselerate serve flags]
 # Env overrides: NP (slots, 4) CTX (pool tokens, 524288) KV (q8_0) PORT (8080) ALIAS (tenselerate)
 #                REASONING (low) NO_MMVQ (1 = force the tensor-core MMQ path)
-#                MTP (draft depth on an -MTP- GGUF; 1 = measured +35%, deeper loses)
+#                MTP (draft depth; default 1 on an -MTP- GGUF, deeper loses today)
+#                MMVQ_MAX (0..8; 1 keeps batch-1 decode on dp4a, routes draft
+#                verification to MMQ tensor cores - the fork's GGML_CUDA_MMVQ_MAX)
 set -euo pipefail
 MODEL="${1:?model gguf path}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,5 +20,6 @@ args=(serve --backend llamacpp --model "$MODEL" --alias "${ALIAS:-tenselerate}"
       --slots "${NP:-4}" --ctx-pool "${CTX:-524288}" --kv "${KV:-q8_0}"
       --port "${PORT:-8080}" --reasoning "${REASONING:-low}")
 if [[ "${NO_MMVQ:-}" == "1" ]]; then args+=(--no-mmvq); fi
-if [[ -n "${MTP:-}" ]]; then args+=(--mtp-draft "$MTP"); fi   # MTP=1 on an -MTP- GGUF: measured +35%
+if [[ -n "${MTP:-}" ]]; then args+=(--mtp-draft "$MTP"); fi       # default: 1 on an -MTP- GGUF (+13..38%)
+if [[ -n "${MMVQ_MAX:-}" ]]; then args+=(--mmvq-max "$MMVQ_MAX"); fi  # 1 = verification on MMQ, decode on MMVQ
 exec python3 -m tenselerate "${args[@]}" "${@:2}"

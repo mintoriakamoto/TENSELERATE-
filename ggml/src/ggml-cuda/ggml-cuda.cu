@@ -1717,7 +1717,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     // only decline the fused MMVQ path when MMQ can actually take the tensor, matching
     // ggml_cuda_should_use_mmvq(). Declining unconditionally would drop fusion for
     // types MMQ does not support and still land on MMVQ, losing the fusion for nothing.
-    if (use_mul_mat_vec_q && ggml_cuda_no_mmvq() &&
+    if (use_mul_mat_vec_q && src1->ne[1] > ggml_cuda_mmvq_max_batch() &&
         ggml_cuda_should_use_mmq(src0->type, cc, src1->ne[1], /*n_experts =*/ 0)) {
         return false;
     }
@@ -1803,9 +1803,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
         if (ne2 <= MMVQ_MAX_BATCH_SIZE) {
             if (ggml_is_quantized(src0->type)) {
-                const int mmvq_mmid_max = ggml_cuda_no_mmvq() &&
-                    ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)
-                    ? 0 : get_mmvq_mmid_max_batch(src0->type, cc);
+                int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
+                if (ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
+                    mmvq_mmid_max = std::min(mmvq_mmid_max, ggml_cuda_mmvq_max_batch());
+                }
                 if (ne2 <= mmvq_mmid_max) {
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
                     return;

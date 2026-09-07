@@ -4,6 +4,8 @@
 #include "vecdotq.cuh"
 #include "mmq.cuh"
 
+#include <cstdlib>
+
 #include <cstdint>
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
@@ -280,19 +282,40 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
     return MMVQ_MAX_BATCH_SIZE;
 }
 
+int ggml_cuda_mmvq_max_batch() {
+    // MMVQ is built on dp4a. On the CMP 170HX the measured per-column cost of that path
+    // is ~2x the tensor-core MMQ path, so batches wider than this threshold are routed
+    // to MMQ when MMQ can take the tensor (see ggml_cuda_should_use_mmvq and the two
+    // sites in ggml-cuda.cu). GGML_CUDA_NO_MMVQ=1 keeps its meaning: threshold 0.
+    static const int mmvq_max = [] {
+        if (getenv("GGML_CUDA_NO_MMVQ") != nullptr) {
+            return 0;
+        }
+        const char * s = getenv("GGML_CUDA_MMVQ_MAX");
+        if (s == nullptr || *s == '\0') {
+            return (int) MMVQ_MAX_BATCH_SIZE;
+        }
+        int v = atoi(s);
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > MMVQ_MAX_BATCH_SIZE) {
+            v = MMVQ_MAX_BATCH_SIZE;
+        }
+        return v;
+    }();
+    return mmvq_max;
+}
+
 bool ggml_cuda_no_mmvq() {
-    // MMVQ is built on dp4a, which the NVIDIA CMP mining firmware dispatches ~16x
-    // slower than regular silicon; the MMQ path uses tensor-core IMMA instead and
-    // is not affected. Opting out sends small batches to MMQ as well.
-    static const bool no_mmvq = getenv("GGML_CUDA_NO_MMVQ") != nullptr;
-    return no_mmvq;
+    return ggml_cuda_mmvq_max_batch() == 0;
 }
 
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     if (!ggml_is_quantized(type)) {
         return false;
     }
-    if (ggml_cuda_no_mmvq() && ggml_cuda_should_use_mmq(type, cc, ne11, /*n_experts =*/ 0)) {
+    if (ne11 > ggml_cuda_mmvq_max_batch() && ggml_cuda_should_use_mmq(type, cc, ne11, /*n_experts =*/ 0)) {
         return false;
     }
     if (GGML_CUDA_CC_IS_CDNA(cc)) {

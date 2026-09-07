@@ -6,6 +6,12 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11);
 
 // GGML_CUDA_NO_MMVQ=1: skip the dp4a vector kernels so small batches go to MMQ
 bool ggml_cuda_no_mmvq();
+// GGML_CUDA_MMVQ_MAX=N: largest batch (ne11) still sent to the dp4a vector kernels when
+// MMQ could take the tensor; wider goes to the tensor-core MMQ path. Default is
+// MMVQ_MAX_BATCH_SIZE (unchanged behaviour); GGML_CUDA_NO_MMVQ=1 is the same as 0.
+// N=1 keeps single-token decode on MMVQ and routes speculative verification batches
+// (2..8 columns) to MMQ, which is where the dp4a path loses on the CMP 170HX.
+int ggml_cuda_mmvq_max_batch();
 
 // Returns the maximum batch size for which MMVQ should be used for MUL_MAT_ID,
 // based on the quantization type and GPU architecture (compute capability).

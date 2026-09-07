@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from tenselerate.config import MIN_ATTENTION_WINDOW
 
@@ -57,8 +58,16 @@ DEFAULT_CTX_POOL = 524_288   # two full 262K windows' worth, shared
 DEFAULT_KV = "q8_0"
 DEFAULT_REASONING = "low"
 DEFAULT_ALIAS = "tenselerate"
-DEFAULT_MTP_DRAFT = 0        # 0 = off; 1 = the measured win; >1 loses on this head today
+DEFAULT_MTP_DRAFT = None     # None = 1 on an -MTP- GGUF, else 0; 1 = measured +13..38%
 MAX_MTP_DRAFT = 8
+MMVQ_MAX_BATCH = 8           # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
+
+
+def resolve_mtp_draft(model: str, mtp_draft: int | None) -> int:
+    """None -> 1 when the GGUF file name carries the MTP head ("-MTP-"), else 0."""
+    if mtp_draft is None:
+        return 1 if "mtp" in Path(model).name.lower() else 0
+    return mtp_draft
 
 
 def build_llama_server_argv(
@@ -72,7 +81,7 @@ def build_llama_server_argv(
     kv: str = DEFAULT_KV,
     reasoning: str = DEFAULT_REASONING,
     alias: str = DEFAULT_ALIAS,
-    mtp_draft: int = DEFAULT_MTP_DRAFT,
+    mtp_draft: int | None = DEFAULT_MTP_DRAFT,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -94,6 +103,7 @@ def build_llama_server_argv(
             "window; the pool is shared by all slots but the main session must fit")
     if not alias:
         raise ValueError("alias must be a non-empty model id for the agent to address")
+    mtp_draft = resolve_mtp_draft(model, mtp_draft)
     if not 0 <= mtp_draft <= MAX_MTP_DRAFT:
         raise ValueError(f"mtp_draft must be 0 (off) .. {MAX_MTP_DRAFT}, got {mtp_draft}")
     argv = [
@@ -113,17 +123,36 @@ def build_llama_server_argv(
     return argv
 
 
-def llama_server_env(
-    *, no_mmvq: bool = False, base: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """The environment for the launch: the caller's, plus the MMQ-forcing flag."""
-    env = dict(os.environ if base is None else base)
+def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None) -> dict[str, str]:
+    """
+    The matmul-routing environment. `no_mmvq` sends every width to the tensor-core
+    MMQ path (GGML_CUDA_NO_MMVQ=1). `mmvq_max=N` keeps batches up to N on the dp4a
+    vector path and routes wider ones - speculative verification, multi-slot steps -
+    to MMQ (GGML_CUDA_MMVQ_MAX, this fork). N=1 is the measured sweet spot to test:
+    single-token decode stays where it is, verification of drafts moves to MMQ.
+    """
+    if mmvq_max is not None and not 0 <= mmvq_max <= MMVQ_MAX_BATCH:
+        raise ValueError(f"mmvq_max must be 0..{MMVQ_MAX_BATCH}, got {mmvq_max}")
+    out: dict[str, str] = {}
     if no_mmvq:
-        env["GGML_CUDA_NO_MMVQ"] = "1"
+        out["GGML_CUDA_NO_MMVQ"] = "1"
+    elif mmvq_max is not None:
+        out["GGML_CUDA_MMVQ_MAX"] = str(mmvq_max)
+    return out
+
+
+def llama_server_env(
+    *, no_mmvq: bool = False, mmvq_max: int | None = None,
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """The environment for the launch: the caller's, plus the matmul-routing flags."""
+    env = dict(os.environ if base is None else base)
+    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max))
     return env
 
 
-def llama_server_command(model: str, *, no_mmvq: bool = False, **kw) -> str:
+def llama_server_command(model: str, *, no_mmvq: bool = False, mmvq_max: int | None = None,
+                         **kw) -> str:
     """The launch as one copy-pasteable shell line, env prefix included."""
-    prefix = "GGML_CUDA_NO_MMVQ=1 " if no_mmvq else ""
+    prefix = "".join(f"{k}={v} " for k, v in env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max).items())
     return prefix + " ".join(build_llama_server_argv(model, **kw))

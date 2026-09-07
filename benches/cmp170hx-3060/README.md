@@ -25,6 +25,7 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | depth sweep, single stream, q8_0 KV, batch 1 | 0: 33.5 / 16K: 30.3 / 65K: 23.5 / 131K: 18.2 / **262K: 12.4 tok/s** (29.9 -> 80.9 ms) | llama-bench, prefill to depth then time decode | prefill 856 -> 327 tok/s over the same range; KV term at 262K is **51 ms**, predicted 10.8 |
 | 2026-09-07 | n-gram speculation, single stream | baseline 34.4 / `ngram-cache` **16.9** / `ngram-mod` 34.4 tok/s | llama-server | halved or flat: near-zero acceptance on prose and the verify batch is paid in full (see docs/mtp-realign-davidau.md) |
 | 2026-09-07 | **MTP draft-depth sweep, code decode, single stream** | baseline 34.4 / **n-max 1: 46.6 (+35%)** / n-max 2: 39.7 (+15%) / n-max 3: 29.2 (-15%) / n-max 5: 26.8 (-22%) | llama-server `--spec-type draft-mtp` on the -MTP- GGUF | **the head is shallow, not broken**: position 1 accepts reliably, positions 2+ do not. Every earlier "MTP loses" number was n-max 5. Prose/JSON verification running |
+| 2026-09-07 | **MTP n-max 1 across output shapes, single stream** | JSON/tool calls **47.5 (+38%)**, code 46.6 (+35%), prose 39.0 (+13%) vs 34.4 | llama-server `--spec-draft-n-max 1` on the -MTP- GGUF | holds on every shape Hermes emits; 8-slot + delegation test running |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -123,7 +124,19 @@ per pass at n-max 1 (position 1 plus the bonus token):
 
 The same model on the MMQ path (`GGML_CUDA_NO_MMVQ=1`, c ~ 5.6): n-max 1 ->
 29.7 ms per pass -> **~64 tok/s predicted single stream**, nearly 2x the 33.5
-baseline, from two flags. That is the next measurement. Retraining the head
+baseline, from two flags. That is the next measurement. A finer knob now
+exists in the fork: `GGML_CUDA_MMVQ_MAX=N` keeps batches up to N on the dp4a
+path and routes wider ones to MMQ - so `MMVQ_MAX=1` leaves single-token
+decode where it is and moves only the verification pass (2 columns at
+n-max 1) to the tensor cores, whichever path wins at width 1. hanxiao's L4
+notes report +16% from the same routing at verification width 3+.
+
+Calibration for the retrain (KGP Talkie, base Qwen3.8 UD-Q4_K_XL on a 5090,
+45 configs): acceptance by draft position 0.86 / 0.77 / 0.67 / 0.59 / 0.52
+for n-max 1..5, throughput peaking at n-max 3 (133.6 tok/s vs 73.6 plain,
+1.8x). A healthy head keeps ~0.77 at position 2 and ~0.67 at 3; ours holds
+position 1 and loses the rest. That curve is the target for
+docs/mtp-realign-davidau.md, and the reason the optimum there is n-max 3-4. Retraining the head
 (docs/mtp-realign-davidau.md) then restores positions 2+ and moves the optimum
 to n-max 3-4 at ~3 accepted: ~90 tok/s on the MMQ path.
 

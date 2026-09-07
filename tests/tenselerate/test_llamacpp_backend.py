@@ -13,7 +13,7 @@ import pytest
 
 from tenselerate.backends.llamacpp import (
     DEFAULT_CTX_POOL, DEFAULT_SLOTS, KV_TYPES, build_llama_server_argv,
-    llama_server_command, llama_server_env,
+    env_prefix, llama_server_command, llama_server_env, resolve_mtp_draft,
 )
 from tenselerate.cli import main
 from tenselerate.config import MIN_ATTENTION_WINDOW
@@ -63,12 +63,18 @@ def test_agent_contract_flags_are_present():
         argv(alias="")
 
 
-def test_speculation_is_off_by_default_and_depth_one_when_asked():
+def test_speculation_follows_the_gguf_and_depth_one_when_asked():
     # The merge left the MTP head's position-1 prediction intact and broke
-    # positions 2+: n-max 1 measured +35%, n-max 5 measured -22%.
-    a = argv()
+    # positions 2+: n-max 1 measured +38% JSON / +35% code / +13% prose,
+    # n-max 5 measured -22%. Default: depth 1 on an -MTP- GGUF, off otherwise.
+    a = argv()                                   # MODEL has no MTP head
     assert "--spec-type" not in a and "-md" not in a
     assert not any(x.startswith("--spec-draft") for x in a)
+    m = build_llama_server_argv("/models/Qwen3.8-27B-TurboFCFusion-MTP-Q4_K_M.gguf")
+    assert after(m, "--spec-type") == "draft-mtp" and after(m, "--spec-draft-n-max") == "1"
+    assert resolve_mtp_draft("x-MTP-Q4.gguf", None) == 1
+    assert resolve_mtp_draft("x-Q4.gguf", None) == 0
+    assert resolve_mtp_draft("x-MTP-Q4.gguf", 0) == 0    # explicit off wins
     b = argv(mtp_draft=1)
     assert after(b, "--spec-type") == "draft-mtp" and after(b, "--spec-draft-n-max") == "1"
     assert "-md" not in b            # the head is inside the -MTP- GGUF
@@ -96,13 +102,19 @@ def test_refuses_off_host_bad_kv_bad_reasoning_and_zero_slots():
     assert set(KV_TYPES) == {"q8_0", "q4_0", "f16"}
 
 
-def test_no_mmvq_is_an_environment_flag_not_an_argv_flag():
+def test_matmul_routing_is_environment_not_argv():
     base = {"PATH": "/usr/bin"}
     assert "GGML_CUDA_NO_MMVQ" not in llama_server_env(base=base)
     assert llama_server_env(no_mmvq=True, base=base)["GGML_CUDA_NO_MMVQ"] == "1"
     assert "GGML_CUDA_NO_MMVQ" not in " ".join(argv())
     assert llama_server_command(MODEL, no_mmvq=True).startswith("GGML_CUDA_NO_MMVQ=1 ")
     assert not llama_server_command(MODEL).startswith("GGML_CUDA")
+    # the threshold: keep batch-1 on the vector path, route verification to MMQ
+    assert env_prefix(mmvq_max=1) == {"GGML_CUDA_MMVQ_MAX": "1"}
+    assert env_prefix(no_mmvq=True, mmvq_max=1) == {"GGML_CUDA_NO_MMVQ": "1"}  # no_mmvq wins
+    assert llama_server_command(MODEL, mmvq_max=1).startswith("GGML_CUDA_MMVQ_MAX=1 ")
+    with pytest.raises(ValueError, match="mmvq_max"):
+        env_prefix(mmvq_max=9)
 
 
 def test_cli_serve_llamacpp_dry_run_prints_the_launch():
@@ -111,6 +123,15 @@ def test_cli_serve_llamacpp_dry_run_prints_the_launch():
     assert "llama-server" in out and "--kv-unified" in out and "-np 4" in out
     assert "--spec-type" not in out
     assert "dry run" in out
+
+
+def test_cli_mmvq_max_flag():
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mmvq-max", "1", "--dry-run"])
+    assert rc == 0 and out.startswith("$ GGML_CUDA_MMVQ_MAX=1 ")
+    rc, _ = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                 "--mmvq-max", "12", "--dry-run"])
+    assert rc == 2
 
 
 def test_cli_mtp_draft_flag():
