@@ -79,6 +79,9 @@ MACHINES = {
                 "CMP 170HX after the cmpunlocker HBM2e unlock (host RAM assumed)"),
     "cmp-rig-40": (["cmp170hx-40"], 64.0,
                    "CMP 170HX 10 GiB variant unlocked to 40 GiB (host RAM assumed)"),
+    "raven-9950x": (["cmp170hx-40", "3060"], 32.0,
+                    "Ryzen 9 9950X / B650E / 32 GiB DDR5 - CMP 170HX (40 GiB) + RTX 3060, "
+                    "52 GiB VRAM. Big card holds the model resident; 3060 drafts/embeds."),
 }
 
 # firmware quirks that change how llama.cpp must be BUILT for a card
