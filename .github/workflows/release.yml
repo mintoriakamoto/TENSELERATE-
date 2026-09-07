@@ -109,7 +109,11 @@ jobs:
             -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON \
             -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
           cmake --build build --target llama-server llama-cli
-          ./build/bin/llama-cli --version
+          # The binaries link the CUDA driver API; the build container has no driver
+          # (no GPU), so run the version stamp check against the toolkit's libcuda stub.
+          mkdir -p "$RUNNER_TEMP/cuda-stubs"
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-stubs/libcuda.so.1"
+          LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stubs:${LD_LIBRARY_PATH:-}" ./build/bin/llama-cli --version
       - name: Build the TENSELERATE int8 kernel bridge (.so)
         run: |
           cmake -S tenselerate/csrc -B build-kernels -G Ninja \
