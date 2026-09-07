@@ -228,26 +228,31 @@ want its continuous-batching throughput for many concurrent requests. But TWO-ca
 tensor parallelism is still gated by the PCIe link: Gen2 x4 (~2 GB/s), or ~8 GB/s with
 the capacitor mod - far below what per-layer all-reduce wants, and Gen3/4 are OTP-fused
 off. So for the two-card box, llama.cpp still wins: it keeps the model resident on the
-170HX, gives the 3060 an asymmetric draft/prefill role, and implements the GDN +
-windowing + MTP that make 1M context fit. Use vLLM only for single-170HX high-concurrency
+170HX, leaves the 3060 for side roles, and implements the GDN + windowing that
+make 1M context fit. Use vLLM only for single-170HX high-concurrency
 serving, or if you add a matched card on a real x16 link.
 
-## Speculation (MTP)
+## Speculation (MTP) - measured, and off for this model
 
-The Qwen3.8-27B GGUF ships an MTP draft head; `--spec-draft-n-max 5` (10 for structured
-output like JSON/HTML/XML) is the single biggest decode lever for this model. It costs
-~12-15% prefill throughput, cheap against a bandwidth-bound decode loop. With compute
-measured at A100 class, verification depth is limited by draft acceptance, not by the
-card, so deeper drafts and tree drafts are worth measuring. Reported at +33-39% up to 3.5x on this model
-(Ferrox Labs Field Manual No.12; sudoingX/qwen38-mtp). Probe the real acceptance rate
-with `scripts/svmi-bitspec.py`.
+The Qwen3.8-27B GGUF ships an MTP draft head, and on the base model it is
+reported at +33-39% up to 3.5x (Ferrox Labs Field Manual No.12; sudoingX/qwen38-mtp).
+On the DavidAU TURBO merge served here it was **measured at 7-11% acceptance**
+(2026-09-07): `--spec-type draft-mtp --spec-draft-n-max 5` decoded at 14.9 tok/s
+against 33.5 plain. The merge moved the trunk the head was trained against, so
+the verify pass is pure cost. Do not enable it on this model. Routes back to a
+working drafter, cheapest first: an n-gram / prompt-lookup drafter (lossless,
+helps only on copied spans - which agent traffic has a lot of); re-aligning the
+MTP head by distilling it against the merged trunk (one small layer); or the
+base Qwen3.8 model, whose head is aligned - decided by a tokens-to-answer A/B,
+since the merge was chosen for fewer thinking tokens.
 
 ## Measure before trusting
 
 1. Confirm the full unlock held (FP16 GEMM / `gpu-burn -tc` ~160+ TFLOPS as measured
    here, not ~6), especially after any driver reload - the unlock is volatile.
-2. MTP acceptance rate -> the real speedup and the best `--spec-draft-n-max`.
-   Use `scripts/svmi-bitspec.py`.
+2. MTP acceptance rate on whatever model is loaded (`scripts/svmi-bitspec.py`);
+   below ~50% on 2 drafted tokens MTP is slower than plain. Measured 7-11% on
+   the DavidAU merge - off.
 3. UD-Q4_K_M vs mixed-INT8 for your workload's quality/speed balance.
 
 Then confirm token-identity with `scripts/svmi-verify.sh` before trusting a long run.

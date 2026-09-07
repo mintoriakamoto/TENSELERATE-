@@ -62,8 +62,10 @@ KV_BITS_PER_ELEM = {8: 1.0625, 4: 0.5625}
 # MTP self-speculation: the model's built-in Multi-Token-Prediction draft head
 # proposes several tokens the main pass verifies in ONE step. Accepted tokens
 # are free, so throughput multiplies with NO quality cost - the verify
-# guarantees output identical to plain decode. 1.8x is a conservative modeling
-# assumption (scripts/svmi-* measures the real acceptance rate). Roadmap kernel.
+# guarantees output identical to plain decode. 1.8x is a modeling assumption
+# for a head that matches the served trunk; the DavidAU merge measured 7-11%
+# acceptance (x0.45 - slower than plain), so `plan --spec mtp` describes the
+# base model, not that merge. See benches/cmp170hx-3060/.
 MTP_SPECULATIVE_SPEEDUP = 1.8
 # Attention sinks (StreamingLLM, arXiv:2309.17453): softmax attention dumps
 # surplus probability mass on the first few tokens, so a sliding window that

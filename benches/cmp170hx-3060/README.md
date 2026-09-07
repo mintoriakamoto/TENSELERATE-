@@ -12,17 +12,22 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | decode, wrong build (capacity-only throttle workarounds) | 22.5 tok/s | llama-server, single stream | card at 74 W / 83% util |
 | 2026-09-07 | decode, normal sm_80 build, no spec | **33.3 tok/s** | llama-server, single stream, Q4_K_M, 2x256K slots, q4_0 KV | +48%; card at 218 W / 98% util; prompt 127 -> 158 tok/s on a short prompt |
 | 2026-09-07 | MTP launch, first attempt | OOM | `cudaMalloc failed` allocating the MTP context | VRAM not freed from the previous server; clean relaunch succeeded at 29.6 GiB resident |
+| 2026-09-07 | decode, normal build + MTP (`--spec-type draft-mtp --spec-draft-n-max 5`) | 33.3 tok/s | llama-server, single stream, q8_0 KV | **no gain**; MTP acceptance measured at **7-11%** on the DavidAU merge |
+| 2026-09-07 | decode, 2x256K slots, normal build, no spec | **48.2 tok/s aggregate, 26.5 per stream** | llama-server `-np 2`, q4_0 KV | wrong build gave 16 / 8.8; model predicted 42-54 / 21-27 |
+| 2026-09-07 | `llama-bench -ngl 999 -fa 1 -p 4096 -n 64 -r 3` | **pp4096 855.6 tok/s, tg64 33.5 tok/s** | llama-bench | prefill IS A100 class (>800 predicted); tg = pure weight read = 553 GB/s = 37% of nominal |
+| 2026-09-07 | clocks under decode | HBM 1215/1215 MHz, SM 1410/1410 MHz, 207-223 W | `nvidia-smi -l 1` | both at max; nothing throttled |
+| 2026-09-07 | CUDA graphs | reused = 247, not disabled | server log | launch overhead is not the gap |
+| 2026-09-07 | decode, MTP n-max 5, prose | **14.9 tok/s** | llama-server | MTP is SLOWER than plain (33.5): 7-11% acceptance means the verify pass is pure cost. Drop it. |
+| 2026-09-07 | width sweep, short prompts, N=1,2,4,8,16 slots x 16K ctx | **141.5 tok/s aggregate at N=16** | `-np N`, q4_0 KV | step time DROPS from N=8 to N=16; the earlier 87 tok/s ceiling below is disproven |
+| 2026-09-07 | 4 x 256K, q4_0 KV | 59 tok/s aggregate | llama-server `-np 4` | what fits at the full window today (MMVQ regime) |
 
-## What 33.3 tok/s says
+## First reading of 33.3 tok/s (superseded)
 
-30 ms per token. The weights alone are 16.5 GB, so the loop is achieving at most
-**~550 GB/s on a short prompt (~37% of the 1493 GB/s nominal), ~710 GB/s if the
-full 262K q4_0 window was being read (~48%)**. The planners assume 65%
-(`BW_EFFICIENCY` in `tenselerate/cli.py`); the box does not deliver that yet.
-The card reads 98% util while moving under half its bandwidth, which points at
-kernel-side time (launch gaps, the GDN recurrence kernels, graph disablement)
-rather than the HBM being the wall. Model prediction was ~45 tok/s; the gap is
-the number to chase before any speculation lever.
+30 ms per token against 16.5 GB of weights read as "at most 37-48% of nominal
+bandwidth, kernel-side time". The diagnostics below then showed clocks maxed
+and CUDA graphs on, and the width sweep replaced this with the two-regime
+decomposition further down: ~18.5 ms of weight read (~890 GB/s, 60%) plus a
+per-sequence cost set by ggml's matmul dispatch.
 
 ## Diagnostics to run next (each answers one question)
 
@@ -39,8 +44,6 @@ the number to chase before any speculation lever.
 4. `svmi-bwprofile.py -m <gguf> --gpu cmp170hx-40` — persists the achieved
    GB/s so `plan`/`info` can stop using the 0.65 guess.
 
-| 2026-09-07 | decode, normal build + MTP (`--spec-type draft-mtp --spec-draft-n-max 5`) | 33.3 tok/s | llama-server, single stream, q8_0 KV | **no gain**; MTP acceptance measured at **7-11%** on the DavidAU merge |
-
 ## MTP does not work on this model
 
 The DavidAU TURBO merge changed the trunk; the shipped MTP head was trained
@@ -54,16 +57,6 @@ lossless, only helps on copied spans); re-aligning the MTP head by distilling it
 against the merged trunk (small training job, head only); a base-model A/B on
 tokens-to-answer, since the merge was chosen for fewer thinking tokens and that
 claim is as unmeasured as the MTP one was.
-
-| 2026-09-07 | decode, 2x256K slots, normal build, no spec | **48.2 tok/s aggregate, 26.5 per stream** | llama-server `-np 2`, q4_0 KV | wrong build gave 16 / 8.8; model predicted 42-54 / 21-27 |
-
-| 2026-09-07 | `llama-bench -ngl 999 -fa 1 -p 4096 -n 64 -r 3` | **pp4096 855.6 tok/s, tg64 33.5 tok/s** | llama-bench | prefill IS A100 class (>800 predicted); tg = pure weight read = 553 GB/s = 37% of nominal |
-| 2026-09-07 | clocks under decode | HBM 1215/1215 MHz, SM 1410/1410 MHz, 207-223 W | `nvidia-smi -l 1` | both at max; nothing throttled |
-| 2026-09-07 | CUDA graphs | reused = 247, not disabled | server log | launch overhead is not the gap |
-| 2026-09-07 | decode, MTP n-max 5, prose | **14.9 tok/s** | llama-server | MTP is SLOWER than plain (33.5): 7-11% acceptance means the verify pass is pure cost. Drop it. |
-
-| 2026-09-07 | width sweep, short prompts, N=1,2,4,8,16 slots x 16K ctx | **141.5 tok/s aggregate at N=16** | `-np N`, q4_0 KV | step time DROPS from N=8 to N=16; the earlier 87 tok/s ceiling below is disproven |
-| 2026-09-07 | 4 x 256K, q4_0 KV | 59 tok/s aggregate | llama-server `-np 4` | what fits at the full window today (MMVQ regime) |
 
 ## The decode step: two regimes, not one cost
 

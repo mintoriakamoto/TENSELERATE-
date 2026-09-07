@@ -252,7 +252,10 @@ MACHINE_HW = {
     "2x2080ti": (22.0, 1232.0),
     "cmp170hx+3060": (52.0, 1853.0),
 }
-# Empirical memory bandwidth efficiency at sustained load. Measured by svmi-bwprofile.py.
+# Memory bandwidth efficiency at sustained load. Modeling constant; the 170HX
+# weight read measured ~0.60 of nominal on 2026-09-07 (benches/cmp170hx-3060/),
+# so the number is close - the per-sequence costs the planner does NOT model
+# (see that README) are what separate its output from the measured tok/s.
 BW_EFFICIENCY = 0.65
 
 
@@ -655,10 +658,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--kv-bits", type=int, default=4, choices=(8, 4),
                        help="vllm backend: 4=fp8 KV (default, the recommended "
                             "Ampere config), 8=auto KV dtype")
-    p_srv.add_argument("--spec", default="mtp", choices=("none", "mtp", "eagle3"),
-                       help="vllm backend: mtp = built-in Qwen3-Next speculative "
-                            "(default, lossless), eagle3 = trained draft head "
-                            "(needs --eagle-model), none = plain decode")
+    p_srv.add_argument("--spec", default="none", choices=("none", "mtp", "eagle3"),
+                       help="vllm backend: none = plain decode (default: MTP measured "
+                            "7-11%% acceptance on the DavidAU merge, slower than plain), "
+                            "mtp = built-in Qwen3-Next draft head (lossless when the "
+                            "head matches the trunk), eagle3 = trained draft head "
+                            "(needs --eagle-model)")
     p_srv.add_argument("--eagle-model", default=None,
                        help="vllm backend: EAGLE-3 draft-head repo/path "
                             "(required when --spec eagle3)")
