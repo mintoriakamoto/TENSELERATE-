@@ -58,6 +58,25 @@ def test_mtp_adds_speculative_config():
     assert "qwen3_next_mtp" in cfg
 
 
+def test_eagle3_needs_a_draft_head():
+    # EAGLE-3 has no public head for this model yet - refuse without one
+    with pytest.raises(ValueError, match="eagle"):
+        argv(spec="eagle3")
+
+
+def test_eagle3_with_a_head_emits_the_config():
+    a = argv(spec="eagle3", eagle_model="some-org/ravenx-eagle3")
+    cfg = a[a.index("--speculative-config") + 1]
+    assert "eagle3" in cfg and "some-org/ravenx-eagle3" in cfg
+
+
+def test_recommended_ampere_defaults():
+    # the builder defaults are the deep-and-fast Ampere config
+    a = argv()
+    assert a[a.index("--gpu-memory-utilization") + 1] == "0.92"
+    assert int(a[a.index("--max-num-seqs") + 1]) >= 16
+
+
 def test_context_floor_is_enforced_before_vllm_starts():
     with pytest.raises(ContextFloorError):
         argv(ctx=8192)

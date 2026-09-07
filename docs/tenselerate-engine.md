@@ -103,118 +103,77 @@ than silently extrapolating.
 The window pays for itself twice. No position extrapolation, **and** a KV cache
 whose size stops growing with context:
 
-| context | KV (q8_0, 128K window) | RoPE scaling |
+| context | KV (q8_0, locked 256K window) | RoPE scaling |
 | --- | --- | --- |
-| 1,000,000 | 4.25 GiB | no |
-| 4,000,000 | 4.25 GiB | no |
-| 10,000,000 | 4.25 GiB | no |
+| 1,000,000 | 8.50 GiB | no |
+| 4,000,000 | 8.50 GiB | no |
+| 10,000,000 | 8.50 GiB | no |
 
 Decode speed follows KV, so it is **constant at any context at or above the
 window**. That is the property that makes a 1M floor affordable at all.
 
-### The window is the throughput dial
+### The window is LOCKED at max recall — not a throughput dial
 
-Each concurrent sequence carries its own windowed KV, so the window — not the
-context — is what caps batch size, and batch size is what buys aggregate
-throughput. The one supported box is the **dual RTX 2080 Ti** (Turing sm_75,
-22 GiB pooled, ~1232 GB/s; Ryzen 9 9950X, 32 GB DDR5, 1 TB NVMe + 250 GB OS
-SSD). At the 1M floor:
+The attention window is **locked at `MIN_ATTENTION_WINDOW == MAX_ATTENTION_WINDOW
+== 262_140`** (256K, the trained rotary range minus the 4 sinks). It is the only
+legal window: `validate_window()` refuses anything narrower (a `QualityFloorError`)
+and anything wider (a `RopeScalingRequired`, since wider needs YaRN). So the
+window does **not** trade recall for concurrency any more — verbatim recall is
+pinned at its deepest, and the box takes whatever throughput the resulting KV
+allows.
 
-| window | KV/seq | max concurrent | aggregate |
+On the target box (**CMP 170HX 40 GiB + RTX 3060 12 GiB**, 52 GiB pooled,
+~1853 GB/s) at the 1M floor, the locked window with q4 KV + MTP:
+
+| window (locked) | KV/seq | max concurrent | aggregate |
 | --- | --- | --- | --- |
-| 131,072 | 4.25 GiB | 1 | ~38 tok/s |
-| 65,536 | 2.12 GiB | 2 | ~76 tok/s |
-| 49,152 | 1.59 GiB | 3 | ~111 tok/s |
-| **32,768** | **1.06 GiB** | **4** | **~152 tok/s** |
-| ~~16,384~~ | 0.53 GiB | 8 | faster — **refused: below the quality floor** |
+| **262,140** | ~4.5 GiB (q4) | 7 | **~301 tok/s** |
 
-**Context is 1,000,000 in every row.** The window trades exact-recall depth (how
-far back the full-attention layers see verbatim) for concurrency — never context
-length, which the GDN state carries regardless. `tenselerate plan` computes this
-table for the machine and refuses to print a batch size that would not fit in
-the 22 GiB.
+**Context is 1,000,000+ regardless** — the GDN state carries it. `MIN_DECODE_TOKS
+= 400` is a **target, not a hard gate**: the locked window keeps the box below it
+(~301 tok/s), and `plan` reports that honestly (exit 3) rather than narrowing the
+window to chase speed. Quality won; speed takes what recall leaves. The only
+lossless levers left are q4 KV, MTP, and (with a trained head) EAGLE-3 — none
+reach 400 at this window. No RoPE scaling/YaRN, ever (`needs_rope_scaling`,
+`validate_window`).
 
-The speed number is a **standard**, not a target that bends to the hardware:
-`MIN_DECODE_TOKS = 400` in `config.py`. The supported box tops out at
-**~152 tok/s** (32K window) — so it sits **below** that standard, and `plan`
-says so honestly (exit 3) rather than lowering the bar. Serving still works
-(`serve`/`boot` do not gate on the speed floor); `plan` is the advisory that
-the box is under the target. 1M context and the 32K quality floor hold; the
-400 speed floor does not — the three are **not** all satisfiable on this box,
-and the engine reports that truthfully (`tests/tenselerate/test_speed_floor.py`,
-`test_quality_floor.py`).
+The build targets the Ampere box: `sm_80;sm_86` (`--preset deploy-cmp170hx-3060`),
+a two-card fat binary. The vLLM runtime is the production path — see
+[`vllm-backend.md`](vllm-backend.md). (The dual RTX 2080 Ti stays buildable via
+`--preset deploy-2x2080ti` / `rtx-turing` but is no longer the target.)
 
-The dial has a stop at **both** ends. **Quality is not for sale**:
-`MIN_ATTENTION_WINDOW = 32_768` is the narrowest window the engine will run,
-enforced by `validate_window()` and by `plan --attention-window`, and `plan`
-never offers a sub-floor window in its suggestions — even though (see the
-struck row above) one would be faster. At the top, the no-RoPE rule fixes a
-ceiling: `MAX_ATTENTION_WINDOW = 262_140` — the trained rotary range (262,144)
-minus the 4 attention sinks that share it, so `window + sinks` never
-extrapolates past the range. That is the **deepest verbatim recall the engine
-offers without RoPE scaling**; a window past it is refused (exit 2), not
-scaled. It fits the 22 GiB box only with q4_0 KV (~4.50 GiB, total 21.41 GiB
-resident) — at q8_0 the KV is 8.50 GiB and does not fit:
+### The lossless levers — and why the box stays below 400
 
-```
-tenselerate plan --attention-window 262140 --kv-bits 4   # FITS, deepest recall
-```
+The window does not narrow for speed, so the only levers left are **lossless**,
+and `plan --kv-bits N --spec mtp` models them at the locked window:
 
-The other half of the quality floor is already law elsewhere: no RoPE
-scaling/YaRN, ever (`needs_rope_scaling`, `validate_window`).
-
-Both 2080 Ti are identical Turing cards, so the build is a single sm_75 SASS
-target (`--preset deploy-2x2080ti`) — no fat binary, no JIT stall. Turing has
-int8 tensor cores (IMMA) and unthrottled dp4a, so the int8 path applies.
-
-The default build target is now the **Ampere box** - CMP 170HX (GA100, sm_80) +
-RTX 3060 12 GiB (GA106, sm_86). The kernels build for `80-real;86-real` (a two-
-card fat binary, `--preset deploy-cmp170hx-3060`), which CI compiles. That is the
-vLLM-runtime box; see [`vllm-backend.md`](vllm-backend.md). The 2080 Ti stays
-buildable via `--preset deploy-2x2080ti` / `rtx-turing`.
-
-### The acceleration path — how the box reaches the standard
-
-Baseline (q8_0 KV, no speculation) the box is below 400. But two real levers
-compound, and `plan --kv-bits N --spec mtp` models them:
-
-- **q4_0 KV cache** — half the KV footprint of q8_0, so ~2x the concurrency the
-  22 GiB holds and ~2x aggregate. It is a *quality* trade — gated on a measured
-  A/B, never adopted silently.
+- **q4_0 / fp8 KV** — half the KV footprint, so more concurrency in the same
+  VRAM. 4-bit is the literature-validated KV floor (KIVI/KVQuant); an A/B
+  confirms the RavenX delta.
 - **MTP self-speculation** — the model's built-in Multi-Token-Prediction draft
-  head proposes several tokens the main pass verifies in one step. Accepted
-  tokens cost no extra weight read, so throughput multiplies (~1.8x modelled)
-  with **output identical to plain decode** — the verify guarantees it. Zero
-  quality cost; a roadmap kernel (phase 3).
+  head; accepted tokens cost no extra weight read, so throughput multiplies
+  (~1.8x modelled) with **output identical to plain decode**. **EAGLE-3** (a
+  trained draft head) has higher acceptance still, also lossless.
 
-Neither alone reaches 400 on this box; together, at the 32K quality-floor
-window, they model **~590 tok/s — past the standard**:
+At the locked 256K window on the Ampere box these model **~301 tok/s** — below
+the 400 target, and there is no narrower window to close the gap, because
+quality is pinned at maximum. 400 is a target, not a wall the box is expected to
+clear at max recall; the engine reports the gap honestly
+(`tests/tenselerate/test_acceleration.py`). The numbers are a roofline;
+`svmi-*` measures the real MTP acceptance rate and q4_0 quality delta before
+either is trusted.
 
-```
-$ tenselerate plan --machine 2x2080ti --kv-bits 4 --spec mtp
-  window  49,152 -> KV 0.84 GiB, max batch  6, ~393 tok/s
-  window  32,768 -> KV 0.56 GiB, max batch  9, ~590 tok/s  <- reaches 400+
-```
-
-So the 400 standard is not a wall the hardware can never clear — it is the bar
-the *baseline* misses and the acceleration stack meets. `plan` shows the exact
-route (`tests/tenselerate/test_acceleration.py`). The numbers are a roofline,
-not a measurement; `svmi-*` measures the real MTP acceptance rate and q4_0
-quality delta before either is trusted.
-
-The evidence base behind these dials — and the next Turing-native kernels to
-build (FlashQLA-SM75 GDN prefill, fp16 FlashAttention-2 for the windowed layers,
-KIVI 4-bit KV, EAGLE-3 vs the built-in MTP head) — is in
-[`research-turing-acceleration.md`](research-turing-acceleration.md), with the
-`sm_75` caveats and primary sources, and the dead ends (e.g. SageAttention,
-which dropped Turing) called out so we do not chase them.
+The evidence base behind these levers — FlashQLA GDN prefill, fp16
+FlashAttention-2, KIVI 4-bit KV, EAGLE-3 vs the built-in MTP head — is in
+[`research-turing-acceleration.md`](research-turing-acceleration.md), with
+primary sources and the dead ends called out so we do not chase them.
 
 **The llama.cpp bridge cannot do this.** `scripts/tenselerate-serve.sh` runs the
 stock model, whose full-attention layers are not windowed, so past 262,144 it
 would need RoPE scaling. The bridge therefore caps at the model's native 256K;
 the 1M floor is a property of the native engine.
 
-## Continuous batching — the 600 tok/s lever
+## Continuous batching — the throughput lever
 
 Decode is bandwidth-bound: one pass reads *all* the weights no matter how many
 sequences are in flight. Running B sequences per step therefore costs barely more

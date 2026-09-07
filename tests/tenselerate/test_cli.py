@@ -58,12 +58,12 @@ def test_info_reports_the_floor_and_no_rope_scaling():
     assert "4,000,000" in out and "10,000,000" in out
 
 
-def test_plan_defaults_to_the_only_box_and_holds_the_context_floor():
-    # default --machine is the one supported box (dual 2080 Ti); it is below
-    # the speed standard (exit 3) but still serves the 1M context floor
+def test_plan_defaults_to_the_target_box_and_holds_the_context_floor():
+    # default --machine is the Ampere target box; it is below the speed target
+    # (exit 3, locked window) but still serves the 1M context floor
     rc, out = run(["plan"])
     assert rc == 3
-    assert "2x2080ti" in out
+    assert "cmp170hx+3060" in out
     assert f"{MIN_CONTEXT_TOKENS:,} tokens" in out
 
 
@@ -78,13 +78,13 @@ def test_plan_never_reports_an_infeasible_batch():
     Each concurrent sequence holds its own windowed KV, so batch is memory-capped.
     Parse the reported batches and check every one actually fits the 22 GiB box.
     """
-    rc, out = run(["plan", "--machine", "2x2080ti"])
-    assert rc == 3                       # below the speed standard, but valid
+    rc, out = run(["plan", "--machine", "cmp170hx+3060", "--kv-bits", "4"])
+    assert rc == 3                       # below the speed target, but valid
     kv_line = next(ln for ln in out.splitlines() if "KV (windowed)" in ln)
     kv_gib = float(kv_line.split(":")[1].strip().split()[0])
     weights_line = next(ln for ln in out.splitlines() if ln.startswith("weights"))
     weights = float(weights_line.split(":")[1].strip().split()[0])
-    vram, overhead = 22.0, 1.5
+    vram, overhead = 52.0, 1.5
 
     batches = [int(ln.split("batch")[1].split(":")[0].strip())
                for ln in out.splitlines()
@@ -94,15 +94,15 @@ def test_plan_never_reports_an_infeasible_batch():
         assert weights + kv_gib * b + overhead <= vram, (b, out)
 
 
-def test_plan_reports_the_box_below_standard_without_dropping_context():
-    from tenselerate.config import MIN_DECODE_TOKS
-    # no window on the box reaches the floor; plan says so honestly and never
-    # trades away context to chase speed
-    rc, out = run(["plan", "--machine", "2x2080ti"])
+def test_plan_reports_the_box_below_target_without_dropping_context():
+    from tenselerate.config import MIN_DECODE_TOKS, MIN_CONTEXT_TOKENS as FLOOR
+    # the locked window keeps the box below the target; plan says so honestly
+    # and never trades away context (still 1M) to chase speed
+    rc, out = run(["plan", "--machine", "cmp170hx+3060", "--kv-bits", "4"])
     assert rc == 3
     assert f"reaches {MIN_DECODE_TOKS}+" not in out
-    assert "BELOW" in out
-    assert "never context length" in out
+    assert "BELOW it" in out
+    assert f"context          : {FLOOR:,} tokens" in out
 
 
 def test_serve_refuses_off_host():

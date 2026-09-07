@@ -1,9 +1,9 @@
 """
-The acceleration dials in `plan`: the two real levers that speed decode on the
-fixed dual 2080 Ti box - q4_0 KV cache (~2x concurrency) and MTP self-
-speculation (~1.8x, identical output). Baseline is below the 400 standard; the
-two together model past it. Roofline, honestly labelled - q4_0 is a quality
-trade, MTP is a roadmap kernel.
+With the window locked at max recall, speed is no longer bought by narrowing it.
+The only levers left are lossless - q4_0 KV (more concurrency) and MTP self-
+speculation (~1.8x, identical output; EAGLE-3 higher). `plan` models them at the
+LOCKED window and reports honestly that they do NOT reach the 400 target there,
+because quality is pinned at maximum. Roofline, honestly labelled.
 """
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from tenselerate.cli import main
 from tenselerate.config import (
     KV_BITS_PER_ELEM, MIN_DECODE_TOKS, MTP_SPECULATIVE_SPEEDUP,
 )
+
+BOX = ["--machine", "cmp170hx+3060"]
 
 
 def run(argv: list[str]) -> tuple[int, str]:
@@ -29,35 +31,24 @@ def test_constants_are_sane():
     assert 1.5 <= MTP_SPECULATIVE_SPEEDUP <= 2.5
 
 
-def test_baseline_is_below_but_shows_the_acceleration_path():
-    rc, out = run(["plan", "--machine", "2x2080ti"])
+def test_box_is_below_target_and_shows_the_lossless_levers():
+    rc, out = run(["plan", *BOX, "--kv-bits", "4", "--spec", "mtp"])
     assert rc == 3
-    assert "BELOW the standard" in out
-    assert "acceleration path" in out
-    assert "q4_0 KV" in out and "MTP spec" in out
-    assert f"REACHES the {MIN_DECODE_TOKS} standard" in out
+    assert "BELOW it" in out
+    assert "lossless levers at the locked window" in out
+    assert "quality-over-speed" in out
 
 
-def test_full_stack_reaches_the_standard():
-    # q4_0 KV + MTP together clear the 400 floor at the 32K quality-floor window
-    rc, out = run(["plan", "--machine", "2x2080ti",
-                   "--kv-bits", "4", "--spec", "mtp"])
-    assert rc == 0
-    assert "acceleration     : KV q4_0 + MTP spec" in out
-    assert f"reaches {MIN_DECODE_TOKS}+" in out
-
-
-def test_either_lever_alone_is_not_enough():
-    # neither q4_0 KV nor MTP on its own reaches 400 on this box - it takes both
-    rc4, _ = run(["plan", "--machine", "2x2080ti", "--kv-bits", "4"])
-    rcm, _ = run(["plan", "--machine", "2x2080ti", "--spec", "mtp"])
-    assert rc4 == 3 and rcm == 3
+def test_even_the_full_stack_stays_under_the_target():
+    # q4_0 KV + MTP at the locked window do NOT reach 400 - quality is pinned
+    _, out = run(["plan", *BOX, "--kv-bits", "4", "--spec", "mtp"])
+    assert f"still under the {MIN_DECODE_TOKS} target" in out
 
 
 def test_mtp_multiplies_the_baseline_throughput():
     # MTP is a pure multiplier: the batch-1 decode rate scales by ~1.8x
-    _, base = run(["plan", "--machine", "2x2080ti"])
-    _, spec = run(["plan", "--machine", "2x2080ti", "--spec", "mtp"])
+    _, base = run(["plan", *BOX])
+    _, spec = run(["plan", *BOX, "--spec", "mtp"])
 
     def batch1(out: str) -> float:
         line = next(ln for ln in out.splitlines()
@@ -68,7 +59,7 @@ def test_mtp_multiplies_the_baseline_throughput():
 
 def test_context_floor_still_holds_under_acceleration():
     # acceleration never trades away context - it is still the 1M floor
-    rc, out = run(["plan", "--machine", "2x2080ti",
-                   "--kv-bits", "4", "--spec", "mtp", "--ctx", "8192"])
+    rc, out = run(["plan", *BOX, "--kv-bits", "4", "--spec", "mtp",
+                   "--ctx", "8192"])
     assert rc == 2                       # below the context floor, refused
     assert "below the TENSELERATE floor" in out

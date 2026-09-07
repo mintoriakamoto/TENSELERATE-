@@ -26,7 +26,9 @@ Honest mapping (what the floors do and do not translate to as vLLM flags):
   * `--kv-bits 4` -> vLLM has no int4 KV cache; its concurrency lever is fp8 KV
     (`--kv-cache-dtype fp8`). We map 4 -> fp8, 8 -> auto, and say so, rather
     than pretend the KIVI int4 path exists in vLLM today.
-  * `--spec mtp` -> vLLM's built-in Qwen3-Next MTP speculative decode.
+  * `--spec mtp` -> vLLM's built-in Qwen3-Next MTP speculative decode (lossless,
+    zero training). `--spec eagle3` -> a trained EAGLE-3 draft head (higher
+    acceptance, still lossless) - needs an eagle_model, none is public yet.
 """
 from __future__ import annotations
 
@@ -74,8 +76,9 @@ def build_vllm_serve_argv(
     port: int = 8000,
     kv_bits: int = 8,
     spec: str = "none",
-    gpu_memory_utilization: float = 0.90,
-    max_num_seqs: int = 8,
+    eagle_model: str | None = None,
+    gpu_memory_utilization: float = 0.92,
+    max_num_seqs: int = 16,
 ) -> list[str]:
     """
     Build the argv for `vllm serve` honoring the engine's floors. Raises the
@@ -108,8 +111,20 @@ def build_vllm_serve_argv(
         "--enable-prefix-caching",
     ]
     if spec == "mtp":
+        # the model's built-in Multi-Token-Prediction head - zero training,
+        # output identical to plain decode (the verify guarantees it)
         argv += ["--speculative-config", json.dumps(
             {"method": "qwen3_next_mtp", "num_speculative_tokens": 2})]
+    elif spec == "eagle3":
+        # EAGLE-3 draft head - higher acceptance than MTP, still lossless, but
+        # it needs a trained head for this model (none is public yet).
+        if not eagle_model:
+            raise ValueError(
+                "spec='eagle3' needs a trained EAGLE-3 draft head; pass "
+                "eagle_model=<repo-or-path>. MTP is the zero-training option.")
+        argv += ["--speculative-config", json.dumps(
+            {"method": "eagle3", "model": eagle_model,
+             "num_speculative_tokens": 3})]
     return argv
 
 

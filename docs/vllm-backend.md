@@ -20,30 +20,40 @@ of which require Ampere+. On Turing those paths fall back or don't build; on
 Ampere they are first-class. So on this box vLLM is the production runtime and
 the reference engine stays the oracle.
 
-## What the box can do
+## What the box does — window LOCKED at max recall
 
-The Ampere box **meets all three floors at once** — the first supported box that
-does. `tenselerate plan --machine cmp170hx+3060` at the 1M context floor:
+The window is **locked at 262,140 (256K)** — the deepest no-RoPE verbatim recall
+— and never narrows for speed. So there is no window table to pick from: the box
+runs that one window and takes whatever throughput the resulting KV allows.
+`tenselerate plan --machine cmp170hx+3060 --kv-bits 4 --spec mtp` at the 1M floor:
 
-| window | max batch | aggregate | vs 400 floor |
+| window (locked) | max batch | aggregate | vs 400 target |
 | --- | --- | --- | --- |
-| 131,072 | 8 | ~182 tok/s | under |
-| 65,536 | 16 | ~363 tok/s | under |
-| **49,152** | **22** | **~489 tok/s** | **meets** |
-| **32,768** | **33** | **~733 tok/s** | **meets** |
+| **262,140** | 7 | **~301 tok/s** | under, by design |
 
-So 1M context + the 32K quality floor + the 400 tok/s standard are all
-satisfiable here, at a 49K window or narrower. (Roofline at 65% bandwidth
-efficiency, pooled 52 GiB — the CMP's VRAM at its unlocked 40 GiB figure plus
-the RTX 3060's 12 GiB — over a PP=2 pipeline; not a measurement.)
+The box is **below the 400 tok/s target on purpose** — quality is pinned at
+maximum, and speed takes what recall leaves. 400 is a target, not a hard gate.
+1M+ context still holds (the GDN state carries it). (Roofline at 65% bandwidth
+efficiency, pooled 52 GiB — the CMP's unlocked 40 GiB plus the RTX 3060's 12 GiB
+— over a PP=2 pipeline; not a measurement.)
 
 ## Running it
 
 ```
-tenselerate serve --backend vllm            # launch vLLM for the RavenX model
+tenselerate serve --backend vllm            # the recommended config, out of the box
 tenselerate serve --backend vllm --dry-run  # just print the vllm command
-tenselerate serve --backend vllm --kv-bits 4 --spec mtp
 ```
+
+**The defaults are the max-recall config:** the locked 256K window, `--kv-bits 4`
+(fp8 KV), `--spec mtp` (lossless speculative), `--gpu-memory-utilization 0.92`,
+`--max-num-seqs 16` — ~301 tok/s at 256K of verbatim recall. The only lossless
+levers are q4 KV, MTP, and (with a head) `--spec eagle3 --eagle-model <head>`;
+none reach 400 at this window, because the window does not narrow. Context stays
+1M+ regardless.
+
+To trade depth for raw throughput, a narrower window gives far more concurrency
+(32K -> ~2,476 tok/s aggregate); to trade throughput for the deepest no-RoPE
+recall, 262K -> ~167 tok/s. Context stays 1M+ in every case (the GDN state).
 
 The launcher (`tenselerate/backends/vllm.py`) builds the `vllm serve` argv and
 enforces the engine's floors **before vLLM starts** — a sub-floor context or an
@@ -58,7 +68,8 @@ never the contract.
 | no-RoPE window | *(none)* | intrinsic to the model config; vLLM manages the hybrid KV itself. We still validate the window against the quality floor/ceiling |
 | two heterogeneous GPUs, no NVLink | `--pipeline-parallel-size 2` | **pipeline**, never tensor-parallel — TP wants ~equal GPUs on a fast link, which this box is not |
 | `--kv-bits 4` | `--kv-cache-dtype fp8` | vLLM has **no int4 KV**; fp8 is its footprint lever. 8→`auto`. The KIVI int4 KV in the research roadmap is not a vLLM feature today |
-| `--spec mtp` | `--speculative-config {qwen3_next_mtp}` | vLLM's built-in Qwen3-Next MTP speculative decode |
+| `--spec mtp` | `--speculative-config {qwen3_next_mtp}` | vLLM's built-in Qwen3-Next MTP speculative decode (default, lossless) |
+| `--spec eagle3 --eagle-model <head>` | `--speculative-config {eagle3, model}` | trained EAGLE-3 draft head - higher acceptance than MTP, still lossless; needs a head (none public for this model yet) |
 
 The one honesty flag: **the CMP 170HX ships with 8 GiB**, which cannot hold the
 15.4 GiB Q4_K_M weights — the 40 GiB figure assumes the memory unlock is applied
