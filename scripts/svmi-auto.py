@@ -88,8 +88,9 @@ MACHINES = {
 DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
 INT8_QUIRK = ("prefer INT8/MMQ for decode; FP16 has no tensor-core acceleration here "
               "(on the 170HX it is not hardware-throttled - A/B '-fa on', arXiv:2505.03782)")
-FMAD_QUIRK = ("170HX FP32 is firmware-throttled ~1/32; build -DCMAKE_CUDA_FLAGS=--fmad=false "
-              "-DCMAKE_CUDA_ARCHITECTURES=80 to restore it (arXiv:2505.03782)")
+FMAD_QUIRK = ("170HX: FULL unlock (d3dx9 fuse-map reset) restores FP32/FP16/tensor cores - "
+              "build normal sm_80 + cuBLAS. Capacity-only unlock instead: build "
+              "-DCMAKE_CUDA_FLAGS=--fmad=false -DCMAKE_CUDA_ARCHITECTURES=80 (arXiv:2505.03782)")
 UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every second, and a "
                 "driver reload drops the card back to its factory 8/10 GB",
                 "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "
@@ -217,8 +218,10 @@ def main() -> int:
         print("build   : cmake --preset cmp170hx-int8 && cmake --build build-cmp170hx-int8 -j")
         print("          (all matmuls on MMQ, no cuBLAS FP16; also cmp90hx-int8, cmp100-210-int8)")
         if any(g.startswith("cmp170hx") for g in gpu_names):
-            print("          170HX: add -DCMAKE_CUDA_FLAGS=--fmad=false -DCMAKE_CUDA_ARCHITECTURES=80")
-            print("          to restore its throttled FP32 (~1/32 -> half; arXiv:2505.03782)")
+            print("          170HX full unlock (d3dx9 fuse-map reset, 2026-07): FP32/FP16/tensor")
+            print("          cores restored -> build NORMAL sm_80 + cuBLAS, -fa on, skip the flags above.")
+            print("          Capacity-only unlock instead: add -DCMAKE_CUDA_FLAGS=--fmad=false")
+            print("          -DCMAKE_CUDA_ARCHITECTURES=80 for its throttled FP32 (arXiv:2505.03782)")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")
