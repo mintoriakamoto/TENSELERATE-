@@ -34,6 +34,8 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | **MTP depth 1 on the real Hermes server** (chat template + reasoning, production sampling and slots) | **33.8 vs 34.4 tok/s - no gain** | llama-server as Hercules uses it | resolved below: the sampling params were fighting the draft |
 | 2026-09-07 | **production server, MTP depth 1, greedy** (`--temp 0`, no repeat penalty) | **46.2 tok/s, draft acceptance 0.881** | llama-server, server log `draft acceptance` | the microbench gain is real on the production server |
 | 2026-09-07 | production server, MTP depth 1, model-card sampling (temp 0.7, repeat-penalty 1.15) | **29.9 tok/s, draft acceptance 0.218** | same server, same head, same flag | **13% below the no-MTP baseline**: a rejected draft is a paid verify column. Suspect 1 confirmed; `-np 1` not needed |
+| 2026-09-07 | single-GPU width test, N=16 streams, `-np 24 -c 393216`, q8_0 KV | **122.4 tok/s aggregate** | llama-server, 170HX only | consistent with the 130-141 MMQ-regime ceiling at 16K ctx; the extra KV depth costs the rest |
+| 2026-09-07 | dual-GPU layer split of the 27B, 170HX + 3060 | OOM on first try; conservative retry (split 78/22, `-np 16 -c 262144`) running | llama-server `CUDA_VISIBLE_DEVICES=0,1` | **prediction, written before the result:** slower per token than the 170HX alone - see "Splitting the 27B across both cards" |
 | 2026-09-07 | greedy MTP depth 1, no reasoning-budget injection, JSON task | valid JSON at ~46 tok/s; **the merge still loops inside `<think>` under pure greedy** | production server | the loop is the merge under greedy, not the budget cap. Temp 0.15 / 0.3 / 0.5 sweep running for the escape point that keeps acceptance |
 
 ## First reading of 33.3 tok/s (superseded)
@@ -360,6 +362,31 @@ same contract Hermes has to honour. `--concurrency N` occupies N slots behind
 distinct long prefixes and reports aggregate and per-stream tok/s;
 `--loop-check` flags a 12-gram repeated 4+ times. Logs: `logs/<experiment>-<ts>.log`
 plus the server's own log (`grep "draft acceptance" logs/*server*.log`).
+
+## Splitting the 27B across both cards - why it cannot be faster
+
+A layer split runs the two cards *in sequence* for every token: the 170HX
+does its layers, ships one hidden state (10 KB) over PCIe Gen2 x4 (~50 us,
+negligible), then the 3060 does its layers. Per-token time is the sum, and
+the 3060 reads its share at 360 GB/s against the 170HX's ~890 GB/s measured:
+
+```
+170HX alone      : 15.5 GB / 890 GB/s              ~ 17.4 ms
+78/22 split      : 0.78 x 17.4 + 0.22 x 15.5/360   ~ 13.6 + 9.5 = 23.1 ms   (-25% per token)
+any split x      : 17.4 (1 - x) + 43 x             - grows with every layer moved
+```
+
+The 3060 has a quarter of the bandwidth, so every layer moved onto it costs
+2.5x what it saved on the 170HX. The split buys VRAM (more slots, more KV),
+never speed, and on a 40 GiB card that holds 4 x 256K already the VRAM is
+not the constraint. The row above states this before the measurement lands;
+if the split measures faster, the sequential-execution model is wrong and
+this section gets rewritten.
+
+What the 3060 is for: a second, small model (scripts/hercules_side_serve.sh)
+running *in parallel* with the main loop, taking Hermes' delegation children
+and compaction off the 27B. Parallel, not sequential, is the only way the
+second card adds throughput.
 
 ## Still to measure
 
