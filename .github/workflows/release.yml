@@ -3,12 +3,11 @@ name: Release
 on:
   push:
     branches: [main]
-    paths: ['tenselerate/**', '.github/workflows/release.yml']
   workflow_dispatch:
 
 jobs:
   release:
-    name: Create main-b<N>-<SHA> release
+    name: Create main-b<N>-<SHA> releases for all commits
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -17,43 +16,48 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get commit count and SHA
-        id: commit
-        run: |
-          COUNT=$(git rev-list --count HEAD)
-          SHA=$(git rev-parse --short HEAD)
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "tag=main-b${COUNT}-${SHA}" >> $GITHUB_OUTPUT
-
-      - name: Check if release already exists
-        id: check
-        run: |
-          TAG="${{ steps.commit.outputs.tag }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Get release notes from commit message
-        id: notes
-        if: steps.check.outputs.exists == 'false'
-        run: |
-          # Get the full commit message
-          COMMIT_MSG=$(git log -1 --pretty=%B)
-          echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo "$COMMIT_MSG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create release
-        if: steps.check.outputs.exists == 'false'
-        uses: actions/create-release@v1
+      - name: Create releases for all commits without one
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.commit.outputs.tag }}
-          release_name: ${{ steps.commit.outputs.tag }}
-          body: ${{ steps.notes.outputs.message }}
-          draft: false
-          prerelease: false
+        run: |
+          #!/bin/bash
+          set -euo pipefail
+
+          # Get list of all commits on main
+          echo "Creating releases for commits on main..."
+
+          COMMITS=$(git rev-list main | head -150)
+
+          for SHA in $COMMITS; do
+            SHORT=$(git rev-parse --short "$SHA")
+            COUNT=$(git rev-list --count "$SHORT^..$SHA" 2>/dev/null || echo "0")
+
+            # Fallback to commit distance from root if the above fails
+            if [ "$COUNT" = "0" ]; then
+              COUNT=$(git rev-list --count "$SHA")
+            fi
+
+            TAG="main-b${COUNT}-${SHORT}"
+
+            # Check if tag already exists
+            if git rev-parse "$TAG" >/dev/null 2>&1; then
+              echo "  ✓ $TAG already exists"
+              continue
+            fi
+
+            # Get commit message
+            MSG=$(git log -1 --pretty=%B "$SHA")
+
+            # Create annotated tag
+            git tag -a "$TAG" "$SHA" -m "$MSG"
+            echo "  + Created tag $TAG"
+
+            # Push the tag
+            if git push origin "$TAG" 2>/dev/null; then
+              echo "    Pushed $TAG"
+            else
+              echo "    Note: Could not push $TAG (may be permission issue)"
+            fi
+          done
+
+          echo "Release tag creation complete."
