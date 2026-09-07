@@ -28,6 +28,10 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | **MTP n-max 1 across output shapes, single stream** | JSON/tool calls **47.5 (+38%)**, code 46.6 (+35%), prose 39.0 (+13%) vs 34.4 | llama-server `--spec-draft-n-max 1` on the -MTP- GGUF | holds on every shape Hermes emits; 8-slot + delegation test running |
 | 2026-09-07 | **MTP depth sweep under `GGML_CUDA_NO_MMVQ=1`**, code, single stream | n-max 1: **30.6** / 2: 40.0 / 3: 32.7 / 4: 31.6 / **5: 46.1** (vs MMVQ 46.6 / 39.7 / 29.2 / 26.3 / 26.8) | llama-server | MMQ loses at width 2, wins from width ~4; both paths peak at ~46.5 |
 | 2026-09-07 | MTP sweep on a build with MMVQ max batch = 2 | peak 46.6 at n-max 5 | rebuilt llama.cpp | same ceiling by a different route |
+| 2026-09-07 | q4_0 vs q8_0 KV at depth, single stream | **21.5 vs 23.5 tok/s (-8%)** | llama-bench | the dequant costs more than the bytes save on the vector attention path; q4_0 only helps fit |
+| 2026-09-07 | `--kv-unified`, single stream | no change | llama-server | a batching detail; matters only with several slots |
+| 2026-09-07 | `reasoning_effort low` | 0% on tok/s; large on time-to-answer | llama-server | fewer tokens, same speed per token |
+| 2026-09-07 | **MTP depth 1 on the real Hermes server** (chat template + reasoning, production sampling and slots) | **33.8 vs 34.4 tok/s - no gain** | llama-server as Hercules uses it | the +13..38% exists only in the microbenchmark; see below |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -123,6 +127,32 @@ per pass at n-max 1 (position 1 plus the bonus token):
 | 1 | 41.5 ms | ~1.9 | 46 tok/s | **46.6** |
 | 2 | 53 ms | ~2.1 | 40 | **39.7** |
 | 5 | 87.5 ms | ~2.3 | 26 | **26.8** |
+
+## MTP depth 1 nets zero on the real server - three suspects, two runs
+
+The microbenchmark says +35%; the production server (Hermes chat template,
+reasoning on, Hermes' sampling, 4-8 slots) says 33.8 vs 34.4. Same head, same
+flag. What differs, in the order I would test:
+
+1. **Sampling.** llama.cpp accepts a draft token only if the target's *sampled*
+   token matches it. The microbench sampled greedily; Hermes sends temperature
+   ~0.7-1.0 with top-p/top-k, so position-1 acceptance falls from ~0.9 toward
+   the sampler's own agreement rate, and at ~1.3 accepted per pass the 41.5 ms
+   pass is a wash. Run: the production server with `--temp 0` (or Hermes
+   `model.temperature: 0.2`) - if the gain returns, sampling is the cause, and
+   low temperature is anyway right for tool-calling turns.
+2. **Width.** With several slots active, each step verifies 2 columns per
+   slot: 4 slots -> width 8 on the dp4a path, ~99 ms per step. MTP on a
+   multi-slot dp4a server is the worst quadrant of the cost model above; it
+   pays only on MMQ (width >= 4 -> `MMVQ_MAX=3`) or with one slot. Run: `-np 1`
+   with the Hermes prompt.
+3. **Thinking text.** Reasoning tokens are prose-shaped (+13% in the
+   microbench, not +38%), and at `low` they are still a large share of the
+   output. Nothing to run; it bounds the upside even when 1 and 2 are fixed.
+
+Until the two runs land, MTP depth 1 stays the default on -MTP- GGUFs
+(measured cost of being wrong: -2%, within noise) but is not counted as a
+production gain.
 
 **The ~64 tok/s prediction for NO_MMVQ + depth 1 was wrong: measured 30.6.**
 The per-column cost model held for the dp4a path and failed for MMQ. Fitting
@@ -263,7 +293,8 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
 - `GGML_CUDA_MMVQ_MAX=3` (the fork's threshold): 4 slots x 256K with MTP depth 1 - predicted to match NO_MMVQ's 70.5 on the step while keeping single-slot turns on the dp4a path
-- 8 slots + MTP depth 1 aggregate (running on the box)
+- production server, MTP depth 1, `--temp 0` and `-np 1` separately (the two runs above)
+- 8 slots + MTP depth 1 aggregate with `MMVQ_MAX=3`
 - stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build
 - `GGML_CUDA_F16=ON` rebuild: pp4096 and tg64 side by side with the current build
 - **262K single stream with `-ctk f16 -ctv f16`** (prediction ~22 tok/s vs 12.4; decides the KV type for deep slots)
