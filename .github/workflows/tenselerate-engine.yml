@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', '.github/workflows/tenselerate-engine.yml']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_serve.sh', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', '.github/workflows/tenselerate-engine.yml']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_serve.sh', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -35,6 +35,11 @@ jobs:
         run: ty check tenselerate/ tests/tenselerate/
       - name: pytest (reference numerics + engine wiring)
         run: PYTHONPATH=. pytest tests/tenselerate/ -q
+      - name: lifecycle scripts (syntax + self-tests + the Hercules launch, dry run)
+        run: |
+          for f in scripts/*.sh .github/actions/*.sh; do bash -n "$f"; done
+          bash scripts/tenselerate-update.sh --self-test
+          PYTHONPATH=. python -m tenselerate serve --backend llamacpp --model /nonexistent.gguf --dry-run
       - name: host int8 GEMM reference test
         run: |
           cmake -S tenselerate/csrc -B build-kernels -DCMAKE_BUILD_TYPE=Release

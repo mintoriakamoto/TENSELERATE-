@@ -9,9 +9,9 @@ jobs:
       pull-requests: write
     runs-on: ubuntu-slim
     steps:
+    # pull_request_target checks out this repo's default branch, so the
+    # labeler config is always the trusted copy from main - not the PR's.
     - uses: actions/checkout@v7
-      with:
-        repository: "ggml-org/llama.cpp"
     - uses: actions/labeler@v7
       with:
         configuration-path: '.github/labeler.yml'

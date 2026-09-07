@@ -12,7 +12,8 @@
 #   scripts/tenselerate-build.sh --cuda       # require CUDA (fail if no nvcc)
 #   scripts/tenselerate-build.sh --kernels    # only the TENSELERATE csrc kernels
 #
-# Honours BUILD_DIR (default ./build) and JOBS (default: nproc).
+# Honours BUILD_DIR (default ./build), JOBS (default: nproc) and CUDA_ARCHS
+# (default "80-real;86-real", the CMP 170HX + RTX 3060 pair).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -64,9 +65,14 @@ fi
 
 # -- 2. the llama.cpp targets (the server + cli) ---------------------------
 say "configuring llama.cpp build ($BUILD_DIR, CUDA=$CUDA)"
+# The supported box is CMP 170HX (sm_80) + RTX 3060 (sm_86); CI and the release
+# build the same pair. Override with CUDA_ARCHS="75-real" etc. for other cards.
+CUDA_ARCHS="${CUDA_ARCHS:-80-real;86-real}"
+ARCH_FLAG=()
+[ "$CUDA" = "ON" ] && ARCH_FLAG=(-DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS")
 cmake -S "$ROOT" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DGGML_CUDA="$CUDA" \
+    -DGGML_CUDA="$CUDA" "${ARCH_FLAG[@]}" \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_EXAMPLES=OFF
 say "building llama-server + llama-cli (-j $JOBS)"

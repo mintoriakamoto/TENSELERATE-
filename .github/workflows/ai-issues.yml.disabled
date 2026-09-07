@@ -1,3 +1,8 @@
+# DISABLED: this job needs a self-hosted runner labelled `opencode`, and none
+# is registered for this repository - the one run it ever had sat queued for
+# 24 h and was cancelled, which shows up as a perpetually pending check on
+# every new issue. Register the runner, then rename this file back to
+# ai-issues.yml to re-enable it.
 name: AI review (issues)
 
 on:
