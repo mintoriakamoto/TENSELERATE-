@@ -95,17 +95,23 @@ UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every seco
                 "driver reload drops the card back to its factory 8/10 GB",
                 "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "
                 "restores gen1 x16 ~4 GB/s) - that is the one-time model load, not per-token"]
+POWER_QUIRK = ("often power-capped below TDP (250W); decode is power-sensitive on a "
+               "bandwidth-bound card, so raise it when the PSU/thermals allow: "
+               "'sudo nvidia-smi -i <N> -pl 200' and bench before/after")
+PREFILL_QUIRK = ("170HX tensor-core MMA is gated to ~1/32 (256-cycle + 4-warp limit), so "
+                 "prefill/GEMM stays weak even unlocked - keep latency-sensitive prefill "
+                 "on a consumer card (e.g. the 3060); decode stays on the 170HX")
 GPU_QUIRKS = {
     "cmp90hx":  [DP4A_QUIRK, INT8_QUIRK,
                  "the 90HX unlock is compute-only - VRAM stays 10 GB, link unchanged"],
-    "cmp170hx": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK,
+    "cmp170hx": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK,
                  "8 GB stock: cmpunlocker restores HBM2e geometry to 64 GB - plan the "
                  "unlocked card with --gpu cmp170hx-64"],
-    "cmp170hx-10g": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK,
+    "cmp170hx-10g": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK,
                      "10 GB stock: cmpunlocker restores HBM2e geometry to 40 GB - plan the "
                      "unlocked card with --gpu cmp170hx-40"],
-    "cmp170hx-64": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
-    "cmp170hx-40": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-64": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-40": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK] + UNLOCK_QUIRK,
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
