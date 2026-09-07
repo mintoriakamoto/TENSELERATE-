@@ -18,7 +18,7 @@ def test_header_and_metadata_roundtrip(tmp_path):
     p = str(tmp_path / "m.gguf")
     meta = {
         "general.architecture": (GGUF_STRING, "qwen3_5"),
-        "general.name": (GGUF_STRING, "ravenx-tiny"),
+        "general.name": (GGUF_STRING, "qwen38-tiny"),
         "qwen3_5.block_count": (GGUF_U32, 64),
         "qwen3_5.full_attention_interval": (GGUF_U32, 4),
         "qwen3_5.attention.head_count_kv": (GGUF_U32, 4),
@@ -121,12 +121,12 @@ def test_maps_to_model_config(tmp_path):
     assert (n_layer, n_full) == (64, 16)     # the real RavenX split
 
 
-def test_config_from_gguf_builds_ravenx_geometry(tmp_path):
+def test_config_from_gguf_builds_qwen38_geometry(tmp_path):
     from tenselerate.config import config_from_gguf
     p = str(tmp_path / "full.gguf")
     meta = {
         "general.architecture": (GGUF_STRING, "qwen3_5"),
-        "general.name": (GGUF_STRING, "ravenx-from-gguf"),
+        "general.name": (GGUF_STRING, "qwen38-from-gguf"),
         "qwen3_5.block_count": (GGUF_U32, 64),
         "qwen3_5.embedding_length": (GGUF_U32, 5120),
         "qwen3_5.attention.head_count": (GGUF_U32, 24),

@@ -15,13 +15,13 @@ from tenselerate.backends.vllm import (
     vllm_serve_command,
 )
 from tenselerate.config import (
-    MIN_CONTEXT_TOKENS, RAVENX_27B, ContextFloorError, QualityFloorError,
+    MIN_CONTEXT_TOKENS, QWEN38_27B, ContextFloorError, QualityFloorError,
     RopeScalingRequired,
 )
 
 
 def argv(ctx: int = MIN_CONTEXT_TOKENS, **kw) -> list[str]:
-    return build_vllm_serve_argv(RAVENX_27B, ctx=ctx, **kw)
+    return build_vllm_serve_argv(QWEN38_27B, ctx=ctx, **kw)
 
 
 def test_serves_the_one_model_via_vllm():
@@ -65,9 +65,9 @@ def test_eagle3_needs_a_draft_head():
 
 
 def test_eagle3_with_a_head_emits_the_config():
-    a = argv(spec="eagle3", eagle_model="some-org/ravenx-eagle3")
+    a = argv(spec="eagle3", eagle_model="some-org/qwen38-eagle3")
     cfg = a[a.index("--speculative-config") + 1]
-    assert "eagle3" in cfg and "some-org/ravenx-eagle3" in cfg
+    assert "eagle3" in cfg and "some-org/qwen38-eagle3" in cfg
 
 
 def test_recommended_ampere_defaults():
@@ -83,13 +83,13 @@ def test_context_floor_is_enforced_before_vllm_starts():
 
 
 def test_window_ceiling_is_enforced():
-    over = dataclasses.replace(RAVENX_27B, attention_window=300_000)
+    over = dataclasses.replace(QWEN38_27B, attention_window=300_000)
     with pytest.raises(RopeScalingRequired):
         build_vllm_serve_argv(over, ctx=MIN_CONTEXT_TOKENS)
 
 
 def test_sub_floor_window_is_refused():
-    narrow = dataclasses.replace(RAVENX_27B, attention_window=16_384)
+    narrow = dataclasses.replace(QWEN38_27B, attention_window=16_384)
     with pytest.raises(QualityFloorError):
         build_vllm_serve_argv(narrow, ctx=MIN_CONTEXT_TOKENS)
 
@@ -105,5 +105,5 @@ def test_bad_kv_bits_rejected():
 
 
 def test_command_is_a_shell_line():
-    line = vllm_serve_command(RAVENX_27B, MIN_CONTEXT_TOKENS, spec="mtp")
+    line = vllm_serve_command(QWEN38_27B, MIN_CONTEXT_TOKENS, spec="mtp")
     assert line.startswith("vllm serve ") and "--pipeline-parallel-size 2" in line

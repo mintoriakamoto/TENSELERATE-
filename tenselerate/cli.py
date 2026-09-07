@@ -30,7 +30,7 @@ import dataclasses
 
 from tenselerate.config import (
     CONFIGS, KV_BITS_PER_ELEM, MAX_ATTENTION_WINDOW, MIN_ATTENTION_WINDOW,
-    MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS, MTP_SPECULATIVE_SPEEDUP, RAVENX_27B,
+    MIN_CONTEXT_TOKENS, MIN_DECODE_TOKS, MTP_SPECULATIVE_SPEEDUP, QWEN38_27B,
     TINY, ContextFloorError, QualityFloorError, RopeScalingRequired,
     validate_window,
 )
@@ -367,7 +367,7 @@ def _serve_vllm(args: argparse.Namespace) -> int:
     from tenselerate.backends.vllm import build_vllm_serve_argv
     try:
         argv = build_vllm_serve_argv(
-            RAVENX_27B, ctx=args.ctx, host=args.host, port=args.port,
+            QWEN38_27B, ctx=args.ctx, host=args.host, port=args.port,
             kv_bits=args.kv_bits, spec=args.spec, eagle_model=args.eagle_model)
     except (ContextFloorError, QualityFloorError, RopeScalingRequired,
             ValueError) as e:
@@ -463,11 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_up.set_defaults(func=cmd_update)
 
     p_info = sub.add_parser("info", help="geometry, context floor, KV sizing")
-    p_info.add_argument("--config", default=RAVENX_27B.name, choices=sorted(CONFIGS))
+    p_info.add_argument("--config", default=QWEN38_27B.name, choices=sorted(CONFIGS))
     p_info.set_defaults(func=cmd_info)
 
     p_plan = sub.add_parser("plan", help="what this machine does at a context")
-    p_plan.add_argument("--config", default=RAVENX_27B.name, choices=sorted(CONFIGS))
+    p_plan.add_argument("--config", default=QWEN38_27B.name, choices=sorted(CONFIGS))
     p_plan.add_argument("--machine", default="cmp170hx+3060",
                         choices=sorted(MACHINE_HW))
     p_plan.add_argument("--ctx", type=int, default=MIN_CONTEXT_TOKENS,

@@ -10,16 +10,16 @@ import numpy as np
 import pytest
 
 from tenselerate.config import (
-    RAVENX_27B, TINY, SUPPORTED_ARCH, UnsupportedModelError,
+    QWEN38_27B, TINY, SUPPORTED_ARCH, UnsupportedModelError,
     config_from_gguf, validate_model,
 )
 from tenselerate.gguf.reader import GGUF_STRING, GGUF_U32, GGUFReader
 from tenselerate.gguf.writer import write_gguf
 
 # the exact published geometry, as GGUF metadata
-RAVENX_META = {
+QWEN38_META = {
     "general.architecture": (GGUF_STRING, SUPPORTED_ARCH),
-    "general.name": (GGUF_STRING, "ravenx-chaos-agent-27b"),
+    "general.name": (GGUF_STRING, "qwen38-chaos-agent-27b"),
     "qwen3_5.block_count": (GGUF_U32, 64),
     "qwen3_5.embedding_length": (GGUF_U32, 5120),
     "qwen3_5.attention.head_count": (GGUF_U32, 24),
@@ -37,13 +37,13 @@ def _reader(tmp_path, meta):
     return GGUFReader(p)
 
 
-def test_exact_ravenx_geometry_is_accepted(tmp_path):
-    cfg = config_from_gguf(_reader(tmp_path, RAVENX_META))
+def test_exact_qwen38_geometry_is_accepted(tmp_path):
+    cfg = config_from_gguf(_reader(tmp_path, QWEN38_META))
     assert cfg.n_layer == 64 and cfg.n_full_attention_layers == 16
 
 
 def test_non_qwen_arch_is_refused(tmp_path):
-    meta = dict(RAVENX_META)
+    meta = dict(QWEN38_META)
     meta["general.architecture"] = (GGUF_STRING, "llama")
     with pytest.raises(UnsupportedModelError, match="unsupported architecture"):
         config_from_gguf(_reader(tmp_path, meta))
@@ -53,7 +53,7 @@ def test_other_qwen3_archs_are_refused(tmp_path):
     # the lock is exact - a plain qwen3 file no longer slips through the
     # old startswith("qwen3") check
     for arch in ("qwen3", "qwen3moe", "qwen3_5moe"):
-        meta = dict(RAVENX_META)
+        meta = dict(QWEN38_META)
         meta["general.architecture"] = (GGUF_STRING, arch)
         with pytest.raises(UnsupportedModelError):
             config_from_gguf(_reader(tmp_path, meta))
@@ -62,21 +62,21 @@ def test_other_qwen3_archs_are_refused(tmp_path):
 def test_right_arch_wrong_geometry_is_refused(tmp_path):
     # a qwen3_5 file that is not the 27B (e.g. a smaller sibling) is refused,
     # and the error names the mismatched field
-    meta = dict(RAVENX_META)
+    meta = dict(QWEN38_META)
     meta["qwen3_5.block_count"] = (GGUF_U32, 48)
     with pytest.raises(UnsupportedModelError, match="n_layer=48"):
         config_from_gguf(_reader(tmp_path, meta))
 
 
 def test_wrong_hidden_size_is_refused(tmp_path):
-    meta = dict(RAVENX_META)
+    meta = dict(QWEN38_META)
     meta["qwen3_5.embedding_length"] = (GGUF_U32, 4096)
     with pytest.raises(UnsupportedModelError, match="hidden_size=4096"):
         config_from_gguf(_reader(tmp_path, meta))
 
 
 def test_validate_model_passes_the_published_config():
-    assert validate_model(RAVENX_27B) is RAVENX_27B
+    assert validate_model(QWEN38_27B) is QWEN38_27B
 
 
 def test_tiny_is_not_a_loadable_model():

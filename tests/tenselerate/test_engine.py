@@ -9,13 +9,13 @@ from dataclasses import replace
 
 import numpy as np
 
-from tenselerate.config import RAVENX_27B, TINY
+from tenselerate.config import QWEN38_27B, TINY
 from tenselerate.engine.generation import Generator, SamplingParams
 from tenselerate.reference.model import ReferenceModel
 
 
 def test_config_layer_schedule_matches_published_geometry():
-    c = RAVENX_27B
+    c = QWEN38_27B
     assert c.n_full_attention_layers == 16
     assert c.n_linear_layers == 48
     assert c.is_full_attention(3) and not c.is_full_attention(2)
