@@ -20,9 +20,11 @@ draft depth 1 (`--mtp-draft 1`, +35% measured on this merge; deeper loses),
 needs from an OpenAI-compatible server - `--jinja` (without it llama-server
 ignores `tools` and the reasoning_effort template kwarg), `--reasoning-format
 deepseek`, `--no-context-shift`, `--alias tenselerate`. `--dry-run` prints the
-command; `--no-mmvq` sets `GGML_CUDA_NO_MMVQ=1`; `--mmvq-max 1` sets the fork's
-`GGML_CUDA_MMVQ_MAX=1` (batch-1 decode stays on the dp4a path, draft
-verification goes to the tensor cores).
+command; `--mmvq-max 3` sets the fork's
+`GGML_CUDA_MMVQ_MAX=3`: single-slot turns and depth-1 verification stay on the
+dp4a path (which wins below width ~4), four-slot steps go to the tensor cores
+(+19% measured). `--no-mmvq` (all widths to MMQ) measured -34% on single-slot
+MTP - do not use it for one operator.
 Sizing and the slot table: `docs/rig-cmp170hx-3060.md`, "Serving Hercules".
 
 ## Hermes side (`~/.hermes/config.yaml`)

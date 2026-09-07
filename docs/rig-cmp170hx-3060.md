@@ -197,9 +197,10 @@ and reads it once. Predicted ~22 tok/s at 262K with `--kv f16` (verify), at
 long session, or four q8_0 slots that each slow to ~12 tok/s when deep.
 `--kv f16` is a backend option already.
 
-So: `GGML_CUDA_NO_MMVQ=1` is confirmed at 4 x 256K (+19%); pass `--no-mmvq`
-(or `NO_MMVQ=1` to the script) for multi-slot serving now, and it becomes the
-default once N=1 shows MMQ at M=1 is no slower than the vector path. Then
+So: `GGML_CUDA_NO_MMVQ=1` is confirmed at 4 x 256K (+19%) but measured -34%
+on single-slot MTP depth 1 (MMQ has a ~55 ms floor at small width; dp4a wins
+below width ~4). Use the fork's threshold instead: `--mmvq-max 3`
+(`MMVQ_MAX=3`) - dp4a for widths 1-3, MMQ from 4 - pending its measurement. Then
 `-np 4 --kv-unified` for one operator with default delegation. At the full window the KV read is half the step, so
 deep-context aggregate is bytes-bound after that, not compute-bound. No MTP on
 the DavidAU merge (7-11% acceptance, measured 14.9 tok/s vs 33.5 plain).
@@ -258,9 +259,12 @@ code decode) shows the head is shallow, not broken: **n-max 1 = 46.6 tok/s
 (+35%)**, n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%. The merge kept the
 head's position-1 prediction and broke positions 2+; every extra drafted
 token is a verified column that costs ~11.5 ms on the dp4a path (~5.6 on MMQ)
-and is rejected. Serve with `--mtp-draft 1` (`MTP=1` for the script); with
-`GGML_CUDA_NO_MMVQ=1` the same pass predicts ~64 tok/s single stream. Routes
-to a deeper head, cheapest first: an n-gram / prompt-lookup drafter (lossless,
+and is rejected. Serve with `--mtp-draft 1` (`MTP=1` for the script) on the
+default dp4a path: NO_MMVQ makes depth 1 *slower* (30.6) because the MMQ
+kernel has a ~55 ms floor at small width; both paths peak at ~46.5 with this
+head. For multi-slot serving the fork's `GGML_CUDA_MMVQ_MAX=3` (measure) keeps
+single-slot turns on dp4a and sends 4-slot steps to MMQ, where NO_MMVQ
+measured +19%. Routes to a deeper head, cheapest first: an n-gram / prompt-lookup drafter (lossless,
 helps only on copied spans - which agent traffic has a lot of); re-aligning the
 MTP head by distilling it against the merged trunk (one small layer); or the
 base Qwen3.8 model, whose head is aligned - decided by a tokens-to-answer A/B,

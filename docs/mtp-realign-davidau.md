@@ -7,31 +7,41 @@ measured **+35%**, 46.6 vs 34.4 tok/s on code), but positions 2+ do not
 (n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%). MTP step k>1 feeds the
 head its own previous hidden state, which was trained against base-trunk
 statistics; the error compounds with depth. Retraining restores depth: the
-goal is n-max 3-4 at ~3 accepted tokens, which on the MMQ path is ~90 tok/s
-against today's ~64 predicted at depth 1. Everything below is how to make a head that
+goal is the healthy acceptance curve, worth ~70 tok/s against today's 46.6
+(table below); the MMQ kernel's small-width floor is what caps it there. Everything below is how to make a head that
 agrees with *this* trunk, and why it pays on this card only together with
 `GGML_CUDA_NO_MMVQ=1`.
 
 ## Why speculation "died" here, in numbers
 
-A speculative step verifies 1 + n tokens of one sequence in a single pass. On
-this card the pass costs roughly `T_w + m * c`: the weight read (~18.5 ms) plus
-a per-token-column cost `c` that depends on the matmul path - **~11.5 ms on the
-batch<=8 dp4a vector path (MMVQ), ~5.6 ms on the tensor-core MMQ path**
-(`GGML_CUDA_NO_MMVQ=1`). Plain decode is ~30 ms/token. So a 4-draft pass
-(m = 5) costs:
+A speculative step verifies 1 + n tokens of one sequence in a single pass.
+Measured pass costs on this card (single sequence, width m = 1 + n):
 
-| path | verify pass | break-even accepted tokens | with a matched head (3.3 accepted) |
-| --- | --- | --- | --- |
-| MMVQ (default today) | 18.5 + 5 x 11.5 = **76 ms** | 2.5 | 1.3x |
-| MMQ (`NO_MMVQ=1`) | 18.5 + 5 x 5.6 = **46.5 ms** | 1.55 | **2.1x** |
-| RTX 5090 (c ~ 1.5 ms) | ~30 ms | 1.25 | ~3x (the Ferrox +137%) |
+```
+dp4a path (default, MMVQ):  pass(m) ~ 18.5 + 11.5 (m-1) ms   linear in width
+tensor path (NO_MMVQ, MMQ): pass(m) ~ 55 ms                  flat from m = 2 to ~16
+```
 
-That is the whole story of today's speculation results: MTP at 7-11% and
-n-gram on prose (~0 acceptance) paid a 76 ms verify pass for ~1 token, so they
-halved throughput. Speculation is not dead on the 170HX; it is dead on the
-**dp4a path with an unmatched head**. Fix both and the same physics gives ~2x.
-Measure `c` directly first: one sequence, 6-token batch, MMVQ vs NO_MMVQ.
+Throughput is accepted tokens per pass divided by pass time. With this head
+(~1.9 accepted at n-max 1, ~2.6 at n-max 5):
+
+| config | pass | accepted | tok/s | measured |
+| --- | --- | --- | --- | --- |
+| dp4a, n-max 1 | 41.5 ms | 1.9 | 46 | **46.6** |
+| dp4a, n-max 5 | 76 ms | 2.3-2.6 | 30-34 | 26.8 |
+| MMQ, n-max 1 | ~62 ms | 1.9 | 31 | **30.6** |
+| MMQ, n-max 5 | ~56 ms | 2.6 | 46 | **46.1** |
+
+That is why MTP at n-max 5 on dp4a "halved" throughput and why routing cannot
+beat 46.6 with this head: the two paths reach the same ceiling by different
+routes. The only thing that moves it is accepted tokens per pass - the head.
+
+| head | best config | tok/s |
+| --- | --- | --- |
+| today (position 1 only) | dp4a, n-max 1 | 46.6 |
+| retrained to the healthy curve (0.86 / 0.77 / 0.67 / 0.59 / 0.52) | dp4a n-max 3: 3.1 / 53 ms | ~58 |
+| same head | MMQ n-max 5: 3.9 / 56 ms | **~70** |
+| same head + an MMQ kernel efficient at small width (pass ~25 ms) | n-max 5 | ~85-95 |
 
 ## What the head is (from vLLM `qwen3_next_mtp.py` and this repo's GGUF names)
 

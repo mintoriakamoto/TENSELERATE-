@@ -26,6 +26,8 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | n-gram speculation, single stream | baseline 34.4 / `ngram-cache` **16.9** / `ngram-mod` 34.4 tok/s | llama-server | halved or flat: near-zero acceptance on prose and the verify batch is paid in full (see docs/mtp-realign-davidau.md) |
 | 2026-09-07 | **MTP draft-depth sweep, code decode, single stream** | baseline 34.4 / **n-max 1: 46.6 (+35%)** / n-max 2: 39.7 (+15%) / n-max 3: 29.2 (-15%) / n-max 5: 26.8 (-22%) | llama-server `--spec-type draft-mtp` on the -MTP- GGUF | **the head is shallow, not broken**: position 1 accepts reliably, positions 2+ do not. Every earlier "MTP loses" number was n-max 5. Prose/JSON verification running |
 | 2026-09-07 | **MTP n-max 1 across output shapes, single stream** | JSON/tool calls **47.5 (+38%)**, code 46.6 (+35%), prose 39.0 (+13%) vs 34.4 | llama-server `--spec-draft-n-max 1` on the -MTP- GGUF | holds on every shape Hermes emits; 8-slot + delegation test running |
+| 2026-09-07 | **MTP depth sweep under `GGML_CUDA_NO_MMVQ=1`**, code, single stream | n-max 1: **30.6** / 2: 40.0 / 3: 32.7 / 4: 31.6 / **5: 46.1** (vs MMVQ 46.6 / 39.7 / 29.2 / 26.3 / 26.8) | llama-server | MMQ loses at width 2, wins from width ~4; both paths peak at ~46.5 |
+| 2026-09-07 | MTP sweep on a build with MMVQ max batch = 2 | peak 46.6 at n-max 5 | rebuilt llama.cpp | same ceiling by a different route |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -122,14 +124,39 @@ per pass at n-max 1 (position 1 plus the bonus token):
 | 2 | 53 ms | ~2.1 | 40 | **39.7** |
 | 5 | 87.5 ms | ~2.3 | 26 | **26.8** |
 
-The same model on the MMQ path (`GGML_CUDA_NO_MMVQ=1`, c ~ 5.6): n-max 1 ->
-29.7 ms per pass -> **~64 tok/s predicted single stream**, nearly 2x the 33.5
-baseline, from two flags. That is the next measurement. A finer knob now
-exists in the fork: `GGML_CUDA_MMVQ_MAX=N` keeps batches up to N on the dp4a
-path and routes wider ones to MMQ - so `MMVQ_MAX=1` leaves single-token
-decode where it is and moves only the verification pass (2 columns at
-n-max 1) to the tensor cores, whichever path wins at width 1. hanxiao's L4
-notes report +16% from the same routing at verification width 3+.
+**The ~64 tok/s prediction for NO_MMVQ + depth 1 was wrong: measured 30.6.**
+The per-column cost model held for the dp4a path and failed for MMQ. Fitting
+all the single-sequence points (accepted per pass ~1.9 at n-max 1, ~2.6 at
+n-max 5):
+
+```
+MMVQ (dp4a):  pass(m) ~ 18.5 + 11.5 (m-1) ms   linear in the verified width m
+MMQ (tensor): pass(m) ~ 55 ms, roughly flat from m = 2 to m ~ 16
+```
+
+MMQ is not "5.6 ms per column"; it has a ~55 ms floor at small width on this
+card - the int8 MMA tiles are sized for wide batches and the kernel is
+dequant/tile-bound, not bandwidth-bound, when only a few columns are live.
+The width sweep's "5.6 ms per sequence" was that floor amortized over 16
+sequences. Consequences:
+
+- Crossover at m ~ 3-4: the dp4a path wins for widths 1-3, MMQ from ~4 up.
+  That is exactly why `NO_MMVQ=1` gave +19% at 4 x 256K (width 4) and -34%
+  at n-max 1 (width 2), and why a build with MMVQ capped at width 2 peaks at
+  n-max 5 (width 6, on MMQ) at the same 46.6.
+- **The right value for the fork's new `GGML_CUDA_MMVQ_MAX` is ~3**, not 1:
+  single-slot decode and depth-1 verification stay on dp4a, four-slot steps
+  and any wider verification go to MMQ. To be measured; the two extremes are.
+- Single-stream ceiling with this head: max over paths of accepted / pass =
+  1.9 / 41.5 ms (dp4a, n-max 1) = 46.6, or 2.6 / 56 ms (MMQ, n-max 5) = 46.1.
+  Same number by two routes, as the other session found. Nothing in routing
+  moves it further; only more accepted tokens per pass do.
+- Retrained head (healthy curve 0.86/0.77/0.67 by position): ~3.1 accepted
+  at n-max 3 -> 3.1 / 53 ms (dp4a) = ~58 tok/s, or ~3.9 at n-max 5 -> 3.9 /
+  56 ms (MMQ) = **~70 tok/s**. That replaces the ~90 written earlier.
+- Past that, the kernel lever is MMQ's small-width floor: a tile shape (or
+  stream-K split) efficient at 2-8 columns would put verification at
+  ~18.5 + small, and the same head would give ~85-95.
 
 Calibration for the retrain (KGP Talkie, base Qwen3.8 UD-Q4_K_XL on a 5090,
 45 configs): acceptance by draft position 0.86 / 0.77 / 0.67 / 0.59 / 0.52
@@ -235,8 +262,8 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
-- `GGML_CUDA_NO_MMVQ=1` at **N=1** (predicted ~41 tok/s plain; **~64 with `--mtp-draft 1`**)
-- MTP n-max 1 on prose and JSON (running) - if it holds, `MTP=1` becomes the launch default
+- `GGML_CUDA_MMVQ_MAX=3` (the fork's threshold): 4 slots x 256K with MTP depth 1 - predicted to match NO_MMVQ's 70.5 on the step while keeping single-slot turns on the dp4a path
+- 8 slots + MTP depth 1 aggregate (running on the box)
 - stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build
 - `GGML_CUDA_F16=ON` rebuild: pp4096 and tg64 side by side with the current build
 - **262K single stream with `-ctk f16 -ctv f16`** (prediction ~22 tok/s vs 12.4; decides the KV type for deep slots)
