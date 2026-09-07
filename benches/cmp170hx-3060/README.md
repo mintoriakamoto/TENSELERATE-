@@ -20,6 +20,8 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | decode, MTP n-max 5, prose | **14.9 tok/s** | llama-server | MTP is SLOWER than plain (33.5): 7-11% acceptance means the verify pass is pure cost. Drop it. |
 | 2026-09-07 | width sweep, short prompts, N=1,2,4,8,16 slots x 16K ctx | **141.5 tok/s aggregate at N=16** | `-np N`, q4_0 KV | step time DROPS from N=8 to N=16; the earlier 87 tok/s ceiling below is disproven |
 | 2026-09-07 | 4 x 256K, q4_0 KV | 59 tok/s aggregate | llama-server `-np 4` | what fits at the full window today (MMVQ regime) |
+| 2026-09-07 | **4 x 256K, q4_0 KV, `GGML_CUDA_NO_MMVQ=1`** | **70.5 tok/s aggregate** | llama-server `-np 4` | **+19% over 59** at the config that fits; model predicted ~63 |
+| 2026-09-07 | 16 x 16K, `GGML_CUDA_NO_MMVQ=1` | ~130 tok/s (reproducible) | `-np 16` | baseline 100-141 was noisy; same MMQ path either way, so no change expected and none seen |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -104,10 +106,26 @@ is bytes (provable page skipping in the reference, q4_0 K fidelity A/B), not
 compute. And the aggregate ceiling in the MMQ regime is ~1/5.6 ms = ~180 tok/s
 from per-sequence work, before any GDN batching.
 
+**Confirmed at the config that matters (4 x 256K): 59 -> 70.5 tok/s with
+`GGML_CUDA_NO_MMVQ=1`.** Step time 56.7 ms against a predicted 62.5 - the KV
+read at depth is a little cheaper than the 5.4 ms/slot assumed, which the
+depth sweep now running will pin. At N=16 the flag changes nothing (both paths
+already MMQ), as expected. Still open: **N=1 with NO_MMVQ** - a single active
+slot is the common state of an agent loop between subagent bursts, and MMQ at
+M=1 has to be no slower than MMVQ before the flag becomes the default.
+
+Depth-sweep predictions (single stream, llama-bench decode after a deep
+prefill; the weight read is ~18.5 ms so the KV term is what moves):
+q4_0 KV 34->18 KiB/token: 131K adds ~2.7 ms -> ~30 tok/s; 262K adds ~5.4 ms
+-> ~28 tok/s. q8_0: 262K adds ~10.8 ms -> ~24 tok/s. If measured decode at
+262K lands near 28-30 the bytes model holds and page-skip / q4_0 K are worth
+exactly the fraction of that KV term they remove.
+
 ## Still to measure
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
-- `GGML_CUDA_NO_MMVQ=1` at N=1, 2, 4 short ctx and 4 x 256K (the table above; running)
+- `GGML_CUDA_NO_MMVQ=1` at **N=1** (decides whether the flag is the default; N=4 x 256K done: 70.5)
+- depth sweep: single-stream decode at 131K and 262K filled KV (running; predictions above)
 - per-op profile of one MMQ-regime step (`nsys profile`, llama-bench `-n 16`) to
   split the remaining ~5.6 ms/sequence between GDN, attention and GEMM
 - tokens-to-answer, DavidAU merge vs base Qwen3.8 (decides the model)

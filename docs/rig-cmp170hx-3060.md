@@ -180,13 +180,14 @@ full 256K window at q4_0 (10.8 at q8_0).
 | --- | --- | --- |
 | 1 | 33 tok/s | ~41 if MMQ at M=1 is not slower |
 | 2 | 48 (measured) | ~67 |
-| 4 | 62 short / 59 at 4 x 256K (measured) | ~97 short / ~63 at 4 x 256K |
+| 4 | 62 short / 59 at 4 x 256K (measured) | ~97 short / **70.5 at 4 x 256K (measured)** |
 | 8 | 72 | ~125 |
 | 16 x 16K | 141.5 (measured) | same |
 
-So: force MMQ (`GGML_CUDA_NO_MMVQ=1` in the server environment) once the
-N=1/2/4 runs confirm it; then `-np 4 --kv-unified` for one operator with
-default delegation. At the full window the KV read is half the step, so
+So: `GGML_CUDA_NO_MMVQ=1` is confirmed at 4 x 256K (+19%); pass `--no-mmvq`
+(or `NO_MMVQ=1` to the script) for multi-slot serving now, and it becomes the
+default once N=1 shows MMQ at M=1 is no slower than the vector path. Then
+`-np 4 --kv-unified` for one operator with default delegation. At the full window the KV read is half the step, so
 deep-context aggregate is bytes-bound after that, not compute-bound. No MTP on
 the DavidAU merge (7-11% acceptance, measured 14.9 tok/s vs 33.5 plain).
 `reasoning_effort` (fewer tokens) still outranks any slot count for one operator.
