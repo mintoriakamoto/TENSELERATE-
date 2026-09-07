@@ -662,6 +662,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--eagle-model", default=None,
                        help="vllm backend: EAGLE-3 draft-head repo/path "
                             "(required when --spec eagle3)")
+    p_srv.add_argument("--int8-attention", action="store_true",
+                       help="vllm backend: enable INT8+dp4a attention optimization "
+                            "for CMP 170HX deep-context workloads (~2-3x speedup)")
     p_srv.set_defaults(func=cmd_serve)
 
     return ap
