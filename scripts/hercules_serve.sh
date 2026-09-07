@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cooklabs: llama-server on 127.0.0.1:8080 as the Hercules model provider.
+# Hercules: llama-server on 127.0.0.1:8080 as the Hercules model provider.
 #
 # Shaped by what was measured on the raven-9950x box (benches/cmp170hx-3060/):
 #   * one operator = one sequential main loop + up to 3 parallel subagents
@@ -13,7 +13,7 @@
 #     prompt-cache hit rate is the latency lever - keep slots sticky and the
 #     pool large enough that Hercules' 50% auto-compression fires rarely
 #
-# Usage: bash scripts/cooklabs_serve.sh MODEL.gguf
+# Usage: bash scripts/hercules_serve.sh MODEL.gguf
 # Env overrides: NP (slots, 4) CTX (pool tokens, 524288) KV (q8_0) PORT (8080)
 #                REASONING (low) NO_MMVQ (unset; set to 1 once the N=1/2/4
 #                GGML_CUDA_NO_MMVQ runs confirm the tensor-core path wins)

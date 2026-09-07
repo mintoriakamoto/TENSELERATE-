@@ -1,12 +1,12 @@
-# Cooklabs — TENSELERATE
+# Hercules — TENSELERATE
 
 This tree is llama.cpp **plus** SVMI / stream-weights / INT8 / CMP-aware planners.
-Product name: TENSELERATE. Company map: https://github.com/mintoriakamoto/Cooklabs
+Product name: TENSELERATE.
 
 Hercules consumes this via OpenAI-compat:
 
 ```bash
-bash scripts/cooklabs_serve.sh MODEL.gguf     # measured config for the 170HX + 3060 box
+bash scripts/hercules_serve.sh MODEL.gguf     # measured config for the 170HX + 3060 box
 # then on the agent box:
 hercules config set model.provider custom
 hercules config set model.base_url http://127.0.0.1:8080/v1
