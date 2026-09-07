@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Create main-b<N>-<SHA> release for HEAD
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create release tag and GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          #!/bin/bash
+          set -e
+
+          # Get current commit info
+          SHA=$(git rev-parse --short HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          COUNT=$(git rev-list --count HEAD)
+          TAG="main-b${COUNT}-${SHA}"
+          MSG=$(git log -1 --pretty=%B)
+
+          echo "Creating release: $TAG"
+          echo "SHA: $FULL_SHA"
+          echo "Message: $MSG"
+
+          # Check if tag already exists in GitHub
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists locally, skipping"
+            exit 0
+          fi
+
+          # Check via GitHub API if release exists
+          RELEASE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+            || echo '{}')
+
+          if echo "$RELEASE" | grep -q '"id"'; then
+            echo "Release already exists on GitHub, skipping"
+            exit 0
+          fi
+
+          # Create the release via GitHub API
+          curl -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"tag_name\": \"$TAG\", \"target_commitish\": \"$FULL_SHA\", \"name\": \"$TAG\", \"body\": $(echo "$MSG" | jq -Rs .), \"draft\": false, \"prerelease\": false}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases"
+
+          echo "Release created: $TAG"

@@ -9,7 +9,7 @@ import dataclasses
 
 import pytest
 
-from tenselerate.config import MIN_CONTEXT_TOKENS, RAVENX_27B
+from tenselerate.config import MIN_CONTEXT_TOKENS, QWEN38_27B
 from tenselerate.engine.kvpool import KVBlockPool, OutOfBlocks
 from tenselerate.engine.scheduler import Scheduler, SeqStatus
 
@@ -37,17 +37,17 @@ def test_pool_refuses_over_allocation_instead_of_overcommitting():
 
 
 def test_pool_sized_from_a_real_vram_budget():
-    kv_per_tok = RAVENX_27B.kv_bytes_per_token()      # 34 KiB
-    budget = kv_per_tok * RAVENX_27B.resident_kv_tokens
+    kv_per_tok = QWEN38_27B.kv_bytes_per_token()      # 34 KiB
+    budget = kv_per_tok * QWEN38_27B.resident_kv_tokens
     p = KVBlockPool.from_budget(budget, kv_per_tok, block_tokens=256)
     # a budget of exactly one resident set (window + sinks) holds one, within
     # the one partial block that ceiling division rounds up
-    assert abs(p.n_blocks - p.blocks_for_tokens(RAVENX_27B.resident_kv_tokens)) <= 1
+    assert abs(p.n_blocks - p.blocks_for_tokens(QWEN38_27B.resident_kv_tokens)) <= 1
 
 
 def test_pool_rejects_a_budget_too_small_for_one_block():
     with pytest.raises(ValueError):
-        KVBlockPool.from_budget(1.0, RAVENX_27B.kv_bytes_per_token(), 256)
+        KVBlockPool.from_budget(1.0, QWEN38_27B.kv_bytes_per_token(), 256)
 
 
 def test_blocks_for_tokens_rounds_up():
@@ -59,7 +59,7 @@ def test_blocks_for_tokens_rounds_up():
 
 # ---- the scheduler -------------------------------------------------------
 def _sched(kv_gib=47.0, window=131_072):
-    cfg = dataclasses.replace(RAVENX_27B, attention_window=window)
+    cfg = dataclasses.replace(QWEN38_27B, attention_window=window)
     return Scheduler(cfg, kv_budget_gib=kv_gib)
 
 
@@ -170,7 +170,7 @@ def test_step_returns_the_effective_batch_size():
 
 def test_deadlock_is_raised_not_hung():
     """A sequence needing more than the pool can ever hold must not spin."""
-    cfg = dataclasses.replace(RAVENX_27B, attention_window=131_072)
+    cfg = dataclasses.replace(QWEN38_27B, attention_window=131_072)
     s = Scheduler(cfg, kv_budget_gib=4.25)     # room for exactly one sequence
     s.blocks_per_seq = s.pool.n_blocks + 1     # force un-admittable work
     s.submit(prompt_len=100, max_new_tokens=1)

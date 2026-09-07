@@ -10,7 +10,7 @@ assumes it. Loading anything else is refused, not degraded — `config_from_gguf
 raises `UnsupportedModelError` for any file whose architecture is not `qwen3_5`
 or whose geometry differs from `QWEN38_27B` in any field.
 
-`RAVENX_27B` mirrors the published config.json exactly; `TINY` is a smoke-scale
+`QWEN38_27B` mirrors the published config.json exactly; `TINY` is a smoke-scale
 stand-in with the same *structure* (same full-attention period, same
 partial-rotary factor) used by the tests and the dev server so the whole
 pipeline runs end to end without the 15.7 GB weights. TINY is not a second
@@ -247,7 +247,7 @@ class ModelConfig:
 
 # Canonical geometry: Qwen3.8-27B (256K context, 16-of-64 attention split, GDN hybrid).
 # This geometry is used for all Qwen3.8-27B models served by TENSELERATE.
-RAVENX_27B = ModelConfig(
+QWEN38_27B = ModelConfig(
     name="qwen38-27b",
     n_layer=64,
     hidden_size=5120,
@@ -290,7 +290,7 @@ TINY = ModelConfig(
     mtp_num_layers=1,
 )
 
-CONFIGS = {c.name: c for c in (RAVENX_27B, TINY)}
+CONFIGS = {c.name: c for c in (QWEN38_27B, TINY)}
 
 
 # The fields that identify Qwen3.8-27B. A file matching all of these IS the
@@ -305,13 +305,13 @@ _IDENTITY_FIELDS = (
 
 def validate_model(cfg: ModelConfig) -> ModelConfig:
     """
-    Enforce the single-model lock: cfg must match RAVENX_27B in every identity
+    Enforce the single-model lock: cfg must match QWEN38_27B in every identity
     field. Returns cfg on success so it can be used inline.
     """
     mismatched = [
-        f"{f}={getattr(cfg, f)!r} (expected {getattr(RAVENX_27B, f)!r})"
+        f"{f}={getattr(cfg, f)!r} (expected {getattr(QWEN38_27B, f)!r})"
         for f in _IDENTITY_FIELDS
-        if getattr(cfg, f) != getattr(RAVENX_27B, f)
+        if getattr(cfg, f) != getattr(QWEN38_27B, f)
     ]
     if mismatched:
         raise UnsupportedModelError(
@@ -333,10 +333,10 @@ def config_from_gguf(reader) -> ModelConfig:
     """
     Build a ModelConfig from a GGUFReader's metadata, using our own reader and
     the standard llama.cpp GGUF key conventions ({arch}.embedding_length, etc.).
-    Anything a file omits falls back to the published RAVENX_27B value.
+    Anything a file omits falls back to the published QWEN38_27B value.
 
     This is where the single-model lock is enforced: only architecture
-    `qwen3_5` is accepted, and the resulting geometry must match RAVENX_27B
+    `qwen3_5` is accepted, and the resulting geometry must match QWEN38_27B
     exactly (validate_model), or UnsupportedModelError is raised.
     """
     md = reader.metadata
@@ -346,7 +346,7 @@ def config_from_gguf(reader) -> ModelConfig:
             f"config_from_gguf: unsupported architecture {arch!r} - "
             f"TENSELERATE serves only {SUPPORTED_MODEL} "
             f"(architecture {SUPPORTED_ARCH!r})")
-    d = RAVENX_27B
+    d = QWEN38_27B
     n_layer = _meta(md, arch, "block_count", default=d.n_layer)
     hidden = _meta(md, arch, "embedding_length", default=d.hidden_size)
     n_head = _meta(md, arch, "attention.head_count", default=d.n_head)

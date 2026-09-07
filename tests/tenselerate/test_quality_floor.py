@@ -15,7 +15,7 @@ import pytest
 from tenselerate.cli import main
 from tenselerate.config import (
     ATTENTION_SINK_TOKENS, DEFAULT_ATTENTION_WINDOW, MAX_ATTENTION_WINDOW,
-    MIN_ATTENTION_WINDOW, RAVENX_27B, QualityFloorError,
+    MIN_ATTENTION_WINDOW, QWEN38_27B, QualityFloorError,
     RopeScalingRequired, validate_window,
 )
 
@@ -31,7 +31,7 @@ def test_the_window_is_locked_at_the_max_recall():
     # min == max == the ceiling: one legal window, the deepest no-RoPE recall
     assert MIN_ATTENTION_WINDOW == MAX_ATTENTION_WINDOW == 262_140
     assert DEFAULT_ATTENTION_WINDOW == MIN_ATTENTION_WINDOW
-    assert MAX_ATTENTION_WINDOW == RAVENX_27B.max_position_embeddings - ATTENTION_SINK_TOKENS
+    assert MAX_ATTENTION_WINDOW == QWEN38_27B.max_position_embeddings - ATTENTION_SINK_TOKENS
 
 
 def test_validate_window_only_accepts_the_locked_value():
