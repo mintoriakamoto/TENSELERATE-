@@ -62,59 +62,60 @@ claim is as unmeasured as the MTP one was.
 | 2026-09-07 | CUDA graphs | reused = 247, not disabled | server log | launch overhead is not the gap |
 | 2026-09-07 | decode, MTP n-max 5, prose | **14.9 tok/s** | llama-server | MTP is SLOWER than plain (33.5): 7-11% acceptance means the verify pass is pure cost. Drop it. |
 
-## The decode step, decomposed from two points
+| 2026-09-07 | width sweep, short prompts, N=1,2,4,8,16 slots x 16K ctx | **141.5 tok/s aggregate at N=16** | `-np N`, q4_0 KV | step time DROPS from N=8 to N=16; the earlier 87 tok/s ceiling below is disproven |
+| 2026-09-07 | 4 x 256K, q4_0 KV | 59 tok/s aggregate | llama-server `-np 4` | what fits at the full window today (MMVQ regime) |
 
-Single stream 30.0 ms/step; two streams 41.5 ms/step, both with short prompts
-(so almost no KV bytes in either). Weights are read once per step, so:
+## The decode step: two regimes, not one cost
+
+First reading (now superseded): from single stream 30.0 ms and two streams
+41.5 ms, `step(N) = 18.5 + 11.5 N` ms, i.e. ~890 GB/s of weight read (60% of
+nominal) plus 11.5 ms per live sequence, attributed to the GDN recurrence and
+giving an aggregate ceiling of ~87 tok/s. **N=16 measured 141.5 tok/s (113
+ms/step), so the linear model is wrong past N=8.** The weight-read figure
+survives; the per-sequence attribution does not.
+
+What the other session identified, and the numbers fit: ggml's CUDA backend
+dispatches int8 matmuls by batch width - `ne11 <= 8` goes to `mul_mat_vec_q`
+(the dp4a vector path, MMVQ), wider goes to MMQ (`mma.sync` tensor-core GEMM).
+The "11.5 ms per sequence" at N <= 8 is mostly MMVQ's per-column cost on this
+card; above 8 the tensor-core GEMM amortizes columns and the per-sequence cost
+falls to ~5.6 ms (113 = 18.5 + ~5 ms of 16K-window KV + 16 x 5.6). That
+residual is the real per-sequence work (GDN recurrence + attention + MMQ
+column cost); the GDN alone is smaller than first claimed.
 
 ```
-step(N) = T_weights + N * t_seq
-30.0 = T_w + t_seq        41.5 = T_w + 2 t_seq
-=> t_seq = 11.5 ms per sequence     T_w = 18.5 ms  -> 16.5 GB / 18.5 ms = ~890 GB/s (60% of nominal)
+MMVQ regime (N <= 8):  step = 18.5 + 11.5 N  (+5.4 per slot holding a full 256K q4_0 window)
+MMQ  regime (N >  8):  step = 18.5 +  5.6 N  (+5.4 per full slot)
 ```
 
-The implied weight-read efficiency (60%) is right where the planners' 65%
-guess sits, so the decomposition is physically credible: **the HBM is fine. The
-missing 40% of the token is ~11.5 ms of per-sequence work that is not bytes** -
-with clocks maxed and CUDA graphs on, that is the 48 Gated-DeltaNet layers'
-recurrence path (state update + conv + gates + norms per layer, ~240 us per
-layer per token). At that size it is neither bandwidth nor FLOPs; it is
-many small kernels each running far below the card's occupancy. This is
-exactly what the other session concluded qualitatively ("genuine per-token
-compute, the lever is width"); the two points put a number on it.
+The fork already ships the knob that moves the boundary: `GGML_CUDA_NO_MMVQ=1`
+forces MMQ at every width. The rig doc told this card NOT to set it (it was a
+capacity-only-unlock workaround); on the measurements it is the opposite -
+the tensor cores are the fast path here at every N. Predictions if the
+hypothesis holds (to be checked against the N=9 / N=12 knee and the
+NO_MMVQ runs now in flight):
 
-Consequences:
+| config | MMVQ (today) | NO_MMVQ=1 (predicted) |
+| --- | --- | --- |
+| N=1, short ctx | 33 tok/s (30 ms) | ~41 (24 ms) - only if MMQ at M=1 is not slower; measure |
+| N=2, short ctx | 48 | ~67 |
+| N=4, short ctx | 62 | ~97 |
+| N=4 x full 256K q4_0 | 59 (measured) | ~63 - the KV read (4 x 5.4 ms) is now half the step |
+| N=8, short ctx | 72 | ~125 |
+| N=9 (first MMQ width), short | - | ~130: a visible knee vs N=8 |
+| N=16 x 16K | 141.5 (measured) | same path, same number |
 
-- Aggregate throughput saturates at `1 / t_seq` = **~87 tok/s** no matter how
-  many slots are added, as long as t_seq does not shrink with batching. The
-  1 -> 2 slot step did NOT amortize it (the second sequence cost the full
-  11.5 ms), which says the GDN path is serialized per sequence today.
-- Add ~5.4 ms per slot that holds a full 256K window at q4_0 (10.8 at q8_0)
-  for the KV read; that is the only part of a slot's cost that is bytes.
-- The lever is a GDN kernel that processes all live sequences in one launch
-  (width). If t_seq fell to ~2 ms, 8 slots would step in ~35 ms -> ~230 tok/s
-  aggregate. Single-stream kernel work cannot recover the 11.5 ms; only
-  batching can hide it, and only after the kernel batches.
-- Prefill needs nothing: 855 tok/s at 4096 means a 32K prompt is ~40 s and a
-  full 262K prompt ~5 min, once, then `--cache-reuse` keeps it.
-
-Predicted step times from the model, short prompts (add KV per full slot):
-
-| slots | step | per stream | aggregate |
-| --- | --- | --- | --- |
-| 1 | 30.0 ms | 33 | 33 |
-| 2 | 41.5 ms | 24 | 48 (measured 48.2) |
-| 4 | 64.5 ms | 15.5 | 62 |
-| 8 | 110.5 ms | 9 | 72 |
-| 16 | 202.5 ms | 5 | 79 |
+Two things follow. At the full 256K window with several slots, the KV read is
+the other half of the step, so after NO_MMVQ the next lever for deep contexts
+is bytes (provable page skipping in the reference, q4_0 K fidelity A/B), not
+compute. And the aggregate ceiling in the MMQ regime is ~1/5.6 ms = ~180 tok/s
+from per-sequence work, before any GDN batching.
 
 ## Still to measure
 
-- npl curve with short prompts: `NPP=512 NTG=128 NPL="1 2 4 8" scripts/svmi-cmpbench.sh -m <gguf>`.
-  This is the direct test of the table above: if step time climbs ~11.5 ms per
-  slot the GDN path is serialized and the kernel is the next job; if it
-  flattens past 2, batching already amortizes it and more slots pay.
-- per-op profile of one decode step (`nsys profile` on llama-bench `-n 16`) to
-  confirm the 11.5 ms sits in the recurrent layers and see how many kernels it is
+- N=9 and N=12 (locates the MMVQ->MMQ knee; running)
+- `GGML_CUDA_NO_MMVQ=1` at N=1, 2, 4 short ctx and 4 x 256K (the table above; running)
+- per-op profile of one MMQ-regime step (`nsys profile`, llama-bench `-n 16`) to
+  split the remaining ~5.6 ms/sequence between GDN, attention and GEMM
 - tokens-to-answer, DavidAU merge vs base Qwen3.8 (decides the model)
 - UD-Q4_K_M vs mixed-INT8; q8_0 vs q4_0 KV at the 262K window

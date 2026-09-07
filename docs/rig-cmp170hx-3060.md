@@ -109,8 +109,10 @@ With FP32/FP16/BF16/tensor cores restored, build a NORMAL sm_80 llama.cpp - no
 ```
 cmake -B build -DGGML_CUDA=ON \
   -DCMAKE_CUDA_ARCHITECTURES="80-real;86-real"      # 80 = 170HX/GA100, 86 = 3060
-# do NOT set --fmad=false / FORCE_MMQ / GGML_CUDA_NO_MMVQ here - those are the
-# capacity-only-unlock workarounds and cost throughput on a compute-unlocked card.
+# do NOT set --fmad=false / FORCE_MMQ at build time - capacity-only-unlock workarounds.
+# GGML_CUDA_NO_MMVQ=1 is a RUNTIME env, and on this unit the measurements say the
+# tensor-core MMQ path beats the dp4a vector path at every batch width - see
+# "Serving Hercules" below and benches/cmp170hx-3060/ before deciding.
 ```
 
 `-fa on` (flash attention) now works and is the default - the tensor cores are enabled
@@ -165,29 +167,27 @@ llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf -ngl 999 --main-gpu 0 \
   --chat-template-kwargs '{"reasoning_effort":"low"}'   # biggest end-to-end lever on an agent loop
 ```
 
-Sizing from two measured points (single stream 30 ms/step, two streams 41.5
-ms/step): each step is ~18.5 ms of weight read (~890 GB/s, 60% of nominal)
-plus **~11.5 ms per live sequence** of Gated-DeltaNet recurrence work that does
-not batch today. Short prompts; add ~5.4 ms per slot holding a full 256K window
-at q4_0 (10.8 ms at q8_0).
+Sizing from the measured width sweep (N = 1..16, short prompts): ~18.5 ms of
+weight read per step (~890 GB/s, 60% of nominal) plus a per-sequence cost that
+depends on which int8 matmul path ggml picks - `ne11 <= 8` uses the dp4a
+vector path (MMVQ, ~11.5 ms per sequence on this card), wider uses the
+tensor-core MMQ GEMM (~5.6 ms per sequence). Add ~5.4 ms per slot holding a
+full 256K window at q4_0 (10.8 at q8_0).
 
-| slots | step | per stream | aggregate |
-| --- | --- | --- | --- |
-| 1 | 30 ms | 33 tok/s | 33 |
-| 2 | 41.5 ms | 24 | 48 (measured 48.2) |
-| 4 | 64.5 ms | 15.5 | 62 |
-| 8 | 110 ms | 9 | 72 |
-| 16 | 203 ms | 5 | 79 |
+| slots | today (MMVQ <= 8) | with `GGML_CUDA_NO_MMVQ=1` (predicted, verify) |
+| --- | --- | --- |
+| 1 | 33 tok/s | ~41 if MMQ at M=1 is not slower |
+| 2 | 48 (measured) | ~67 |
+| 4 | 62 short / 59 at 4 x 256K (measured) | ~97 short / ~63 at 4 x 256K |
+| 8 | 72 | ~125 |
+| 16 x 16K | 141.5 (measured) | same |
 
-So aggregate saturates near **1 / 11.5 ms = ~87 tok/s** however many slots are
-added, and every added slot slows the operator's main loop. For one operator:
-`-np 4` (main loop + default 3 subagents) is the ceiling worth paying for;
-`-np 2` if the main loop's speed matters more than subagent parallelism. Do not
-enable MTP on the DavidAU merge (7-11% acceptance; measured 14.9 tok/s, slower
-than plain). The lever that changes this table is a GDN kernel that processes
-all live sequences in one launch - if t_seq fell to ~2 ms, 8 slots would give
-~230 tok/s aggregate. Until then, `reasoning_effort` (fewer tokens) is worth
-more than any slot count.
+So: force MMQ (`GGML_CUDA_NO_MMVQ=1` in the server environment) once the
+N=1/2/4 runs confirm it; then `-np 4 --kv-unified` for one operator with
+default delegation. At the full window the KV read is half the step, so
+deep-context aggregate is bytes-bound after that, not compute-bound. No MTP on
+the DavidAU merge (7-11% acceptance, measured 14.9 tok/s vs 33.5 plain).
+`reasoning_effort` (fewer tokens) still outranks any slot count for one operator.
 
 ## Context and KV at 1M
 
