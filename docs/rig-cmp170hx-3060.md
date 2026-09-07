@@ -61,6 +61,10 @@ Caveats that NO unlock removes (dispatch-level gating and OTP fuses, not firmwar
   the software patch, ~8 GB/s with the 12-capacitor x16 hardware mod. Keep the model
   resident; do not stream weights.
 
+Install (amoghmunikote/cmpunlocker) for this 10 GiB card: `sudo ./install.sh --profile=10gb`
+-> 40 GiB (the `--profile=8gb` target is 64 GiB; an experimental `80-new` branch chases
+80 GiB, unconfirmed - skip it). The 170th-Street repo/GitBook is the author's reference.
+
 Unlock method (persistence tradeoff): this box runs the d3dx9 daemon-based unlock,
 which reapplies after every reboot / driver reload (nvidia-open 580 / 610.43.0x) -
 re-check `nvidia-smi` after any driver change. Alternatives with the same result:
@@ -193,7 +197,8 @@ Then confirm token-identity with `scripts/svmi-verify.sh` before trusting a long
 
 - Consensus-Protocol/cmp170hx - the authoritative technical wiki (silicon, firmware, unlock, procedures, open problems)
 - d3dx9/cmpunlocker - GA100 fuse-map reset via the Falcon BootROM .fwsignature_ga100 bug (2026-07)
-- amoghmunikote/cmpunlocker - SM + HBM2e restore, 40/80 GB targets; hosts the 170th-Street benchmarks
+- amoghmunikote/cmpunlocker - first public unlock tool; --profile=10gb -> 40 GiB (8gb -> 64, 80-new experimental)
+- amoghmunikote/170th-Street (+ 170th-street.gitbook.io/hx) - the author's comprehensive resource + FP16 benchmarks
 - abobasixseven/unlock-cmp-170hx - in-driver kernel patches for 610.43.03 (no BootROM exploit)
 - thaurock-x/CMP-170HX-64GB-Unlocked-VBIOS - standalone 64 GB vBIOS flash (persistent)
 - Tom's Hardware - software mod unlocks 64 GB on the CMP 170HX
