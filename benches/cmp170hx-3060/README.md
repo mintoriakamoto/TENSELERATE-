@@ -123,6 +123,11 @@ exactly the fraction of that KV term they remove.
 
 ## Still to measure
 
+Leads from this week's scan (drafters that run on upstream llama-server, the
+fork being six weeks behind, MTP acceptance disputed by the model author's own
+numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
+
+
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
 - `GGML_CUDA_NO_MMVQ=1` at **N=1** (decides whether the flag is the default; N=4 x 256K done: 70.5)
 - depth sweep: single-stream decode at 131K and 262K filled KV (running; predictions above)
