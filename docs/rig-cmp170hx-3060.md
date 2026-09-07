@@ -187,6 +187,15 @@ full 256K window at q4_0 (10.8 at q8_0).
 | 8 | 72 | ~125 |
 | 16 x 16K | 141.5 (measured) | same |
 
+**Depth changes the KV-type decision.** Measured single stream: 33.5 tok/s
+empty, 18.2 at 131K, **12.4 at 262K** with q8_0 KV. On sm_80 a quantized KV
+cache sends single-token attention to the vector kernel, which reads each KV
+head once per query head (6x); f16 KV takes the MMA kernel with GQA batching
+and reads it once. Predicted ~22 tok/s at 262K with `--kv f16` (verify), at
+16 GiB per 262K slot. For Hercules that is the trade: one deep f16 slot for a
+long session, or four q8_0 slots that each slow to ~12 tok/s when deep.
+`--kv f16` is a backend option already.
+
 So: `GGML_CUDA_NO_MMVQ=1` is confirmed at 4 x 256K (+19%); pass `--no-mmvq`
 (or `NO_MMVQ=1` to the script) for multi-slot serving now, and it becomes the
 default once N=1 shows MMQ at M=1 is no slower than the vector path. Then

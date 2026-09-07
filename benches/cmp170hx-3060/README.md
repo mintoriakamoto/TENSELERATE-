@@ -22,6 +22,7 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | 4 x 256K, q4_0 KV | 59 tok/s aggregate | llama-server `-np 4` | what fits at the full window today (MMVQ regime) |
 | 2026-09-07 | **4 x 256K, q4_0 KV, `GGML_CUDA_NO_MMVQ=1`** | **70.5 tok/s aggregate** | llama-server `-np 4` | **+19% over 59** at the config that fits; model predicted ~63 |
 | 2026-09-07 | 16 x 16K, `GGML_CUDA_NO_MMVQ=1` | ~130 tok/s (reproducible) | `-np 16` | baseline 100-141 was noisy; same MMQ path either way, so no change expected and none seen |
+| 2026-09-07 | depth sweep, single stream, q8_0 KV, batch 1 | 0: 33.5 / 16K: 30.3 / 65K: 23.5 / 131K: 18.2 / **262K: 12.4 tok/s** (29.9 -> 80.9 ms) | llama-bench, prefill to depth then time decode | prefill 856 -> 327 tok/s over the same range; KV term at 262K is **51 ms**, predicted 10.8 |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -106,6 +107,32 @@ is bytes (provable page skipping in the reference, q4_0 K fidelity A/B), not
 compute. And the aggregate ceiling in the MMQ regime is ~1/5.6 ms = ~180 tok/s
 from per-sequence work, before any GDN batching.
 
+## Depth: the KV read costs 5x what bytes say, and the code says why
+
+At 262K with q8_0 KV a single stream decodes at 12.4 tok/s: 80.9 ms per token,
+of which ~51 ms is the KV read. 8.5 GiB of q8_0 KV at ~1 TB/s should be ~9 ms.
+The effective rate is ~178 GB/s - the other session's "latency-bound, not
+bandwidth-bound" reading of it. The dispatch in `ggml/src/ggml-cuda/fattn.cu`
+(`ggml_cuda_get_best_fattn_kernel`) gives the mechanism on sm_80:
+
+- **quantized K or V + one query token -> `BEST_FATTN_KERNEL_VEC`**, the
+  vector kernel, which has no GQA batching: each of the Q heads streams its own
+  copy of its KV head. With 6 query heads per KV head that is 6 x 9.1 GB
+  ~ 55 GB per token, and 55 GB at ~1.07 TB/s is 51 ms. It is bandwidth-bound
+  after all - on six-fold redundant reads.
+- **f16 K and V -> `BEST_FATTN_KERNEL_MMA_F16` with the GQA optimization**
+  (`gqa_opt_applies`), which reads each KV entry once for all six query heads
+  and splits the KV length across blocks (stream-K).
+
+Prediction, single stream at 262K with `-ctk f16 -ctv f16`: KV read ~16.5 GB
+once, ~16 ms -> ~46 ms/token -> **~22 tok/s vs 12.4**, i.e. ~1.8x at depth
+from a KV-type flag, at the cost of 16 GiB of KV per 262K slot (one deep slot
+fits, not four). q8_0 K with f16 V does not help: any quantized tensor selects
+the vec path. This is the highest-value single test now on the box; if it
+holds, the Hercules choice becomes "one deep f16 slot" vs "four q8_0 slots",
+and the real fix is a GQA-aware vec kernel for quantized KV (or upstream having
+added one since the fork's July base - check before writing it).
+
 **Confirmed at the config that matters (4 x 256K): 59 -> 70.5 tok/s with
 `GGML_CUDA_NO_MMVQ=1`.** Step time 56.7 ms against a predicted 62.5 - the KV
 read at depth is a little cheaper than the 5.4 ms/slot assumed, which the
@@ -130,7 +157,7 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
 - `GGML_CUDA_NO_MMVQ=1` at **N=1** (decides whether the flag is the default; N=4 x 256K done: 70.5)
-- depth sweep: single-stream decode at 131K and 262K filled KV (running; predictions above)
+- **262K single stream with `-ctk f16 -ctv f16`** (prediction ~22 tok/s vs 12.4; decides the KV type for deep slots)
 - per-op profile of one MMQ-regime step (`nsys profile`, llama-bench `-n 16`) to
   split the remaining ~5.6 ms/sequence between GDN, attention and GEMM
 - tokens-to-answer, DavidAU merge vs base Qwen3.8 (decides the model)
