@@ -131,6 +131,8 @@ llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf \
   -t 16
 # MTP on the -MTP- GGUF only at depth 1: --spec-type draft-mtp --spec-draft-n-max 1
 #   measured +35% (46.6 vs 34.4 tok/s); n-max 5 measured -22% (the head is shallow).
+#   Only under greedy sampling: --temp 0 --repeat-penalty 1.0 (46.2 tok/s, 88%
+#   acceptance); temp 0.7 + repeat-penalty 1.15 measured 29.9 at 22% acceptance.
 # For the Hercules-shaped multi-slot config see "Serving Hercules" below.
 # window stays <= 262,140 (engine-enforced). Do NOT pass --swa-full (removes the window).
 ```
@@ -259,7 +261,12 @@ code decode) shows the head is shallow, not broken: **n-max 1 = 46.6 tok/s
 (+35%)**, n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%. The merge kept the
 head's position-1 prediction and broke positions 2+; every extra drafted
 token is a verified column that costs ~11.5 ms on the dp4a path (~5.6 on MMQ)
-and is rejected. Serve with `--mtp-draft 1` (`MTP=1` for the script) on the
+and is rejected. Serve with `--mtp-draft 1` (`MTP=1` for the script) **and
+greedy sampling** (the launch's default `--temp 0 --repeat-penalty 1.0`): the
+acceptance test is exact match against the sampled token, and on the
+production server greedy gave 46.2 tok/s at 88% acceptance while the model
+card's temp 0.7 / repeat-penalty 1.15 gave 29.9 at 22% - the whole "MTP nets
+zero in production" result was sampling. Stay on the
 default dp4a path: NO_MMVQ makes depth 1 *slower* (30.6) because the MMQ
 kernel has a ~55 ms floor at small width; both paths peak at ~46.5 with this
 head. For multi-slot serving the fork's `GGML_CUDA_MMVQ_MAX=3` (measure) keeps

@@ -532,7 +532,8 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
         argv = build_llama_server_argv(
             args.model, host=args.host, port=args.port, binary=binary,
             slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
-            reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft)
+            reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft,
+            sampling=args.sampling)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -620,7 +621,8 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     """The backend selector and per-backend options shared by serve and boot."""
     from tenselerate.backends.llamacpp import (
         DEFAULT_ALIAS, DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_MTP_DRAFT,
-        DEFAULT_REASONING, DEFAULT_SLOTS, KV_TYPES, REASONING_LEVELS,
+        DEFAULT_REASONING, DEFAULT_SAMPLING, DEFAULT_SLOTS, KV_TYPES,
+        REASONING_LEVELS, SAMPLING_MODES,
     )
     p.add_argument("--backend", default="reference",
                    choices=("reference", "llamacpp", "vllm"),
@@ -654,6 +656,11 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: MTP draft depth (default: 1 when the GGUF "
                         "name carries -MTP-, else 0; 1 measured +13..38%% on this "
                         "merge, deeper loses until the head is retrained)")
+    p.add_argument("--sampling", default=DEFAULT_SAMPLING, choices=SAMPLING_MODES,
+                   help="llamacpp backend: greedy (default) sets server-default --temp 0 "
+                        "--repeat-penalty 1.0 - the MTP draft only pays under greedy "
+                        "(measured 46.2 vs 29.9 tok/s at temp 0.7/rp 1.15); client leaves "
+                        "llama.cpp's defaults")
     p.add_argument("--mmvq-max", type=int, default=None,
                    help="llamacpp backend: GGML_CUDA_MMVQ_MAX - widest batch kept on "
                         "the dp4a vector path (0..8); 1 keeps single-token decode "

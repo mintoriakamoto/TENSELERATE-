@@ -18,6 +18,13 @@ What the measurements decided, and where each one lands in the argv:
     (46.6 vs 34.4 tok/s), n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%.
     `mtp_draft=1` emits `--spec-type draft-mtp --spec-draft-n-max 1`; deeper
     drafts lose until the head is retrained (docs/mtp-realign-davidau.md)
+  * greedy sampling by default (`--temp 0 --repeat-penalty 1.0`): llama.cpp
+    accepts a draft token only if the target's *sampled* token equals it
+    (common/sampling.cpp, common_sampler_sample_and_accept_n). Measured on the
+    production server: greedy 46.2 tok/s at 88% acceptance; the model card's
+    temp 0.7 + repeat-penalty 1.15 gives 29.9 tok/s at 22% - slower than no
+    MTP at all. These are server defaults; a request that carries its own
+    temperature/repeat_penalty overrides them, so the client must not send them
   * `reasoning_effort=low`: Qwen3.8's chat template defaults to xhigh; fewer
     thinking tokens outranks any decode lever on an agent loop
   * prefill is 855 tok/s, so a prompt-cache miss on a 60K agent context costs
@@ -59,6 +66,8 @@ DEFAULT_KV = "q8_0"
 DEFAULT_REASONING = "low"
 DEFAULT_ALIAS = "tenselerate"
 DEFAULT_MTP_DRAFT = None     # None = 1 on an -MTP- GGUF, else 0; 1 = measured +13..38%
+SAMPLING_MODES = ("greedy", "client")   # greedy: server defaults temp 0 / rp 1.0; client: leave llama.cpp's
+DEFAULT_SAMPLING = "greedy"  # measured: the draft head only pays under greedy (46.2 vs 29.9 tok/s)
 MAX_MTP_DRAFT = 8
 MMVQ_MAX_BATCH = 8           # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
 
@@ -82,6 +91,7 @@ def build_llama_server_argv(
     reasoning: str = DEFAULT_REASONING,
     alias: str = DEFAULT_ALIAS,
     mtp_draft: int | None = DEFAULT_MTP_DRAFT,
+    sampling: str = DEFAULT_SAMPLING,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -103,6 +113,8 @@ def build_llama_server_argv(
             "window; the pool is shared by all slots but the main session must fit")
     if not alias:
         raise ValueError("alias must be a non-empty model id for the agent to address")
+    if sampling not in SAMPLING_MODES:
+        raise ValueError(f"sampling must be one of {SAMPLING_MODES}, got {sampling!r}")
     mtp_draft = resolve_mtp_draft(model, mtp_draft)
     if not 0 <= mtp_draft <= MAX_MTP_DRAFT:
         raise ValueError(f"mtp_draft must be 0 (off) .. {MAX_MTP_DRAFT}, got {mtp_draft}")
@@ -116,6 +128,10 @@ def build_llama_server_argv(
         "-b", "2048", "-ub", "512", "--cache-reuse", "256",
         "--chat-template-kwargs", json.dumps({"reasoning_effort": reasoning}),
     ]
+    if sampling == "greedy":
+        # request-level defaults; the acceptance test is exact match against the
+        # sampled token, so temperature and repeat penalty fight the draft head
+        argv += ["--temp", "0", "--repeat-penalty", "1.0"]
     if mtp_draft:
         # the MTP head lives inside the -MTP- GGUF; no -md needed
         argv += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft)]

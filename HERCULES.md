@@ -16,7 +16,10 @@ hercules config set model.base_url http://127.0.0.1:8080/v1
 The launch is built by `tenselerate/backends/llamacpp.py` from what the box
 measured (`benches/cmp170hx-3060/`): 4 slots on a unified KV pool, MTP at
 draft depth 1 (`--mtp-draft 1`, +35% measured on this merge; deeper loses),
-`reasoning_effort=low`, chunked prefill with cache reuse, and the flags Hermes
+**greedy sampling** (`--temp 0 --repeat-penalty 1.0` as server defaults: the
+draft head pays only under greedy - 46.2 tok/s at 88% acceptance vs 29.9 at
+22% with the model card's temp 0.7 / repeat-penalty 1.15, which is slower than
+no MTP at all), `reasoning_effort=low`, chunked prefill with cache reuse, and the flags Hermes
 needs from an OpenAI-compatible server - `--jinja` (without it llama-server
 ignores `tools` and the reasoning_effort template kwarg), `--reasoning-format
 deepseek`, `--no-context-shift`, `--alias tenselerate`. `--dry-run` prints the
@@ -73,6 +76,7 @@ right-hand column is what they cost or save on this box.
 | `terminal.backend`, `container_cpu`, `container_memory` | local, 1, 5120 | if sandboxing in Docker, give it real cores (4-8) - tool latency is wall-clock on the agent loop |
 | `agent.max_turns` | none | cap runaway loops (e.g. 60) |
 | `model.reasoning_effort` | unset | llama-server does **not** map this request field into the chat template; keep `--chat-template-kwargs reasoning_effort` on the server side (the launch does) |
+| **`temperature` / `repeat_penalty` in requests** | Hermes sends none by default | **leave them unset.** llama.cpp accepts a drafted token only if the sampled token equals it; a request that carries temp 0.7 / repeat-penalty 1.15 overrides the server's greedy defaults and drops MTP from 46.2 to 29.9 tok/s (below no-MTP). Verify in the server log: `draft acceptance` ~0.88 during a Hermes turn |
 | `model.streaming` | true | leave on |
 | `HERMES_STREAM_READ_TIMEOUT` | 120 s (1800 auto for local) | 1800 explicitly if deep prefills trip it |
 

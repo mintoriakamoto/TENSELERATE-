@@ -31,7 +31,9 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | q4_0 vs q8_0 KV at depth, single stream | **21.5 vs 23.5 tok/s (-8%)** | llama-bench | the dequant costs more than the bytes save on the vector attention path; q4_0 only helps fit |
 | 2026-09-07 | `--kv-unified`, single stream | no change | llama-server | a batching detail; matters only with several slots |
 | 2026-09-07 | `reasoning_effort low` | 0% on tok/s; large on time-to-answer | llama-server | fewer tokens, same speed per token |
-| 2026-09-07 | **MTP depth 1 on the real Hermes server** (chat template + reasoning, production sampling and slots) | **33.8 vs 34.4 tok/s - no gain** | llama-server as Hercules uses it | the +13..38% exists only in the microbenchmark; see below |
+| 2026-09-07 | **MTP depth 1 on the real Hermes server** (chat template + reasoning, production sampling and slots) | **33.8 vs 34.4 tok/s - no gain** | llama-server as Hercules uses it | resolved below: the sampling params were fighting the draft |
+| 2026-09-07 | **production server, MTP depth 1, greedy** (`--temp 0`, no repeat penalty) | **46.2 tok/s, draft acceptance 0.881** | llama-server, server log `draft acceptance` | the microbench gain is real on the production server |
+| 2026-09-07 | production server, MTP depth 1, model-card sampling (temp 0.7, repeat-penalty 1.15) | **29.9 tok/s, draft acceptance 0.218** | same server, same head, same flag | **13% below the no-MTP baseline**: a rejected draft is a paid verify column. Suspect 1 confirmed; `-np 1` not needed |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -128,11 +130,34 @@ per pass at n-max 1 (position 1 plus the bonus token):
 | 2 | 53 ms | ~2.1 | 40 | **39.7** |
 | 5 | 87.5 ms | ~2.3 | 26 | **26.8** |
 
-## MTP depth 1 nets zero on the real server - three suspects, two runs
+## MTP depth 1 nets zero on the real server - resolved: sampling
 
-The microbenchmark says +35%; the production server (Hermes chat template,
-reasoning on, Hermes' sampling, 4-8 slots) says 33.8 vs 34.4. Same head, same
-flag. What differs, in the order I would test:
+**Resolved 2026-09-07.** Suspect 1 below was it. The same production server,
+same head, same `--spec-draft-n-max 1`:
+
+| sampling | decode | draft acceptance |
+| --- | --- | --- |
+| greedy (temp 0, no repeat penalty) | **46.2 tok/s** | **0.881** |
+| model card (temp 0.7, repeat-penalty 1.15) | 29.9 tok/s | 0.218 |
+
+The mechanism is in `common/sampling.cpp` (`common_sampler_sample_and_accept_n`):
+a draft token is accepted only if the token the *sampler* produces at that
+position equals it. The head predicts the argmax; at temperature 0.7 the
+sampler leaves the argmax often enough to cut acceptance to ~0.2, and
+repeat-penalty 1.15 rewrites the argmax on every token that appeared recently
+(code and JSON are nothing but recent tokens). Each rejected draft is a
+verify column paid in full, so sampled MTP lands *below* the 34.4 no-MTP
+baseline. Greedy is now the server default in the launch
+(`--temp 0 --repeat-penalty 1.0`, `--sampling client` to opt out). These are
+request defaults: a client that sends `temperature` or `repeat_penalty` wins,
+so Hermes must not send them (HERCULES.md).
+
+Repetition risk under greedy on a merge is real; if a loop shows up, the
+lever that leaves the argmax alone most of the time is DRY
+(`--dry-multiplier 0.8`, fires only on repeated n-grams), not temperature or
+repeat penalty. Measure acceptance with it before adopting.
+
+The original list, kept for the record:
 
 1. **Sampling.** llama.cpp accepts a draft token only if the target's *sampled*
    token matches it. The microbench sampled greedily; Hermes sends temperature
@@ -150,9 +175,10 @@ flag. What differs, in the order I would test:
    microbench, not +38%), and at `low` they are still a large share of the
    output. Nothing to run; it bounds the upside even when 1 and 2 are fixed.
 
-Until the two runs land, MTP depth 1 stays the default on -MTP- GGUFs
-(measured cost of being wrong: -2%, within noise) but is not counted as a
-production gain.
+Run 1 landed and returned the whole gain; run 2 (`-np 1`) is moot for the
+single-stream number. Under 4 active slots MTP still verifies 2 columns per
+slot on dp4a (width 8, ~99 ms per step) - that is the remaining case for
+`MMVQ_MAX=3`, below.
 
 **The ~64 tok/s prediction for NO_MMVQ + depth 1 was wrong: measured 30.6.**
 The per-column cost model held for the dp4a path and failed for MMQ. Fitting
@@ -293,7 +319,9 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
 - `GGML_CUDA_MMVQ_MAX=3` (the fork's threshold): 4 slots x 256K with MTP depth 1 - predicted to match NO_MMVQ's 70.5 on the step while keeping single-slot turns on the dp4a path
-- production server, MTP depth 1, `--temp 0` and `-np 1` separately (the two runs above)
+- production server, greedy MTP depth 1 with **Hermes as the client** (not curl): confirms Hermes sends no `temperature`/`repeat_penalty`; the server log's `draft acceptance` line should stay ~0.88
+- greedy + `--dry-multiplier 0.8`: acceptance and tok/s (the repetition guard that should not fight the draft)
+- 4 slots active, greedy MTP depth 1, dp4a vs `MMVQ_MAX=3`: whether verification width 8 pays on either path
 - 8 slots + MTP depth 1 aggregate with `MMVQ_MAX=3`
 - stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build
 - `GGML_CUDA_F16=ON` rebuild: pp4096 and tg64 side by side with the current build

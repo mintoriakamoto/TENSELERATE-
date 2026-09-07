@@ -84,6 +84,19 @@ def test_speculation_follows_the_gguf_and_depth_one_when_asked():
         argv(mtp_draft=99)
 
 
+def test_greedy_sampling_is_the_server_default_because_acceptance_is_exact_match():
+    # Production server, same head, same flag: greedy 46.2 tok/s at 88% draft
+    # acceptance; the model card's temp 0.7 + repeat-penalty 1.15 gives 29.9 at
+    # 22% - below the 34.4 no-MTP baseline. llama.cpp accepts a draft token only
+    # when the sampled target token equals it, so sampling is a server default.
+    a = argv()
+    assert after(a, "--temp") == "0" and after(a, "--repeat-penalty") == "1.0"
+    c = argv(sampling="client")
+    assert "--temp" not in c and "--repeat-penalty" not in c
+    with pytest.raises(ValueError, match="sampling"):
+        argv(sampling="warm")
+
+
 def test_pool_must_hold_one_locked_window():
     with pytest.raises(ValueError, match="locked"):
         argv(ctx_pool=MIN_ATTENTION_WINDOW - 1)
@@ -138,6 +151,13 @@ def test_cli_mtp_draft_flag():
     rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
                    "--mtp-draft", "1", "--dry-run"])
     assert rc == 0 and "--spec-type draft-mtp --spec-draft-n-max 1" in out
+    assert "--temp 0 --repeat-penalty 1.0" in out
+
+
+def test_cli_sampling_flag():
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--sampling", "client", "--dry-run"])
+    assert rc == 0 and "--temp" not in out
 
 
 def test_cli_serve_llamacpp_no_mmvq_shows_the_env_prefix():

@@ -3,7 +3,10 @@
 The served model is a weight merge of Qwen3.8-27B. Its MTP head is the stock
 Qwen head, trained against the *base* trunk. The merge moved the trunk, and
 the head came out **shallow**: its position-1 prediction still lands (n-max 1
-measured **+35%**, 46.6 vs 34.4 tok/s on code), but positions 2+ do not
+measured **+35%**, 46.6 vs 34.4 tok/s on code; 46.2 at 88% acceptance on the
+production server under greedy sampling - sampled decoding at temp 0.7 /
+repeat-penalty 1.15 drops acceptance to 22%, so greedy is a precondition for
+every number here), but positions 2+ do not
 (n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%). MTP step k>1 feeds the
 head its own previous hidden state, which was trained against base-trunk
 statistics; the error compounds with depth. Retraining restores depth: the
