@@ -93,6 +93,14 @@ def test_greedy_sampling_is_the_server_default_because_acceptance_is_exact_match
     assert after(a, "--temp") == "0" and after(a, "--repeat-penalty") == "1.0"
     c = argv(sampling="client")
     assert "--temp" not in c and "--repeat-penalty" not in c
+    # pure greedy loops in <think> on the merge; the two guards keep repeat
+    # penalty off (it rewrites the argmax on every recent token)
+    d = argv(sampling="dry")
+    assert after(d, "--temp") == "0" and after(d, "--dry-multiplier") == "0.8"
+    assert after(d, "--dry-penalty-last-n") == "2048"     # never scan the 262K window per token
+    lo = argv(sampling="low")
+    assert after(lo, "--temp") == "0.3" and after(lo, "--min-p") == "0.1"
+    assert after(lo, "--repeat-penalty") == "1.0" and "--dry-multiplier" not in lo
     with pytest.raises(ValueError, match="sampling"):
         argv(sampling="warm")
 

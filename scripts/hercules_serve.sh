@@ -13,8 +13,9 @@
 #                MMVQ_MAX (0..8; 1 keeps batch-1 decode on dp4a, routes draft
 #                verification to MMQ tensor cores - the fork's GGML_CUDA_MMVQ_MAX)
 #                SAMPLING (greedy, default: server-default temp 0 / repeat-penalty 1.0,
-#                the only sampling under which the MTP draft pays - 46.2 vs 29.9 tok/s;
-#                client = leave llama.cpp's defaults)
+#                the only sampling under which the MTP draft pays - 46.2 vs 29.9 tok/s,
+#                but the merge loops in <think>; dry = greedy + DRY loop guard;
+#                low = temp 0.3 min-p 0.1; client = leave llama.cpp's defaults)
 set -euo pipefail
 MODEL="${1:?model gguf path}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

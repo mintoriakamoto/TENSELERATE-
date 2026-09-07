@@ -66,7 +66,23 @@ DEFAULT_KV = "q8_0"
 DEFAULT_REASONING = "low"
 DEFAULT_ALIAS = "tenselerate"
 DEFAULT_MTP_DRAFT = None     # None = 1 on an -MTP- GGUF, else 0; 1 = measured +13..38%
-SAMPLING_MODES = ("greedy", "client")   # greedy: server defaults temp 0 / rp 1.0; client: leave llama.cpp's
+# Server-default sampling. Draft acceptance is exact match against the sampled
+# token, so anything that moves the argmax costs MTP; the merge loops under pure
+# greedy in <think>, so the loop guard must leave the argmax alone as much as it can.
+#   greedy : temp 0, no repeat penalty              46.2 tok/s, 0.88 acceptance; loops
+#   dry    : greedy + DRY (fires only on n-grams that extend a repeat; scans 2048 tokens,
+#            not the 262K window - dry-penalty-last-n -1 would scan the whole context per token)
+#   low    : temp 0.3, min-p 0.1, no repeat penalty (the box's 0.15/0.3/0.5 sweet-spot sweep)
+#   client : leave llama.cpp's defaults
+SAMPLING_ARGV: dict[str, tuple[str, ...]] = {
+    "greedy": ("--temp", "0", "--repeat-penalty", "1.0"),
+    "dry": ("--temp", "0", "--repeat-penalty", "1.0",
+            "--dry-multiplier", "0.8", "--dry-base", "1.75",
+            "--dry-allowed-length", "2", "--dry-penalty-last-n", "2048"),
+    "low": ("--temp", "0.3", "--min-p", "0.1", "--repeat-penalty", "1.0"),
+    "client": (),
+}
+SAMPLING_MODES = tuple(SAMPLING_ARGV)
 DEFAULT_SAMPLING = "greedy"  # measured: the draft head only pays under greedy (46.2 vs 29.9 tok/s)
 MAX_MTP_DRAFT = 8
 MMVQ_MAX_BATCH = 8           # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
@@ -128,10 +144,9 @@ def build_llama_server_argv(
         "-b", "2048", "-ub", "512", "--cache-reuse", "256",
         "--chat-template-kwargs", json.dumps({"reasoning_effort": reasoning}),
     ]
-    if sampling == "greedy":
-        # request-level defaults; the acceptance test is exact match against the
-        # sampled token, so temperature and repeat penalty fight the draft head
-        argv += ["--temp", "0", "--repeat-penalty", "1.0"]
+    # request-level defaults; the acceptance test is exact match against the
+    # sampled token, so temperature and repeat penalty fight the draft head
+    argv += list(SAMPLING_ARGV[sampling])
     if mtp_draft:
         # the MTP head lives inside the -MTP- GGUF; no -md needed
         argv += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft)]

@@ -34,6 +34,7 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | **MTP depth 1 on the real Hermes server** (chat template + reasoning, production sampling and slots) | **33.8 vs 34.4 tok/s - no gain** | llama-server as Hercules uses it | resolved below: the sampling params were fighting the draft |
 | 2026-09-07 | **production server, MTP depth 1, greedy** (`--temp 0`, no repeat penalty) | **46.2 tok/s, draft acceptance 0.881** | llama-server, server log `draft acceptance` | the microbench gain is real on the production server |
 | 2026-09-07 | production server, MTP depth 1, model-card sampling (temp 0.7, repeat-penalty 1.15) | **29.9 tok/s, draft acceptance 0.218** | same server, same head, same flag | **13% below the no-MTP baseline**: a rejected draft is a paid verify column. Suspect 1 confirmed; `-np 1` not needed |
+| 2026-09-07 | greedy MTP depth 1, no reasoning-budget injection, JSON task | valid JSON at ~46 tok/s; **the merge still loops inside `<think>` under pure greedy** | production server | the loop is the merge under greedy, not the budget cap. Temp 0.15 / 0.3 / 0.5 sweep running for the escape point that keeps acceptance |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -152,10 +153,22 @@ baseline. Greedy is now the server default in the launch
 request defaults: a client that sends `temperature` or `repeat_penalty` wins,
 so Hermes must not send them (HERCULES.md).
 
-Repetition risk under greedy on a merge is real; if a loop shows up, the
-lever that leaves the argmax alone most of the time is DRY
-(`--dry-multiplier 0.8`, fires only on repeated n-grams), not temperature or
-repeat penalty. Measure acceptance with it before adopting.
+**The loop showed up.** Pure greedy loops inside `<think>` on this merge
+(confirmed with the reasoning-budget injection removed, so it is the merge,
+not the cap). Two guards that keep most of the argmax, both in the launch:
+
+- `--sampling dry`: greedy plus DRY (`--dry-multiplier 0.8`, allowed length 2,
+  scan window 2048). DRY only touches tokens that would *extend* a repeated
+  n-gram, so on non-looping text it is exactly greedy and acceptance should
+  stay ~0.88. The scan window is capped at 2048: the default (-1) scans the
+  whole 262K context on the CPU for every token.
+- `--sampling low`: temp 0.3, min-p 0.1, no repeat penalty. Where the
+  distribution is peaked (most code/JSON tokens) the sampled token is still
+  the argmax; where it is flat it can leave the loop. Acceptance will sit
+  between 0.88 and 0.22; the box's 0.15/0.3/0.5 sweep finds the knee.
+
+Repeat penalty stays at 1.0 in every mode: it rewrites the argmax on every
+recently seen token, which is what took acceptance to 0.22.
 
 The original list, kept for the record:
 
@@ -320,7 +333,7 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
 - `GGML_CUDA_MMVQ_MAX=3` (the fork's threshold): 4 slots x 256K with MTP depth 1 - predicted to match NO_MMVQ's 70.5 on the step while keeping single-slot turns on the dp4a path
 - production server, greedy MTP depth 1 with **Hermes as the client** (not curl): confirms Hermes sends no `temperature`/`repeat_penalty`; the server log's `draft acceptance` line should stay ~0.88
-- greedy + `--dry-multiplier 0.8`: acceptance and tok/s (the repetition guard that should not fight the draft)
+- loop guard: `--sampling dry` vs `--sampling low` at temp 0.15 / 0.3 / 0.5 - tok/s, `draft acceptance`, and whether `<think>` still loops; the winner becomes the default
 - 4 slots active, greedy MTP depth 1, dp4a vs `MMVQ_MAX=3`: whether verification width 8 pays on either path
 - 8 slots + MTP depth 1 aggregate with `MMVQ_MAX=3`
 - stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build

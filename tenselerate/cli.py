@@ -657,10 +657,11 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                         "name carries -MTP-, else 0; 1 measured +13..38%% on this "
                         "merge, deeper loses until the head is retrained)")
     p.add_argument("--sampling", default=DEFAULT_SAMPLING, choices=SAMPLING_MODES,
-                   help="llamacpp backend: greedy (default) sets server-default --temp 0 "
-                        "--repeat-penalty 1.0 - the MTP draft only pays under greedy "
-                        "(measured 46.2 vs 29.9 tok/s at temp 0.7/rp 1.15); client leaves "
-                        "llama.cpp's defaults")
+                   help="llamacpp backend: server-default sampling. greedy (default): "
+                        "--temp 0 --repeat-penalty 1.0, the only sampling under which the "
+                        "MTP draft pays (46.2 vs 29.9 tok/s at temp 0.7/rp 1.15) but the "
+                        "merge loops in <think>; dry: greedy + DRY loop guard; low: temp 0.3 "
+                        "min-p 0.1; client: llama.cpp's defaults")
     p.add_argument("--mmvq-max", type=int, default=None,
                    help="llamacpp backend: GGML_CUDA_MMVQ_MAX - widest batch kept on "
                         "the dp4a vector path (0..8); 1 keeps single-token decode "

@@ -19,7 +19,8 @@ draft depth 1 (`--mtp-draft 1`, +35% measured on this merge; deeper loses),
 **greedy sampling** (`--temp 0 --repeat-penalty 1.0` as server defaults: the
 draft head pays only under greedy - 46.2 tok/s at 88% acceptance vs 29.9 at
 22% with the model card's temp 0.7 / repeat-penalty 1.15, which is slower than
-no MTP at all), `reasoning_effort=low`, chunked prefill with cache reuse, and the flags Hermes
+no MTP at all; pure greedy loops in `<think>` on this merge, so `--sampling dry`
+or `--sampling low` is the loop guard - measurement pending), `reasoning_effort=low`, chunked prefill with cache reuse, and the flags Hermes
 needs from an OpenAI-compatible server - `--jinja` (without it llama-server
 ignores `tools` and the reasoning_effort template kwarg), `--reasoning-format
 deepseek`, `--no-context-shift`, `--alias tenselerate`. `--dry-run` prints the
