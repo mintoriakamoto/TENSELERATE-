@@ -39,8 +39,8 @@ MiB = 1024**2
 # not viable over them (see CRIPPLED_LINK_BW below), the card is a resident shard.
 PCIE_BW = {
     "1.0-x1":  0.25,   # CMP 100-210: board-level x1, no flash restores it
-    "2.0-x4":  2.0,    # CMP 170HX after the HBM2e unlock (gen2 x4)
-    "3.0-x4":  4.0,    # CMP 170HX with the capacitor mod (gen1 x16 equivalent)
+    "2.0-x4":  2.0,    # CMP 170HX effective; card is natively PCIe 1.1 x4 (~1-2 GB/s)
+    "3.0-x4":  4.0,    # CMP 170HX with the capacitor mod (PCIe 1.1 x16, ~4 GB/s)
     "3.0-x8":  6.0,
     "3.0-x16": 12.0,
     "4.0-x8":  12.0,

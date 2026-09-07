@@ -86,7 +86,10 @@ MACHINES = {
 
 # firmware quirks that change how llama.cpp must be BUILT for a card
 DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
-INT8_QUIRK = "no usable FP16 path - quantize INT8 so attention runs on q8_0/MMQ"
+INT8_QUIRK = ("prefer INT8/MMQ for decode; FP16 has no tensor-core acceleration here "
+              "(on the 170HX it is not hardware-throttled - A/B '-fa on', arXiv:2505.03782)")
+FMAD_QUIRK = ("170HX FP32 is firmware-throttled ~1/32; build -DCMAKE_CUDA_FLAGS=--fmad=false "
+              "-DCMAKE_CUDA_ARCHITECTURES=80 to restore it (arXiv:2505.03782)")
 UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every second, and a "
                 "driver reload drops the card back to its factory 8/10 GB",
                 "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "
@@ -94,14 +97,14 @@ UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every seco
 GPU_QUIRKS = {
     "cmp90hx":  [DP4A_QUIRK, INT8_QUIRK,
                  "the 90HX unlock is compute-only - VRAM stays 10 GB, link unchanged"],
-    "cmp170hx": [DP4A_QUIRK, INT8_QUIRK,
+    "cmp170hx": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK,
                  "8 GB stock: cmpunlocker restores HBM2e geometry to 64 GB - plan the "
                  "unlocked card with --gpu cmp170hx-64"],
-    "cmp170hx-10g": [DP4A_QUIRK, INT8_QUIRK,
+    "cmp170hx-10g": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK,
                      "10 GB stock: cmpunlocker restores HBM2e geometry to 40 GB - plan the "
                      "unlocked card with --gpu cmp170hx-40"],
-    "cmp170hx-64": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
-    "cmp170hx-40": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-64": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-40": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
@@ -213,6 +216,9 @@ def main() -> int:
                       "-o imatrix.gguf, then add --imatrix imatrix.gguf")
         print("build   : cmake --preset cmp170hx-int8 && cmake --build build-cmp170hx-int8 -j")
         print("          (all matmuls on MMQ, no cuBLAS FP16; also cmp90hx-int8, cmp100-210-int8)")
+        if any(g.startswith("cmp170hx") for g in gpu_names):
+            print("          170HX: add -DCMAKE_CUDA_FLAGS=--fmad=false -DCMAKE_CUDA_ARCHITECTURES=80")
+            print("          to restore its throttled FP32 (~1/32 -> half; arXiv:2505.03782)")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")
