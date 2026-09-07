@@ -7,7 +7,7 @@ on:
 
 jobs:
   release:
-    name: Create main-b<N>-<SHA> releases for all commits
+    name: Create main-b<N>-<SHA> release for HEAD
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -16,48 +16,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create releases for all commits without one
+      - name: Create release tag and GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           #!/bin/bash
-          set -euo pipefail
+          set -e
 
-          # Get list of all commits on main
-          echo "Creating releases for commits on main..."
+          # Get current commit info
+          SHA=$(git rev-parse --short HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          COUNT=$(git rev-list --count HEAD)
+          TAG="main-b${COUNT}-${SHA}"
+          MSG=$(git log -1 --pretty=%B)
 
-          COMMITS=$(git rev-list main | head -150)
+          echo "Creating release: $TAG"
+          echo "SHA: $FULL_SHA"
+          echo "Message: $MSG"
 
-          for SHA in $COMMITS; do
-            SHORT=$(git rev-parse --short "$SHA")
-            COUNT=$(git rev-list --count "$SHORT^..$SHA" 2>/dev/null || echo "0")
+          # Check if tag already exists in GitHub
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists locally, skipping"
+            exit 0
+          fi
 
-            # Fallback to commit distance from root if the above fails
-            if [ "$COUNT" = "0" ]; then
-              COUNT=$(git rev-list --count "$SHA")
-            fi
+          # Check via GitHub API if release exists
+          RELEASE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+            || echo '{}')
 
-            TAG="main-b${COUNT}-${SHORT}"
+          if echo "$RELEASE" | grep -q '"id"'; then
+            echo "Release already exists on GitHub, skipping"
+            exit 0
+          fi
 
-            # Check if tag already exists
-            if git rev-parse "$TAG" >/dev/null 2>&1; then
-              echo "  ✓ $TAG already exists"
-              continue
-            fi
+          # Create the release via GitHub API
+          curl -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"tag_name\": \"$TAG\", \"target_commitish\": \"$FULL_SHA\", \"name\": \"$TAG\", \"body\": $(echo "$MSG" | jq -Rs .), \"draft\": false, \"prerelease\": false}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases"
 
-            # Get commit message
-            MSG=$(git log -1 --pretty=%B "$SHA")
-
-            # Create annotated tag
-            git tag -a "$TAG" "$SHA" -m "$MSG"
-            echo "  + Created tag $TAG"
-
-            # Push the tag
-            if git push origin "$TAG" 2>/dev/null; then
-              echo "    Pushed $TAG"
-            else
-              echo "    Note: Could not push $TAG (may be permission issue)"
-            fi
-          done
-
-          echo "Release tag creation complete."
+          echo "Release created: $TAG"
