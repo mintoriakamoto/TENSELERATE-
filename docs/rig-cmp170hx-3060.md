@@ -164,24 +164,29 @@ llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf -ngl 999 --main-gpu 0 \
   --chat-template-kwargs '{"reasoning_effort":"low"}'   # biggest end-to-end lever on an agent loop
 ```
 
-Sizing from the measured 33.3 tok/s single stream (550-710 GB/s achieved,
-Q4_K_M weights, all slots at their maximum window - the worst case):
+Sizing from two measured points (single stream 30 ms/step, two streams 41.5
+ms/step): each step is ~18.5 ms of weight read (~890 GB/s, 60% of nominal)
+plus **~11.5 ms per live sequence** of Gated-DeltaNet recurrence work that does
+not batch today. Short prompts; add ~5.4 ms per slot holding a full 256K window
+at q4_0 (10.8 ms at q8_0).
 
-| slots x window | KV | VRAM | per stream | aggregate |
-| --- | --- | --- | --- | --- |
-| 1 x 256K | 4.5 GiB | 23 GiB | 26-33 tok/s | 26-33 |
-| 4 x 256K | 18 GiB | 37 GiB | 15-20 | 61-79 |
-| 4 x 64K | 4.5 GiB | 23 GiB | 26-33 | 103-133 |
-| 8 x 64K | 9 GiB | 28 GiB | 21-27 | 168-217 |
-| 16 x 32K | 9 GiB | 28 GiB | 21-27 | 336-434 |
+| slots | step | per stream | aggregate |
+| --- | --- | --- | --- |
+| 1 | 30 ms | 33 tok/s | 33 |
+| 2 | 41.5 ms | 24 | 48 (measured 48.2) |
+| 4 | 64.5 ms | 15.5 | 62 |
+| 8 | 110 ms | 9 | 72 |
+| 16 | 203 ms | 5 | 79 |
 
-So: `-np 4` covers one operator with default delegation; `-np 8` covers
-orchestrator children or a couple of gateway chats; 16 slots only pays if
-sixteen sessions are genuinely decoding at once, and each of them then runs at
-~2/3 of single-stream speed. The main loop slows as subagents run - that is the
-trade, and the reason `reasoning_effort` matters more than any slot count.
-Closing the kernel gap (achieved bandwidth 37-48% of nominal) lifts every row
-by up to ~1.7x.
+So aggregate saturates near **1 / 11.5 ms = ~87 tok/s** however many slots are
+added, and every added slot slows the operator's main loop. For one operator:
+`-np 4` (main loop + default 3 subagents) is the ceiling worth paying for;
+`-np 2` if the main loop's speed matters more than subagent parallelism. Do not
+enable MTP on the DavidAU merge (7-11% acceptance; measured 14.9 tok/s, slower
+than plain). The lever that changes this table is a GDN kernel that processes
+all live sequences in one launch - if t_seq fell to ~2 ms, 8 slots would give
+~230 tok/s aggregate. Until then, `reasoning_effort` (fewer tokens) is worth
+more than any slot count.
 
 ## Context and KV at 1M
 
