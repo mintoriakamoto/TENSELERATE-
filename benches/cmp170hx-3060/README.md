@@ -107,6 +107,37 @@ is bytes (provable page skipping in the reference, q4_0 K fidelity A/B), not
 compute. And the aggregate ceiling in the MMQ regime is ~1/5.6 ms = ~180 tok/s
 from per-sequence work, before any GDN batching.
 
+## Cross-check against a laptop RTX 5090 (Ferrox Field Manual No.12)
+
+Their 5090 laptop: 896 GB/s, 40.8 tok/s single stream on the same model class
+(24.5 ms/token). Our 170HX: 1.37-1.49 TB/s nominal, 33.5 tok/s (29.9 ms).
+1.5x the bandwidth, slower decode - so the 170HX's step is not the weight
+read. Put the two through the same decomposition:
+
+```
+5090:  24.5 ms = ~23 ms weight read (16.5 GB at ~80%) + ~1.5 ms per-sequence
+170HX: 29.9 ms = ~18.5 ms weight read (60%)          + ~11.5 ms per-sequence
+```
+
+Same llama.cpp kernels, 8x the per-sequence cost. The width sweep already
+located that cost: the batch<=8 dp4a GEMV path (MMVQ) costs ~11.5 ms per
+sequence here and the tensor-core MMQ path ~5.6 ms, so the dp4a path is slow
+on this GA100 in a way it is not on a 5090 - whatever the unlock wiki says
+about dp4a being "uncrippled". The clean test is `GGML_CUDA_NO_MMVQ=1` at N=1:
+the model predicts ~24 ms -> ~41 tok/s, i.e. **parity with the 5090 per
+token**. Until that number exists, "compute-bottlenecked by the MMA gate" is
+the wrong story - the gate is measured absent (162-170 TFLOPS); the slow path
+is the vector GEMV.
+
+The manual's other levers, mapped: an intact MTP head (+137%, +250% on JSON
+at n-max 10) - ours measured broken on the merge in this fork, disputed by
+the model author's own 60%, decided by the upstream-build / stock-Unsloth
+test now running; `reasoning_effort low` (4.2x time-to-answer) - already in
+the launch; `GGML_CUDA_F16=ON` at build time (+250% claimed) - a cheap
+rebuild, but that flag changes the f16 intermediates of the cuBLAS prompt
+path, so expect it on prefill, not decode; n-gram speculation for structured
+output - being A/B'd, lossless and model-agnostic, only helps on copied spans.
+
 ## Depth: the KV read costs 5x what bytes say, and the code says why
 
 At 262K with q8_0 KV a single stream decodes at 12.4 tok/s: 80.9 ms per token,
@@ -156,7 +187,9 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
-- `GGML_CUDA_NO_MMVQ=1` at **N=1** (decides whether the flag is the default; N=4 x 256K done: 70.5)
+- `GGML_CUDA_NO_MMVQ=1` at **N=1** (decides the default; predicted ~41 tok/s = 5090 parity; N=4 x 256K done: 70.5)
+- stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build
+- `GGML_CUDA_F16=ON` rebuild: pp4096 and tg64 side by side with the current build
 - **262K single stream with `-ctk f16 -ctv f16`** (prediction ~22 tok/s vs 12.4; decides the KV type for deep slots)
 - per-op profile of one MMQ-regime step (`nsys profile`, llama-bench `-n 16`) to
   split the remaining ~5.6 ms/sequence between GDN, attention and GEMM
