@@ -44,8 +44,8 @@ class Engine:
         self.generator = Generator(self.model)
         self.tokenizer = ByteTokenizer()
         self.served_name = (
-            "deadbydawn101/RavenXAiLabs-Chaos-Agent-Qwen3.8-27B-"
-            "Frontier-Intelligence-Injected-OBLITERATED-GGUF:Q4_K_M"
+            "DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-"
+            "Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF:Q4_K_M"
         )
 
     def complete(self, prompt: str, params: SamplingParams) -> tuple[str, int, int]:

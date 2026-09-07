@@ -1,6 +1,6 @@
 """
-The vLLM backend: build the `vllm serve` command line for the RavenX model on
-the Ampere target box, with the engine's product floors baked in.
+The vLLM backend: build the `vllm serve` command line for the Qwen3.8-27B TURBO
+model on the Ampere target box, with the engine's product floors baked in.
 
 Why vLLM here. The Ampere box - **CMP 170HX (GA100, sm_80, HBM2e) + RTX 3060
 12 GiB (GA106, sm_86, GDDR6)** - is vLLM's home turf: FlashAttention-2, the Flash-
@@ -37,14 +37,15 @@ from dataclasses import dataclass
 
 from tenselerate.config import ModelConfig, validate_window
 
-# The one model, as published (GGUF Q4_K_M). vLLM loads it with --quantization
-# gguf; on Ampere the int4 weights run through Marlin.
-RAVENX_MODEL_REF = (
-    "deadbydawn101/RavenXAiLabs-Chaos-Agent-Qwen3.8-27B-"
-    "Frontier-Intelligence-Injected-OBLITERATED-GGUF"
+# The one model: DavidAU's TURBO Fable Cold Fusion (Qwen3.8-27B).
+# Tuned for reduced thinking tokens (50-90% reduction) while maintaining quality.
+# vLLM loads it with --quantization gguf; on Ampere the int4 weights run through Marlin.
+QWEN38_MODEL_REF = (
+    "DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-"
+    "Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF"
 )
-RAVENX_GGUF_FILE = "Q4_K_M"
-RAVENX_SERVED_NAME = f"{RAVENX_MODEL_REF}:{RAVENX_GGUF_FILE}"
+QWEN38_GGUF_FILE = "Q4_K_M"
+QWEN38_SERVED_NAME = f"{QWEN38_MODEL_REF}:{QWEN38_GGUF_FILE}"
 
 # vLLM KV cache dtype for each --kv-bits value. vLLM has no int4 KV; fp8 is its
 # footprint/concurrency lever, and "auto" keeps the compute dtype (fp16 here).
@@ -96,9 +97,9 @@ def build_vllm_serve_argv(
         raise ValueError("TENSELERATE is loopback-only; refuse off-host bind")
 
     argv = [
-        "vllm", "serve", RAVENX_MODEL_REF,
+        "vllm", "serve", QWEN38_MODEL_REF,
         "--quantization", "gguf",
-        "--served-model-name", RAVENX_SERVED_NAME,
+        "--served-model-name", QWEN38_SERVED_NAME,
         "--host", host,
         "--port", str(port),
         # heterogeneous GPUs, no NVLink -> pipeline, one stage per card

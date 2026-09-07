@@ -68,7 +68,7 @@ CUDA kernel parallelizes over, so that test is the kernel's spec.
 
 ## One model only: Qwen3.8-27B
 
-TENSELERATE serves exactly one model — the RavenX Chaos Agent (Qwen3.8-27B,
+TENSELERATE serves exactly one model — Qwen3.8-27B TURBO (DavidAU Fable Cold Fusion,
 architecture `qwen3_5`). This is a hard limit, enforced at load time:
 `config_from_gguf()` raises `UnsupportedModelError` for any file whose
 architecture is not `qwen3_5` or whose geometry differs from the published 27B
@@ -149,7 +149,7 @@ and `plan --kv-bits N --spec mtp` models them at the locked window:
 
 - **q4_0 / fp8 KV** — half the KV footprint, so more concurrency in the same
   VRAM. 4-bit is the literature-validated KV floor (KIVI/KVQuant); an A/B
-  confirms the RavenX delta.
+  confirms the delta for Qwen3.8-27B.
 - **MTP self-speculation** — the model's built-in Multi-Token-Prediction draft
   head; accepted tokens cost no extra weight read, so throughput multiplies
   (~1.8x modelled) with **output identical to plain decode**. **EAGLE-3** (a

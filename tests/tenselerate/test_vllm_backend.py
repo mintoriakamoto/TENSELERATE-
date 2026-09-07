@@ -1,8 +1,8 @@
 """
-The vLLM backend launcher: it builds a correct `vllm serve` argv for the RavenX
-model on the Ampere box, and it enforces the SAME product floors the native
-engine does before vLLM is ever started - so the backend swap changes the
-runtime, never the contract.
+The vLLM backend launcher: it builds a correct `vllm serve` argv for the
+Qwen3.8-27B model on the Ampere box, and it enforces the SAME product floors
+the native engine does before vLLM is ever started - so the backend swap changes
+the runtime, never the contract.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import dataclasses
 import pytest
 
 from tenselerate.backends.vllm import (
-    AMPERE_BOX, KV_CACHE_DTYPE, RAVENX_MODEL_REF, build_vllm_serve_argv,
+    AMPERE_BOX, KV_CACHE_DTYPE, QWEN38_MODEL_REF, build_vllm_serve_argv,
     vllm_serve_command,
 )
 from tenselerate.config import (
@@ -26,7 +26,7 @@ def argv(ctx: int = MIN_CONTEXT_TOKENS, **kw) -> list[str]:
 
 def test_serves_the_one_model_via_vllm():
     a = argv()
-    assert a[:3] == ["vllm", "serve", RAVENX_MODEL_REF]
+    assert a[:3] == ["vllm", "serve", QWEN38_MODEL_REF]
     assert "--quantization" in a and a[a.index("--quantization") + 1] == "gguf"
 
 

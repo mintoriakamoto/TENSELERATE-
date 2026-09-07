@@ -219,7 +219,7 @@ def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
     _out("lossless levers at the locked window (they never touch quality):")
     _out("  q4_0 KV   -> more concurrency in the same VRAM "
          "(4-bit is the validated KV")
-    _out("               floor - KIVI/KVQuant; an A/B confirms the RavenX delta)")
+    _out("               floor - KIVI/KVQuant; an A/B confirms the delta)")
     _out(f"  MTP spec  -> ~{MTP_SPECULATIVE_SPEEDUP:.1f}x, output identical to "
          "plain decode; EAGLE-3 higher")
     _out(f"  together at the {cfg.attention_window:,} window -> ~{full:,.0f} "
@@ -477,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
                              f"{MAX_ATTENTION_WINDOW:,}, the max no-RoPE recall; "
                              "only that value is legal - it never narrows)")
     p_plan.add_argument("--weights-gib", type=float, default=15.41,
-                        help="weight footprint (default: RavenX Q4_K_M)")
+                        help="weight footprint (default: Qwen3.8-27B Q4_K_M)")
     p_plan.add_argument("--overhead-gib", type=float, default=1.5)
     p_plan.add_argument("--kv-bits", type=int, default=8, choices=(8, 4),
                         help="KV cache precision: 8=q8_0 (default), "

@@ -62,7 +62,7 @@ def test_kv_is_constant_beyond_the_window():
 
 
 def test_kv_at_the_floor_fits_the_supported_box():
-    weights_gib = 15.41                      # RavenX Q4_K_M
+    weights_gib = 15.41                      # Qwen3.8-27B Q4_K_M
     kv_gib = RAVENX_27B.kv_bytes_for_context(MIN_CONTEXT_TOKENS) / GiB
     total = weights_gib + kv_gib
     assert 8.0 < kv_gib < 9.0, kv_gib        # ~8.5 GiB at the locked 256K window

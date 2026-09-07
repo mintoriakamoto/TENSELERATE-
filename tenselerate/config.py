@@ -1,14 +1,14 @@
 """
 Model configuration for the TENSELERATE engine.
 
-TENSELERATE serves exactly ONE model: the RavenX Chaos Agent (Qwen3.8-27B,
+TENSELERATE serves exactly ONE model: Qwen3.8-27B TURBO (Fable Cold Fusion tuning,
 architecture `qwen3_5`) — a hybrid of Gated-DeltaNet linear-attention layers and
 periodic full-attention layers. That is a product decision, the same kind as the
 context floor below: the engine is tuned around this one geometry (its 16-of-64
 attention split, its KV footprint, its window math), and every published number
 assumes it. Loading anything else is refused, not degraded — `config_from_gguf`
 raises `UnsupportedModelError` for any file whose architecture is not `qwen3_5`
-or whose geometry differs from `RAVENX_27B` in any field.
+or whose geometry differs from `QWEN38_27B` in any field.
 
 `RAVENX_27B` mirrors the published config.json exactly; `TINY` is a smoke-scale
 stand-in with the same *structure* (same full-attention period, same
@@ -75,9 +75,9 @@ MTP_SPECULATIVE_SPEEDUP = 1.8
 ATTENTION_SINK_TOKENS = 4
 # Hard product lock: the only architecture and model this engine will load.
 SUPPORTED_ARCH = "qwen3_5"
-SUPPORTED_MODEL = "Qwen3.8-27B (RavenX Chaos Agent)"
+SUPPORTED_MODEL = "Qwen3.8-27B TURBO (DavidAU Fable Cold Fusion)"
 # The bounded window for the full-attention layers, locked at the maximum
-# no-RoPE recall: the RavenX 256K (262,144) trained range minus the sinks. This
+# no-RoPE recall: the Qwen3.8-27B 256K (262,144) trained range minus the sinks. This
 # is the only legal window (MIN == this == MAX), so "default" here means "the
 # fixed value". KV is a constant ~8.5 GiB (q8_0) / ~4.5 GiB (q4_0) at this
 # window, independent of total context length.
@@ -117,7 +117,7 @@ def validate_window(window: int, max_window: int = MAX_ATTENTION_WINDOW) -> int:
     attention sinks are counted (window + sinks <= max_position_embeddings), so
     no position is ever extrapolated and RoPE scaling is never needed. Returns
     the window on success so it can be used inline. `max_window` defaults to the
-    RavenX ceiling; pass a config's own `max_attention_window` for other geometry.
+    Qwen3.8-27B maximum; pass a config's own `max_attention_window` for other geometry.
     """
     if window < MIN_ATTENTION_WINDOW:
         raise QualityFloorError(
@@ -245,9 +245,10 @@ class ModelConfig:
         return ctx
 
 
-# Exact geometry from OBLITERATUS/Qwen3.8-27B-OBLITERATED/config.json
+# Canonical geometry: Qwen3.8-27B (256K context, 16-of-64 attention split, GDN hybrid).
+# This geometry is used for all Qwen3.8-27B models served by TENSELERATE.
 RAVENX_27B = ModelConfig(
-    name="ravenx-chaos-agent-27b",
+    name="qwen38-27b",
     n_layer=64,
     hidden_size=5120,
     n_head=24,
