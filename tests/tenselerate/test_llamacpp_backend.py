@@ -49,6 +49,20 @@ def test_measured_defaults_land_in_the_argv():
     assert kwargs == {"reasoning_effort": "low"}
 
 
+def test_agent_contract_flags_are_present():
+    # Hermes: without --jinja llama-server ignores `tools`; reasoning_effort is
+    # a template kwarg (needs jinja too); thinking must come back as
+    # reasoning_content; an oversized request must fail, not context-shift.
+    a = argv()
+    assert "--jinja" in a
+    assert after(a, "--reasoning-format") == "deepseek"
+    assert "--no-context-shift" in a
+    assert after(a, "--alias") == "tenselerate"
+    assert after(argv(alias="hercules-27b"), "--alias") == "hercules-27b"
+    with pytest.raises(ValueError, match="alias"):
+        argv(alias="")
+
+
 def test_never_enables_speculation():
     # MTP measured 7-11% acceptance on the served merge: slower than plain
     a = argv()

@@ -7,14 +7,14 @@
 # reasoning_effort=low, chunked prefill with cache reuse.
 #
 # Usage: bash scripts/hercules_serve.sh MODEL.gguf [extra tenselerate serve flags]
-# Env overrides: NP (slots, 4) CTX (pool tokens, 524288) KV (q8_0) PORT (8080)
+# Env overrides: NP (slots, 4) CTX (pool tokens, 524288) KV (q8_0) PORT (8080) ALIAS (tenselerate)
 #                REASONING (low) NO_MMVQ (set to 1 to force the tensor-core
 #                MMQ path once the N=1/2/4 GGML_CUDA_NO_MMVQ runs confirm it)
 set -euo pipefail
 MODEL="${1:?model gguf path}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-args=(serve --backend llamacpp --model "$MODEL"
+args=(serve --backend llamacpp --model "$MODEL" --alias "${ALIAS:-tenselerate}"
       --slots "${NP:-4}" --ctx-pool "${CTX:-524288}" --kv "${KV:-q8_0}"
       --port "${PORT:-8080}" --reasoning "${REASONING:-low}")
 if [[ "${NO_MMVQ:-}" == "1" ]]; then args+=(--no-mmvq); fi

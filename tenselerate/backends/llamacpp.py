@@ -23,6 +23,19 @@ What the measurements decided, and where each one lands in the argv:
     the width sweep says that path is cheaper per sequence on this unit. It is
     an environment variable, exposed as `no_mmvq`, off until the N=1/2/4 runs
     confirm it.
+
+What Hermes needs from the server (docs/integrations/providers.md upstream):
+  * `--jinja`: without it llama-server ignores the `tools` parameter entirely,
+    so every Hermes tool call silently degrades to text - and the
+    `--chat-template-kwargs` reasoning_effort lever is a template kwarg, so it
+    needs jinja too. Mandatory.
+  * `--reasoning-format deepseek`: thinking comes back as
+    `message.reasoning_content`, which Hermes keeps in `assistant_msg["reasoning"]`
+    (set `reasoning_content: true` on the Hermes side).
+  * `--alias`: a stable model id for Hermes' `model.default` instead of the
+    GGUF file name.
+  * `--no-context-shift`: an oversized request must fail so Hermes compacts and
+    retries; a silent context shift corrupts an agent conversation.
 """
 from __future__ import annotations
 
@@ -40,6 +53,7 @@ DEFAULT_SLOTS = 4            # main loop + 3 subagents
 DEFAULT_CTX_POOL = 524_288   # two full 262K windows' worth, shared
 DEFAULT_KV = "q8_0"
 DEFAULT_REASONING = "low"
+DEFAULT_ALIAS = "tenselerate"
 
 
 def build_llama_server_argv(
@@ -52,6 +66,7 @@ def build_llama_server_argv(
     ctx_pool: int = DEFAULT_CTX_POOL,
     kv: str = DEFAULT_KV,
     reasoning: str = DEFAULT_REASONING,
+    alias: str = DEFAULT_ALIAS,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -71,9 +86,12 @@ def build_llama_server_argv(
         raise ValueError(
             f"ctx_pool {ctx_pool:,} cannot hold one locked {MIN_ATTENTION_WINDOW:,}-token "
             "window; the pool is shared by all slots but the main session must fit")
+    if not alias:
+        raise ValueError("alias must be a non-empty model id for the agent to address")
     argv = [
-        binary, "-m", model,
+        binary, "-m", model, "--alias", alias,
         "--host", host, "--port", str(port),
+        "--jinja", "--reasoning-format", "deepseek", "--no-context-shift",
         "-ngl", "999", "--main-gpu", "0", "-fa", "on",
         "-c", str(ctx_pool), "-np", str(slots), "--kv-unified", "-cb",
         "-ctk", kv, "-ctv", kv,
