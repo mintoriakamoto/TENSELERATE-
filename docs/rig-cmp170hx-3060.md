@@ -129,7 +129,8 @@ llama-server -m qwen3.8-27b-UD-Q4_K_M.gguf \
   -ctk q8_0 -ctv q8_0 -fa on \                      # ~8.5 GiB KV at the 262K window
   -b 2048 -ub 512 \                                 # chunked prefill (memory-safe on 32 GiB / 12 GiB)
   -t 16
-# No MTP on the DavidAU merge: measured 7-11% acceptance, 14.9 tok/s vs 33.5 plain.
+# MTP on the -MTP- GGUF only at depth 1: --spec-type draft-mtp --spec-draft-n-max 1
+#   measured +35% (46.6 vs 34.4 tok/s); n-max 5 measured -22% (the head is shallow).
 # For the Hercules-shaped multi-slot config see "Serving Hercules" below.
 # window stays <= 262,140 (engine-enforced). Do NOT pass --swa-full (removes the window).
 ```
