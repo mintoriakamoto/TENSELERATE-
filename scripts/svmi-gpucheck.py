@@ -171,6 +171,16 @@ def advise(c: Card) -> tuple[list[str], list[str]]:
         flags.append("cmake --preset cmp170hx-int8  # or cmp90hx-int8: FORCE_MMQ + dp2a")
         flags.append("run: GGML_CUDA_NO_MMVQ=1      # batch-1 decode on MMQ too, off the dp4a "
                      "path (A/B with scripts/svmi-cmpbench.sh)")
+        if c.is_170hx:
+            warn.append("170HX compute state cannot be read from nvidia-smi. FULL unlock "
+                        "(d3dx9 fuse-map reset, 2026-07) restores FP32/FP16/BF16/tensor "
+                        "cores: build NORMAL sm_80 + cuBLAS, -fa on, and SKIP every flag "
+                        "below (fmad/MMQ/dp4a are capacity-only-unlock workarounds).")
+            warn.append("Capacity-only unlock: FP32 stays ~1/32 and there are no tensor "
+                        "cores; then compiling with FMA disabled restores FP32 to ~6.2 "
+                        "TFLOPS and lifts quantized decode to 50-78% of A100 (arXiv:2505.03782).")
+            flags.append("-DCMAKE_CUDA_FLAGS=--fmad=false  # capacity-only 170HX FP32 unlock")
+            flags.append("-DCMAKE_CUDA_ARCHITECTURES=80    # GA100/A100 silicon (both states)")
 
     cc, preset = c.arch
     if cc:
@@ -373,10 +383,15 @@ def self_test() -> int:
     # 5. 170HX HBM2e geometry: flagged while fused down, not flagged once unlocked
     assert locked_170.hbm_locked and not unlocked_170.hbm_locked
     lw, lf = advise(locked_170)
-    uw, _ = advise(unlocked_170)
+    uw, uf = advise(unlocked_170)
     assert any("factory-fused HBM2e" in w for w in lw), lw
     assert any("cmp170hx-64" in f for f in lf), lf
     assert any("reverts to 8/10 GiB" in w for w in uw), uw
+    # 170HX gets the capacity-only FMA-disable advice AND the full-unlock note; 90HX gets neither
+    assert any("--fmad=false" in f for f in uf), uf
+    assert any("CUDA_ARCHITECTURES=80" in f for f in uf), uf
+    assert any("FULL unlock" in w for w in uw), uw
+    assert not any("--fmad=false" in f for f in af), af
     # 6. arch routing + the sm_120 toolchain floor
     assert healthy.arch == ("86", "rtx-ampere"), healthy.arch
     assert blackwell.arch == ("120", "rtx-blackwell"), blackwell.arch

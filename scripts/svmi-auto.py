@@ -79,26 +79,39 @@ MACHINES = {
                 "CMP 170HX after the cmpunlocker HBM2e unlock (host RAM assumed)"),
     "cmp-rig-40": (["cmp170hx-40"], 64.0,
                    "CMP 170HX 10 GiB variant unlocked to 40 GiB (host RAM assumed)"),
+    "raven-9950x": (["cmp170hx-40", "3060"], 32.0,
+                    "Ryzen 9 9950X / B650E / 32 GiB DDR5 - CMP 170HX (40 GiB) + RTX 3060, "
+                    "52 GiB VRAM. Big card holds the model resident; 3060 drafts/embeds."),
 }
 
 # firmware quirks that change how llama.cpp must be BUILT for a card
 DP4A_QUIRK = "throttled dp4a — build -DGGML_CUDA_DISABLE_DP4A=ON (~2x, llama.cpp#24616)"
-INT8_QUIRK = "no usable FP16 path - quantize INT8 so attention runs on q8_0/MMQ"
+INT8_QUIRK = ("prefer INT8/MMQ for decode; FP16 has no tensor-core acceleration here "
+              "(on the 170HX it is not hardware-throttled - A/B '-fa on', arXiv:2505.03782)")
+FMAD_QUIRK = ("170HX: FULL unlock (d3dx9 fuse-map reset) restores FP32/FP16/tensor cores - "
+              "build normal sm_80 + cuBLAS. Capacity-only unlock instead: build "
+              "-DCMAKE_CUDA_FLAGS=--fmad=false -DCMAKE_CUDA_ARCHITECTURES=80 (arXiv:2505.03782)")
 UNLOCK_QUIRK = ["cmpunlocker unlock is VOLATILE: a daemon rewrites it every second, and a "
                 "driver reload drops the card back to its factory 8/10 GB",
                 "link stays narrow (gen1 x4 ~1 GB/s, gen2 after unlock; the capacitor mod "
                 "restores gen1 x16 ~4 GB/s) - that is the one-time model load, not per-token"]
+POWER_QUIRK = ("often power-capped below TDP (250W); decode is power-sensitive on a "
+               "bandwidth-bound card, so raise it when the PSU/thermals allow: "
+               "'sudo nvidia-smi -i <N> -pl 200' and bench before/after")
+PREFILL_QUIRK = ("170HX tensor-core MMA is gated to ~1/32 (256-cycle + 4-warp limit), so "
+                 "prefill/GEMM stays weak even unlocked - keep latency-sensitive prefill "
+                 "on a consumer card (e.g. the 3060); decode stays on the 170HX")
 GPU_QUIRKS = {
     "cmp90hx":  [DP4A_QUIRK, INT8_QUIRK,
                  "the 90HX unlock is compute-only - VRAM stays 10 GB, link unchanged"],
-    "cmp170hx": [DP4A_QUIRK, INT8_QUIRK,
+    "cmp170hx": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK,
                  "8 GB stock: cmpunlocker restores HBM2e geometry to 64 GB - plan the "
                  "unlocked card with --gpu cmp170hx-64"],
-    "cmp170hx-10g": [DP4A_QUIRK, INT8_QUIRK,
+    "cmp170hx-10g": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK,
                      "10 GB stock: cmpunlocker restores HBM2e geometry to 40 GB - plan the "
                      "unlocked card with --gpu cmp170hx-40"],
-    "cmp170hx-64": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
-    "cmp170hx-40": [DP4A_QUIRK, INT8_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-64": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK] + UNLOCK_QUIRK,
+    "cmp170hx-40": [DP4A_QUIRK, FMAD_QUIRK, INT8_QUIRK, PREFILL_QUIRK, POWER_QUIRK] + UNLOCK_QUIRK,
     "cmp100-210": [
         "tensor cores firmware-gimped: FP16 (~5.6 TF) is SLOWER than FP32 (~10.6 TF)",
         "build -DGGML_CUDA_FORCE_MMQ=ON so decode stays on integer kernels, never cuBLAS FP16",
@@ -210,6 +223,11 @@ def main() -> int:
                       "-o imatrix.gguf, then add --imatrix imatrix.gguf")
         print("build   : cmake --preset cmp170hx-int8 && cmake --build build-cmp170hx-int8 -j")
         print("          (all matmuls on MMQ, no cuBLAS FP16; also cmp90hx-int8, cmp100-210-int8)")
+        if any(g.startswith("cmp170hx") for g in gpu_names):
+            print("          170HX full unlock (d3dx9 fuse-map reset, 2026-07): FP32/FP16/tensor")
+            print("          cores restored -> build NORMAL sm_80 + cuBLAS, -fa on, skip the flags above.")
+            print("          Capacity-only unlock instead: add -DCMAKE_CUDA_FLAGS=--fmad=false")
+            print("          -DCMAKE_CUDA_ARCHITECTURES=80 for its throttled FP32 (arXiv:2505.03782)")
     if mixed:
         print("warning : mixed cards - a layer split runs each token at the SLOWEST card's")
         print("          pace for its share. Prefer asymmetric roles (brain on the big card,")

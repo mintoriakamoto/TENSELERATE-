@@ -31,25 +31,33 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# use the in-tree gguf-py reader
-sys.path.insert(0, str(Path(__file__).parent.parent / "gguf-py"))
-
-from gguf import GGUFReader  # noqa: E402
-
 GiB = 1024**3
 MiB = 1024**2
 
-# effective *pinned* H2D bandwidth (GB/s), well below the theoretical link rate
+# effective *pinned* H2D bandwidth (GB/s), well below the theoretical link rate.
+# The sub-3 GB/s links are the crippled ones on CMP mining cards: streaming is
+# not viable over them (see CRIPPLED_LINK_BW below), the card is a resident shard.
 PCIE_BW = {
+    "1.0-x1":  0.25,   # CMP 100-210: board-level x1, no flash restores it
+    "2.0-x4":  2.0,    # CMP 170HX effective; card is natively PCIe 1.1 x4 (~1-2 GB/s)
+    "3.0-x4":  4.0,    # CMP 170HX with the capacitor mod (PCIe 1.1 x16, ~4 GB/s)
     "3.0-x8":  6.0,
     "3.0-x16": 12.0,
     "4.0-x8":  12.0,
     "4.0-x16": 24.0,
+    "5.0-x8":  24.0,
     "5.0-x16": 48.0,
 }
 
+# below this effective H2D rate, per-token weight streaming stalls the GPU far
+# more than it saves: the card is a RESIDENT shard, not a streaming target.
+CRIPPLED_LINK_BW = 3.0
+
 # consumer-GPU presets: (physical VRAM GiB, PCIe link, copy engines, note).
 # The usable weight budget defaults to physical minus a display/driver reserve.
+# CMP entries mirror scripts/svmi-auto.py so the command that tool prints
+# ("svmi-plan.py ... --gpu cmp170hx-40") resolves here; see scripts/svmi-gpucheck.py
+# for the dp4a/INT8 BUILD flags those cards additionally need.
 GPU_PRESETS = {
     "1660ti": (6,  "3.0-x16", 1, "Turing TU116, PCIe 3.0, no tensor cores"),
     "2060":   (6,  "3.0-x16", 1, "Turing TU106, PCIe 3.0"),
@@ -62,8 +70,25 @@ GPU_PRESETS = {
     "3080":   (10, "4.0-x16", 2, "Ampere GA102, PCIe 4.0"),
     "3090":   (24, "4.0-x16", 2, "Ampere GA102, PCIe 4.0"),
     "4060":   (8,  "4.0-x8",  2, "Ada AD107, PCIe 4.0 x8 (narrow link!)"),
+    "4060ti": (16, "4.0-x8",  2, "Ada AD106, PCIe 4.0 x8 (narrow link!)"),
     "4070":   (12, "4.0-x16", 2, "Ada AD104, PCIe 4.0"),
+    "4070ti": (12, "4.0-x16", 2, "Ada AD104, PCIe 4.0"),
+    "4070tis":(16, "4.0-x16", 2, "Ada AD103, PCIe 4.0"),
+    "4080":   (16, "4.0-x16", 2, "Ada AD103, PCIe 4.0"),
     "4090":   (24, "4.0-x16", 2, "Ada AD102, PCIe 4.0"),
+    "5060ti": (16, "5.0-x8",  2, "Blackwell GB206, PCIe 5.0 x8"),
+    "5070":   (12, "5.0-x16", 2, "Blackwell GB205, PCIe 5.0"),
+    "5070ti": (16, "5.0-x16", 2, "Blackwell GB203, PCIe 5.0"),
+    "5080":   (16, "5.0-x16", 2, "Blackwell GB203, PCIe 5.0"),
+    "5090":   (32, "5.0-x16", 2, "Blackwell GB202, PCIe 5.0"),
+    # CMP mining cards: cheap VRAM, dp4a-throttled, crippled PCIe. Streaming is
+    # not viable over the link - plan them as RESIDENT shards (or RPC workers).
+    "cmp90hx":     (10, "2.0-x4", 1, "Ampere GA102, dp4a-throttled; keep RESIDENT"),
+    "cmp170hx":    (8,  "2.0-x4", 1, "GA100 silicon, HBM2e fused to 8 GiB; cmpunlocker -> 64 GiB"),
+    "cmp170hx-10g":(10, "2.0-x4", 1, "GA100 silicon, HBM2e fused to 10 GiB; cmpunlocker -> 40 GiB"),
+    "cmp170hx-64": (64, "2.0-x4", 1, "170HX unlocked to 64 GiB, dp4a-throttled; keep RESIDENT"),
+    "cmp170hx-40": (40, "2.0-x4", 1, "170HX unlocked to 40 GiB, dp4a-throttled; keep RESIDENT"),
+    "cmp100-210":  (16, "1.0-x1", 1, "Volta GV100, 16 GiB HBM2, PCIe 1.0 x1; keep RESIDENT"),
 }
 
 
@@ -77,9 +102,50 @@ def is_ffn(name: str) -> bool:
     return ".ffn_" in name
 
 
+def self_test() -> int:
+    """Validate the preset tables without touching a model or a GPU."""
+    # 1. every preset is well-formed and references a known PCIe link
+    for name, (vram, link, queues, note) in GPU_PRESETS.items():
+        assert vram > 0, name
+        assert link in PCIE_BW, f"{name}: unknown link {link!r}"
+        assert queues >= 1, name
+        assert note, name
+
+    # 2. CMP cards resolve to a crippled link (streaming-hostile); consumer cards
+    #    resolve to a healthy one. This is what the crippled-link guard keys on.
+    for name, (_v, link, _q, _n) in GPU_PRESETS.items():
+        if name.startswith("cmp"):
+            assert PCIE_BW[link] < CRIPPLED_LINK_BW, f"{name} should be crippled"
+        else:
+            assert PCIE_BW[link] >= CRIPPLED_LINK_BW, f"{name} should be healthy"
+
+    # 3. parity with svmi-auto.py: every GPU that tool knows must resolve here, or
+    #    the command it prints ("svmi-plan.py ... --gpu <name>") fails argparse.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "svmi_auto", Path(__file__).parent / "svmi-auto.py")
+    assert spec is not None and spec.loader is not None
+    auto = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(auto)
+    missing = sorted(set(auto.GPU_PRESETS) - set(GPU_PRESETS))
+    assert not missing, f"presets svmi-auto knows but svmi-plan does not: {missing}"
+
+    # 4. the target box: RTX 3060 (12 GiB, healthy) + CMP 170HX unlocked to 40 GiB
+    assert GPU_PRESETS["3060"][0] == 12
+    assert PCIE_BW[GPU_PRESETS["3060"][1]] >= CRIPPLED_LINK_BW
+    assert GPU_PRESETS["cmp170hx-40"][0] == 40
+    assert PCIE_BW[GPU_PRESETS["cmp170hx-40"][1]] < CRIPPLED_LINK_BW
+
+    print(f"self-test OK: {len(GPU_PRESETS)} presets well-formed; CMP links crippled and "
+          "consumer links healthy;")
+    print(f"             svmi-auto parity ({len(auto.GPU_PRESETS)} of its presets all resolve "
+          "here); 3060 + cmp170hx-40 target box present.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("model", help="path to the GGUF model")
+    ap.add_argument("model", nargs="?", help="path to the GGUF model")
     ap.add_argument("--gpu", choices=sorted(GPU_PRESETS), help="consumer GPU preset: "
                     "sets VRAM budget, PCIe bandwidth, and upload-queue count "
                     "(e.g. 1660ti, 2080, 2080ti, 3060)")
@@ -95,7 +161,14 @@ def main() -> int:
     ap.add_argument("--stream-slots", type=int, default=8, help="streaming ring-buffer slots")
     ap.add_argument("--overhead", type=float, default=1.25,
                     help="activations/compute-buffer reserve in GiB (default 1.25)")
+    ap.add_argument("--self-test", action="store_true",
+                    help="validate the preset tables (no model or GPU needed)")
     args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
+    if args.model is None:
+        ap.error("provide a GGUF model path (or --self-test)")
 
     # resolve GPU preset -> budget / pcie / queues
     n_queues = 2
@@ -111,6 +184,10 @@ def main() -> int:
     if args.pcie is None:
         args.pcie = "4.0-x16"
     pcie_bw = PCIE_BW[args.pcie]
+
+    # use the in-tree gguf-py reader (imported here so --self-test needs no numpy)
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gguf-py"))
+    from gguf import GGUFReader
 
     reader = GGUFReader(args.model)
 
@@ -214,6 +291,18 @@ def main() -> int:
     print(f"  with BitSpec (3-bit self-draft, ~7x): ~{floor * 7:.1f} tok/s "
           f"(see scripts/svmi-bitspec.py)")
     print()
+
+    crippled = pcie_bw < CRIPPLED_LINK_BW
+    if streamed_layers and crippled:
+        print(f"! this link ({args.pcie}, ~{pcie_bw:.2f} GB/s) is below the "
+              f"{CRIPPLED_LINK_BW:.0f} GB/s streaming floor - per-token streaming would")
+        print(f"  stall the GPU, not accelerate it (the decode floor above, ~{floor:.2f} tok/s,")
+        print( "  is what that costs). A CMP/mining card is a RESIDENT shard, not a stream")
+        print( "  target: fit the model in VRAM (a smaller quant if needed), or combine rigs")
+        print( "  over the LAN and keep each shard resident:")
+        print(f"    python3 scripts/svmi-net.py {Path(args.model).name} "
+               "--node <this-rig>:ram=32 --node <other-rig>:ram=<GiB> --nic 1gbe")
+        print()
 
     if not streamed_layers:
         print("# everything fits resident; streaming not needed:")
