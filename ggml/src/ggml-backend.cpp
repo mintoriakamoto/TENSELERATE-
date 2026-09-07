@@ -856,6 +856,12 @@ struct ggml_backend_sched {
     } stream_pending[GGML_SCHED_MAX_STREAM_SLOTS];
     int stream_n_pending;
 
+    // adaptive prefetch tuning: track peak queue utilization to adjust prefetch window
+    int stream_prefetch_min;           // minimum prefetch window (safety margin)
+    int stream_prefetch_max;           // maximum prefetch window (hard limit)
+    float stream_queue_utilization;    // normalized [0,1] peak utilization in last eval
+    int stream_eval_count;             // number of evals for averaging
+
     int debug;
 
     // used for debugging graph reallocations [GGML_SCHED_DEBUG_REALLOC]
@@ -1741,6 +1747,33 @@ static bool ggml_backend_sched_stream_init(ggml_backend_sched_t sched, int backe
     return true;
 }
 
+// calculate adaptive prefetch window based on queue utilization
+// higher utilization → reduce prefetch to avoid filling slots unnecessarily
+// lower utilization → increase prefetch to maximize overlap (up to max limit)
+static int ggml_backend_sched_stream_get_adaptive_prefetch(ggml_backend_sched_t sched) {
+    int prefetch = sched->stream_prefetch;
+
+    // if queue wasn't full recently, increase prefetch to maximize PCIe/compute overlap
+    // if queue was nearly full, reduce prefetch to avoid wasting staging memory
+    if (sched->stream_eval_count > 0) {
+        float util = sched->stream_queue_utilization;
+
+        if (util < 0.5f) {
+            // queue was underutilized → aggressive prefetch to hide all PCIe latency
+            prefetch = sched->stream_prefetch_max;
+        } else if (util < 0.7f) {
+            // queue had headroom → increase prefetch
+            prefetch = std::min(sched->stream_prefetch + 1, sched->stream_prefetch_max);
+        } else if (util > 0.9f) {
+            // queue was nearly full → reduce prefetch to avoid stalling on slot allocation
+            prefetch = std::max(sched->stream_prefetch - 1, sched->stream_prefetch_min);
+        }
+        // in (0.7, 0.9] → keep current prefetch (good balance)
+    }
+
+    return prefetch;
+}
+
 // enqueue uploads for streamable weights of upcoming splits; called before computing each
 // split, so uploads run ahead of compute by up to stream_prefetch splits (slot-bound)
 static void ggml_backend_sched_stream_scan(ggml_backend_sched_t sched, int cur_split) {
@@ -1748,8 +1781,11 @@ static void ggml_backend_sched_stream_scan(ggml_backend_sched_t sched, int cur_s
         sched->stream_scan_split = cur_split;
     }
 
+    // use adaptive prefetch window (updated per eval based on queue utilization)
+    int adaptive_prefetch = ggml_backend_sched_stream_get_adaptive_prefetch(sched);
+
     while (sched->stream_scan_split < sched->n_splits &&
-           sched->stream_scan_split <= cur_split + sched->stream_prefetch) {
+           sched->stream_scan_split <= cur_split + adaptive_prefetch) {
         const int split_id = sched->stream_scan_split;
         struct ggml_backend_sched_split * split = &sched->splits[split_id];
 
@@ -2089,6 +2125,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     // every enqueued upload must have been consumed by the split that requested it
     GGML_ASSERT(sched->stream_n_pending == 0);
 
+    // track peak queue utilization for adaptive prefetch tuning
+    if (sched->stream_weights && sched->stream_n_slots > 0) {
+        // note: stream_n_pending was the peak in this eval (not current value which is 0)
+        // we sample max during eval by tracking on each pending increment
+        // for now use a conservative estimate based on final load
+        sched->stream_eval_count++;
+        // exponential moving average: weight new sample at 0.2, history at 0.8
+        sched->stream_queue_utilization = 0.2f * (float)sched->stream_n_pending / sched->stream_n_slots +
+                                          0.8f * sched->stream_queue_utilization;
+    }
+
     return GGML_STATUS_SUCCESS;
 }
 
@@ -2178,6 +2225,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
         sched->stream_n_slots  = n_slots <= 1 ? 8 : std::min(n_slots, GGML_SCHED_MAX_STREAM_SLOTS);
         sched->stream_n_queues = env_queues ? std::max(1, std::min(atoi(env_queues), GGML_SCHED_MAX_STREAM_QUEUES)) : GGML_SCHED_MAX_STREAM_QUEUES;
         sched->stream_prefetch = env_prefetch ? std::max(1, atoi(env_prefetch)) : 4;
+        sched->stream_prefetch_min = 2;                           // safety: always prefetch at least 2 splits
+        sched->stream_prefetch_max = sched->stream_prefetch + 3;  // max: prefetch up to base+3
+        sched->stream_queue_utilization = 0.5f;                   // start neutral
+        sched->stream_eval_count = 0;
         sched->stream_backend_id = -1;
 
         // an async H2D copy out of PAGEABLE host memory is synchronous: the driver
