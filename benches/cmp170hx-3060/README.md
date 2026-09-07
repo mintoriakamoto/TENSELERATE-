@@ -23,6 +23,7 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | **4 x 256K, q4_0 KV, `GGML_CUDA_NO_MMVQ=1`** | **70.5 tok/s aggregate** | llama-server `-np 4` | **+19% over 59** at the config that fits; model predicted ~63 |
 | 2026-09-07 | 16 x 16K, `GGML_CUDA_NO_MMVQ=1` | ~130 tok/s (reproducible) | `-np 16` | baseline 100-141 was noisy; same MMQ path either way, so no change expected and none seen |
 | 2026-09-07 | depth sweep, single stream, q8_0 KV, batch 1 | 0: 33.5 / 16K: 30.3 / 65K: 23.5 / 131K: 18.2 / **262K: 12.4 tok/s** (29.9 -> 80.9 ms) | llama-bench, prefill to depth then time decode | prefill 856 -> 327 tok/s over the same range; KV term at 262K is **51 ms**, predicted 10.8 |
+| 2026-09-07 | n-gram speculation, single stream | baseline 34.4 / `ngram-cache` **16.9** / `ngram-mod` 34.4 tok/s | llama-server | halved or flat: near-zero acceptance on prose and the verify batch is paid in full (see docs/mtp-realign-davidau.md) |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -106,6 +107,21 @@ the other half of the step, so after NO_MMVQ the next lever for deep contexts
 is bytes (provable page skipping in the reference, q4_0 K fidelity A/B), not
 compute. And the aggregate ceiling in the MMQ regime is ~1/5.6 ms = ~180 tok/s
 from per-sequence work, before any GDN batching.
+
+## Speculation is not dead here; the dp4a verify pass is
+
+Every speculative method measured so far lost or broke even: MTP (7-11%
+acceptance) and n-gram (`ngram-cache` halved throughput). The other session
+read that as structural - "compute-bound, speculation pays the GDN
+recurrence". The width sweep gives the actual cost: a verify pass of m
+tokens is `18.5 + m * c` ms with c ~ 11.5 ms on the batch<=8 dp4a path and
+~5.6 ms on the MMQ path. A 4-draft pass therefore costs 76 ms today
+(break-even 2.5 accepted tokens) and 46.5 ms under `GGML_CUDA_NO_MMVQ=1`
+(break-even 1.55). With an unmatched head or prose n-grams, ~1 token is
+accepted per pass: a 76 ms pass for one token is exactly the halving seen.
+A head matched to the merge (3+ accepted, the DimInfer/RadixArk numbers) on
+the MMQ path is ~2x. Recipe and the direct verify-cost measurement:
+`docs/mtp-realign-davidau.md`.
 
 ## Cross-check against a laptop RTX 5090 (Ferrox Field Manual No.12)
 

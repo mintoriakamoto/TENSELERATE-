@@ -39,6 +39,7 @@ jobs:
         run: |
           for f in scripts/*.sh .github/actions/*.sh; do bash -n "$f"; done
           bash scripts/tenselerate-update.sh --self-test
+          python3 scripts/mtp-realign-gen.py --self-test
           PYTHONPATH=. python -m tenselerate serve --backend llamacpp --model /nonexistent.gguf --dry-run
       - name: host int8 GEMM reference test
         run: |
