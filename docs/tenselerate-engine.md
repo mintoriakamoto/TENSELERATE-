@@ -167,6 +167,12 @@ Both 2080 Ti are identical Turing cards, so the build is a single sm_75 SASS
 target (`--preset deploy-2x2080ti`) — no fat binary, no JIT stall. Turing has
 int8 tensor cores (IMMA) and unthrottled dp4a, so the int8 path applies.
 
+The default build target is now the **Ampere box** - CMP 170HX (GA100, sm_80) +
+RTX 3060 Ti (GA104, sm_86). The kernels build for `80-real;86-real` (a two-card
+fat binary, `--preset deploy-cmp170hx-3060ti`), which CI compiles. That is the
+vLLM-runtime box; see [`vllm-backend.md`](vllm-backend.md). The 2080 Ti stays
+buildable via `--preset deploy-2x2080ti` / `rtx-turing`.
+
 ### The acceleration path — how the box reaches the standard
 
 Baseline (q8_0 KV, no speculation) the box is below 400. But two real levers
