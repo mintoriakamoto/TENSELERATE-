@@ -353,6 +353,7 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     }
     if (ne11 > ggml_cuda_mmvq_max_batch() && ggml_cuda_should_use_mmq(type, cc, ne11, /*n_experts =*/ 0)) {
         return false;
+    }
     // k-quants cost more to decode and mvq redoes that per column, so MMQ wins sooner.
     // Only list quant-types MMQ supports, others would fall back to cuBLAS.
     if (GGML_CUDA_CC_IS_NVIDIA(cc) && cc == GGML_CUDA_CC_ADA_LOVELACE) {
