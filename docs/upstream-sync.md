@@ -67,10 +67,43 @@ Result: **73 conflicted paths.**
 4. `python3 -m tenselerate serve --backend llamacpp --dry-run` still passes
    the flag set (`--spec-type draft-mtp`, `--kv-unified`, `--cache-reuse`).
 
-## Status
+## Status: landed 2026-09-07 (three-way merge, upstream 67672dc5)
 
-Not landed. The merge was carried to the conflict list in this repository's
-working tree and abandoned there: the session that ran it is not permitted to
-delete the 29 workflow files, which is the first resolution step. Everything
-above is reproducible from the commands; the 42 content conflicts are a
-day's work with a build in the loop.
+Resolution actually taken, by area:
+
+- **CUDA / Vulkan / Metal / SYCL / CPU quant kernels: upstream.** Upstream
+  carries Q1_0 and Q2_0 at the same enum values as the fork, so the fork's
+  kernel-side additions for them were superseded rather than lost. Dropped
+  with that: the fork's CPU repack fast path for Q1_0/Q2_0 (`arch/*/repack.cpp`)
+  and its Metal Q1_0 routing knobs. Neither is on this box's path.
+- **`GGML_CUDA_MMVQ_MAX` kept.** `mmvq.cu` merges the fork's threshold check
+  ahead of upstream's new per-architecture MMVQ tuning table (Ada, Blackwell,
+  DGX Spark, Orin); the two dispatch sites in `ggml-cuda.cu` auto-merged.
+- **Speculative decoding: upstream.** `common/speculative.{cpp,h}`, the
+  speculative-simple example and `tools/server/server-context.cpp` are
+  upstream's. The fork's own dspark drafter (multi-layer capture staging,
+  `common_speculative_need_embd_capture`, two manual test harnesses) is gone;
+  upstream's `draft-dspark` (DFlash + Markov head) and `draft-dflash` take
+  its place and work in server mode. The fork's `LLM_ARCH_DSPARK` model,
+  capture-layer API (`llama_set_capture_layers`), `test-dspark-forward`,
+  and `llama-ext.h` extensions stay. The server keeps one fork fix: the
+  `slot_batched->is_processing()` guard before `llama_set_embeddings`.
+- **Fork-only features kept as ours:** `ggml_gated_delta_net_rows` (ggml.h +
+  CPU op), the recurrent-state snapshot ring (`rs_ring`, all three
+  `llama-memory-recurrent.cpp` hunks), the mmap host-pin unregister in
+  `~llama_mmap` (combined with upstream's lazy-range constructor),
+  kv-mean-center (tool, common, tests), `test-rs-ring-rotation`, README,
+  AGENTS.md, this repository's two workflows and `release.yml`.
+- **Deleted:** the 29 upstream workflow files the fork had already removed,
+  `ggml-metal.metal` (upstream split it), `tests/test-dspark-loop.cpp`,
+  `tests/test-dspark-real-eval.cpp`.
+
+Verification: CPU build (`-DGGML_CUDA=OFF`, tools + server + tests) - see the
+commit message for the result; CI compiles `ggml-cuda` for sm_80; the
+tenselerate suite (152) and the launch dry run pass on the merged tree.
+Every flag the launch emits exists in upstream's `common/arg.cpp`.
+
+What the box should see first: `llama-bench -p 4096 -n 64` (upstream's MMVQ
+work: tg64 33.5 -> ~38 predicted), then the greedy MTP depth-1 run, then
+`--spec-type draft-dspark` with a DimInfer/RadixArk head, which now runs in
+server mode.

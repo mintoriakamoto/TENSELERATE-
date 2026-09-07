@@ -8,23 +8,22 @@ layout (binding = 0) readonly buffer A {block_q2_0 data_a[];};
 layout (binding = 1) writeonly buffer D {D_TYPE data_b[];};
 
 void main() {
-    const uint i   = gl_WorkGroupID.x * 4 + gl_LocalInvocationID.x / 64;
+    const uint i = gl_WorkGroupID.x * 4 + gl_LocalInvocationID.x / 64;
+
     const uint tid = gl_LocalInvocationID.x % 64;
-    const uint il  = tid / 4;     // 0..15: byte-pair index in block
-    const uint ir  = tid % 4;     // 0..3: which block within group of 4
-    const uint ib  = 4*i + ir;
-    if (ib >= p.nel / 128) {
+    const uint il  = tid / 4;
+    const uint ir  = tid % 4;
+    const uint ib = 4*i + ir;
+    if (ib >= p.nel / QUANT_K_Q2_0) {
         return;
     }
 
-    const uint b_idx = 512*i + 128*ir + 8*il;
+    const uint b_idx = 256*i + QUANT_K_Q2_0*ir + 4*il;
+    const uint bits = uint(data_a[ib].qs[il]);
+    const float d = float(data_a[ib].d);
 
-    const float d  = float(data_a[ib].d);
-    const uint  b0 = uint(data_a[ib].qs[il*2    ]);
-    const uint  b1 = uint(data_a[ib].qs[il*2 + 1]);
-
-    [[unroll]] for (uint l = 0; l < 4; ++l) {
-        data_b[b_idx + l    ] = D_TYPE(float(int((b0 >> (l*2u)) & 3u) - 1) * d);
-        data_b[b_idx + l + 4] = D_TYPE(float(int((b1 >> (l*2u)) & 3u) - 1) * d);
-    }
+    data_b[b_idx    ] = D_TYPE(d * (float(bits & 3u) - 1.0f));
+    data_b[b_idx + 1] = D_TYPE(d * (float((bits >> 2u) & 3u) - 1.0f));
+    data_b[b_idx + 2] = D_TYPE(d * (float((bits >> 4u) & 3u) - 1.0f));
+    data_b[b_idx + 3] = D_TYPE(d * (float(bits >> 6u) - 1.0f));
 }

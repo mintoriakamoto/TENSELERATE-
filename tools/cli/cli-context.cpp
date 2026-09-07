@@ -6,8 +6,7 @@
 #include "log.h"
 #include "console.h"
 
-#define JSON_ASSERT GGML_ASSERT
-#include <nlohmann/json.hpp>
+#include "json.h"
 
 #include <algorithm>
 #include <cctype>
@@ -16,7 +15,7 @@
 #include <map>
 #include <set>
 
-using json = nlohmann::ordered_json;
+using json = common_json;
 
 struct cli_context_impl {
     json messages      = json::array();
@@ -73,7 +72,7 @@ static std::string format_error_message(const json & err) {
 
 // err is the raw response body of a failed request; it may or may not be JSON
 static std::string format_error_message(const std::string & err) {
-    json parsed = json::parse(err, nullptr, false);
+    json parsed = json::parse_no_throw(err);
     if (!parsed.is_discarded()) {
         return format_error_message(parsed);
     }
@@ -153,14 +152,32 @@ bool cli_context::init() {
 
     if (use_external_server) {
         spinner.reset();
-        if (!list_and_ask_models()) {
+        try {
+            if (!list_and_ask_models()) {
+                return false;
+            }
+        } catch (const common_json_error & e) {
+            ui::show_error(e.what());
+            ui::show_message("This might be caused by an incorrect server-base endpoint URL");
+            return false;
+        } catch (const std::exception & e) {
+            ui::show_error(e.what());
             return false;
         }
+
         // restore the spinner for the next step
         spinner.emplace("Waiting for server...");
     }
 
     fetch_server_props();
+
+    if (!params.out_file.empty()) {
+        output_file.emplace(params.out_file);
+        if (!output_file->is_open()) {
+            ui::show_error(string_format("failed to open output file '%s'", params.out_file.c_str()));
+            return false;
+        }
+    }
 
     return true;
 }
@@ -323,7 +340,14 @@ bool cli_context::stage_media_file(const std::string & fname, const std::string 
     return true;
 }
 
-bool cli_context::generate_completion(std::string & assistant_content, cli_timings & timings) {
+void cli_context::write_output_file(const std::string & content) {
+    if (output_file) {
+        (*output_file) << content;
+        output_file->flush();
+    }
+}
+
+bool cli_context::generate_completion(generated_content & content_out, cli_timings & timings) {
     json body = {
         {"messages",          impl->messages},
         {"stream",            true},
@@ -339,7 +363,7 @@ bool cli_context::generate_completion(std::string & assistant_content, cli_timin
     ui::assistant_turn a;
 
     std::string err = client.post_sse("/v1/chat/completions", body.dump(), should_stop, [&](const std::string & payload) {
-        json chunk = json::parse(payload, nullptr, false);
+        json chunk = json::parse_no_throw(payload);
         if (chunk.is_discarded()) {
             return;
         }
@@ -364,13 +388,14 @@ bool cli_context::generate_completion(std::string & assistant_content, cli_timin
         if (delta.contains("reasoning_content") && delta.at("reasoning_content").is_string()) {
             const std::string text = delta.at("reasoning_content").get<std::string>();
             if (!text.empty()) {
+                content_out.reasoning += text;
                 a.push(ui::ASSISTANT_DISPLAY_MODE_REASONING, text);
             }
         }
         if (delta.contains("content") && delta.at("content").is_string()) {
             const std::string text = delta.at("content").get<std::string>();
             if (!text.empty()) {
-                assistant_content += text;
+                content_out.content += text;
                 a.push(ui::ASSISTANT_DISPLAY_MODE_CONTENT, text);
             }
         }
@@ -520,10 +545,12 @@ int cli_context::run() {
                 continue;
             }
             ui::show_message(string_format("Loaded media from '%s'", fname.c_str()));
+            write_output_file(string_format("User: Added media: %s\n", fname.c_str()));
             continue;
         } else if (string_starts_with(buffer, "/read ")) {
             std::string fname = string_strip(buffer.substr(6));
             add_text_file(fname);
+            write_output_file(string_format("User: Added text file: %s\n", fname.c_str()));
             continue;
         } else if (string_starts_with(buffer, "/glob ")) {
             std::error_code ec;
@@ -568,9 +595,11 @@ int cli_context::run() {
                     continue;
                 }
 
-                if (!add_text_file((rel_path / rel).string())) {
+                const std::string full_path = (curdir / rel).string();
+                if (!add_text_file(full_path)) {
                     continue;
                 }
+                write_output_file(string_format("User: Added text file: %s\n", full_path.c_str()));
 
                 if (++count >= FILE_GLOB_MAX_RESULTS) {
                     ui::show_error(string_format("Maximum number of globbed files allowed (%zu) reached.", FILE_GLOB_MAX_RESULTS));
@@ -586,15 +615,37 @@ int cli_context::run() {
         // generate response
         if (add_user_msg) {
             push_user_message(cur_msg);
+            write_output_file(string_format("User:\n%s\n\n", cur_msg.c_str()));
             cur_msg.clear();
         }
+
         cli_timings timings;
-        std::string assistant_content;
-        generate_completion(assistant_content, timings);
-        impl->messages.push_back({
+        generated_content content;
+        generate_completion(content, timings);
+
+        json assistant_msg = {
             {"role",    "assistant"},
-            {"content", assistant_content}
-        });
+            {"content", content.content}
+        };
+        if (!content.reasoning.empty()) {
+            assistant_msg["reasoning_content"] = content.reasoning;
+        }
+        impl->messages.push_back(std::move(assistant_msg));
+
+        if (output_file) {
+            std::string out_content = "Assistant:\n";
+            if (!content.reasoning.empty()) {
+                out_content += "[Start thinking]\n\n";
+                out_content += content.reasoning;
+                out_content += "[End thinking]\n\n";
+            }
+            out_content += content.content;
+            if (!out_content.empty() && out_content.back() != '\n') {
+                out_content += "\n";
+            }
+            out_content += "\n";
+            write_output_file(out_content);
+        }
 
         if (params.show_timings) {
             ui::show_info(string_format(
@@ -618,5 +669,9 @@ void cli_context::shutdown() {
     if (server) {
         server->stop();
         server.reset();
+    }
+    if (output_file) {
+        output_file->close();
+        output_file.reset();
     }
 }
