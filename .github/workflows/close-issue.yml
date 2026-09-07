@@ -15,7 +15,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/stale@v10
+      - uses: actions/stale@v11
         with:
           exempt-issue-labels: "refactoring,help wanted,good first issue,research 🔬,bug,roadmap,security"
           days-before-issue-stale: 30
