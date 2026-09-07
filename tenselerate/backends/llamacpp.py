@@ -13,8 +13,11 @@ What the measurements decided, and where each one lands in the argv:
     (Hermes' default delegation.max_concurrent_children)  -> `-np 4`
   * `--kv-unified`: one shared KV pool, so the main session can hold the full
     262K window while subagents stay small; per-step cost follows live tokens
-  * no speculation: MTP measured 7-11% acceptance on the served merge and
-    decoded SLOWER than plain (14.9 vs 33.5 tok/s)  -> no `--spec-type`, ever
+  * MTP only at depth 1: the merge left the head's position-1 prediction
+    intact and killed positions 2+. Measured on code decode: n-max 1 = +35%
+    (46.6 vs 34.4 tok/s), n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%.
+    `mtp_draft=1` emits `--spec-type draft-mtp --spec-draft-n-max 1`; deeper
+    drafts lose until the head is retrained (docs/mtp-realign-davidau.md)
   * `reasoning_effort=low`: Qwen3.8's chat template defaults to xhigh; fewer
     thinking tokens outranks any decode lever on an agent loop
   * prefill is 855 tok/s, so a prompt-cache miss on a 60K agent context costs
@@ -54,6 +57,8 @@ DEFAULT_CTX_POOL = 524_288   # two full 262K windows' worth, shared
 DEFAULT_KV = "q8_0"
 DEFAULT_REASONING = "low"
 DEFAULT_ALIAS = "tenselerate"
+DEFAULT_MTP_DRAFT = 0        # 0 = off; 1 = the measured win; >1 loses on this head today
+MAX_MTP_DRAFT = 8
 
 
 def build_llama_server_argv(
@@ -67,6 +72,7 @@ def build_llama_server_argv(
     kv: str = DEFAULT_KV,
     reasoning: str = DEFAULT_REASONING,
     alias: str = DEFAULT_ALIAS,
+    mtp_draft: int = DEFAULT_MTP_DRAFT,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -88,6 +94,8 @@ def build_llama_server_argv(
             "window; the pool is shared by all slots but the main session must fit")
     if not alias:
         raise ValueError("alias must be a non-empty model id for the agent to address")
+    if not 0 <= mtp_draft <= MAX_MTP_DRAFT:
+        raise ValueError(f"mtp_draft must be 0 (off) .. {MAX_MTP_DRAFT}, got {mtp_draft}")
     argv = [
         binary, "-m", model, "--alias", alias,
         "--host", host, "--port", str(port),
@@ -98,6 +106,9 @@ def build_llama_server_argv(
         "-b", "2048", "-ub", "512", "--cache-reuse", "256",
         "--chat-template-kwargs", json.dumps({"reasoning_effort": reasoning}),
     ]
+    if mtp_draft:
+        # the MTP head lives inside the -MTP- GGUF; no -md needed
+        argv += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft)]
     argv += list(extra)
     return argv
 

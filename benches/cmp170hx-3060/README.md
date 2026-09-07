@@ -24,6 +24,7 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | 16 x 16K, `GGML_CUDA_NO_MMVQ=1` | ~130 tok/s (reproducible) | `-np 16` | baseline 100-141 was noisy; same MMQ path either way, so no change expected and none seen |
 | 2026-09-07 | depth sweep, single stream, q8_0 KV, batch 1 | 0: 33.5 / 16K: 30.3 / 65K: 23.5 / 131K: 18.2 / **262K: 12.4 tok/s** (29.9 -> 80.9 ms) | llama-bench, prefill to depth then time decode | prefill 856 -> 327 tok/s over the same range; KV term at 262K is **51 ms**, predicted 10.8 |
 | 2026-09-07 | n-gram speculation, single stream | baseline 34.4 / `ngram-cache` **16.9** / `ngram-mod` 34.4 tok/s | llama-server | halved or flat: near-zero acceptance on prose and the verify batch is paid in full (see docs/mtp-realign-davidau.md) |
+| 2026-09-07 | **MTP draft-depth sweep, code decode, single stream** | baseline 34.4 / **n-max 1: 46.6 (+35%)** / n-max 2: 39.7 (+15%) / n-max 3: 29.2 (-15%) / n-max 5: 26.8 (-22%) | llama-server `--spec-type draft-mtp` on the -MTP- GGUF | **the head is shallow, not broken**: position 1 accepts reliably, positions 2+ do not. Every earlier "MTP loses" number was n-max 5. Prose/JSON verification running |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -107,6 +108,24 @@ the other half of the step, so after NO_MMVQ the next lever for deep contexts
 is bytes (provable page skipping in the reference, q4_0 K fidelity A/B), not
 compute. And the aggregate ceiling in the MMQ regime is ~1/5.6 ms = ~180 tok/s
 from per-sequence work, before any GDN batching.
+
+## MTP works at depth 1 - and the verify-cost model predicted the whole curve
+
+The merge broke the head's positions 2+ but left position 1 intact. With
+`c ~ 11.5 ms` per verified column on the dp4a path and ~1.9 tokens accepted
+per pass at n-max 1 (position 1 plus the bonus token):
+
+| n-max | pass = 18.5 + (n+1) x 11.5 | accepted (est.) | predicted | measured |
+| --- | --- | --- | --- | --- |
+| 1 | 41.5 ms | ~1.9 | 46 tok/s | **46.6** |
+| 2 | 53 ms | ~2.1 | 40 | **39.7** |
+| 5 | 87.5 ms | ~2.3 | 26 | **26.8** |
+
+The same model on the MMQ path (`GGML_CUDA_NO_MMVQ=1`, c ~ 5.6): n-max 1 ->
+29.7 ms per pass -> **~64 tok/s predicted single stream**, nearly 2x the 33.5
+baseline, from two flags. That is the next measurement. Retraining the head
+(docs/mtp-realign-davidau.md) then restores positions 2+ and moves the optimum
+to n-max 3-4 at ~3 accepted: ~90 tok/s on the MMQ path.
 
 ## Speculation is not dead here; the dp4a verify pass is
 
@@ -203,7 +222,8 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running)
-- `GGML_CUDA_NO_MMVQ=1` at **N=1** (decides the default; predicted ~41 tok/s = 5090 parity; N=4 x 256K done: 70.5)
+- `GGML_CUDA_NO_MMVQ=1` at **N=1** (predicted ~41 tok/s plain; **~64 with `--mtp-draft 1`**)
+- MTP n-max 1 on prose and JSON (running) - if it holds, `MTP=1` becomes the launch default
 - stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build
 - `GGML_CUDA_F16=ON` rebuild: pp4096 and tg64 side by side with the current build
 - **262K single stream with `-ctk f16 -ctv f16`** (prediction ~22 tok/s vs 12.4; decides the KV type for deep slots)

@@ -532,7 +532,7 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
         argv = build_llama_server_argv(
             args.model, host=args.host, port=args.port, binary=binary,
             slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
-            reasoning=args.reasoning, alias=args.alias)
+            reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -614,8 +614,8 @@ def cmd_boot(args: argparse.Namespace) -> int:
 def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     """The backend selector and per-backend options shared by serve and boot."""
     from tenselerate.backends.llamacpp import (
-        DEFAULT_ALIAS, DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_REASONING,
-        DEFAULT_SLOTS, KV_TYPES, REASONING_LEVELS,
+        DEFAULT_ALIAS, DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_MTP_DRAFT,
+        DEFAULT_REASONING, DEFAULT_SLOTS, KV_TYPES, REASONING_LEVELS,
     )
     p.add_argument("--backend", default="reference",
                    choices=("reference", "llamacpp", "vllm"),
@@ -645,6 +645,10 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--alias", default=DEFAULT_ALIAS,
                    help="llamacpp backend: model id the agent addresses "
                         f"({DEFAULT_ALIAS}); Hermes model.default must match")
+    p.add_argument("--mtp-draft", type=int, default=DEFAULT_MTP_DRAFT,
+                   help="llamacpp backend: MTP draft depth on an -MTP- GGUF "
+                        "(0 = off; 1 measured +35%% on this merge; deeper loses "
+                        "until the head is retrained)")
     p.add_argument("--llama-server", default=None,
                    help="llamacpp backend: binary (default build/bin/llama-server, "
                         "then PATH)")

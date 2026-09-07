@@ -63,11 +63,19 @@ def test_agent_contract_flags_are_present():
         argv(alias="")
 
 
-def test_never_enables_speculation():
-    # MTP measured 7-11% acceptance on the served merge: slower than plain
+def test_speculation_is_off_by_default_and_depth_one_when_asked():
+    # The merge left the MTP head's position-1 prediction intact and broke
+    # positions 2+: n-max 1 measured +35%, n-max 5 measured -22%.
     a = argv()
     assert "--spec-type" not in a and "-md" not in a
     assert not any(x.startswith("--spec-draft") for x in a)
+    b = argv(mtp_draft=1)
+    assert after(b, "--spec-type") == "draft-mtp" and after(b, "--spec-draft-n-max") == "1"
+    assert "-md" not in b            # the head is inside the -MTP- GGUF
+    with pytest.raises(ValueError, match="mtp_draft"):
+        argv(mtp_draft=-1)
+    with pytest.raises(ValueError, match="mtp_draft"):
+        argv(mtp_draft=99)
 
 
 def test_pool_must_hold_one_locked_window():
@@ -103,6 +111,12 @@ def test_cli_serve_llamacpp_dry_run_prints_the_launch():
     assert "llama-server" in out and "--kv-unified" in out and "-np 4" in out
     assert "--spec-type" not in out
     assert "dry run" in out
+
+
+def test_cli_mtp_draft_flag():
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mtp-draft", "1", "--dry-run"])
+    assert rc == 0 and "--spec-type draft-mtp --spec-draft-n-max 1" in out
 
 
 def test_cli_serve_llamacpp_no_mmvq_shows_the_env_prefix():

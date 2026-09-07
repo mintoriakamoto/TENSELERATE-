@@ -247,15 +247,19 @@ off. So for the two-card box, llama.cpp still wins: it keeps the model resident 
 make 1M context fit. Use vLLM only for single-170HX high-concurrency
 serving, or if you add a matched card on a real x16 link.
 
-## Speculation (MTP) - measured, and off for this model
+## Speculation (MTP) - measured: depth 1 wins, deeper loses
 
 The Qwen3.8-27B GGUF ships an MTP draft head, and on the base model it is
 reported at +33-39% up to 3.5x (Ferrox Labs Field Manual No.12; sudoingX/qwen38-mtp).
-On the DavidAU TURBO merge served here it was **measured at 7-11% acceptance**
-(2026-09-07): `--spec-type draft-mtp --spec-draft-n-max 5` decoded at 14.9 tok/s
-against 33.5 plain. The merge moved the trunk the head was trained against, so
-the verify pass is pure cost. Do not enable it on this model. Routes back to a
-working drafter, cheapest first: an n-gram / prompt-lookup drafter (lossless,
+On the DavidAU TURBO merge served here, `--spec-draft-n-max 5` decoded at 14.9
+tok/s against 33.5 plain (7-11% acceptance) - but a depth sweep (2026-09-07,
+code decode) shows the head is shallow, not broken: **n-max 1 = 46.6 tok/s
+(+35%)**, n-max 2 = +15%, n-max 3 = -15%, n-max 5 = -22%. The merge kept the
+head's position-1 prediction and broke positions 2+; every extra drafted
+token is a verified column that costs ~11.5 ms on the dp4a path (~5.6 on MMQ)
+and is rejected. Serve with `--mtp-draft 1` (`MTP=1` for the script); with
+`GGML_CUDA_NO_MMVQ=1` the same pass predicts ~64 tok/s single stream. Routes
+to a deeper head, cheapest first: an n-gram / prompt-lookup drafter (lossless,
 helps only on copied spans - which agent traffic has a lot of); re-aligning the
 MTP head by distilling it against the merged trunk (one small layer); or the
 base Qwen3.8 model, whose head is aligned - decided by a tokens-to-answer A/B,

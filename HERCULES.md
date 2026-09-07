@@ -14,7 +14,8 @@ hercules config set model.base_url http://127.0.0.1:8080/v1
 ```
 
 The launch is built by `tenselerate/backends/llamacpp.py` from what the box
-measured (`benches/cmp170hx-3060/`): 4 slots on a unified KV pool, no MTP,
+measured (`benches/cmp170hx-3060/`): 4 slots on a unified KV pool, MTP at
+draft depth 1 (`--mtp-draft 1`, +35% measured on this merge; deeper loses),
 `reasoning_effort=low`, chunked prefill with cache reuse, and the flags Hermes
 needs from an OpenAI-compatible server - `--jinja` (without it llama-server
 ignores `tools` and the reasoning_effort template kwarg), `--reasoning-format
