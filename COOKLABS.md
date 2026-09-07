@@ -6,12 +6,14 @@ Product name: TENSELERATE. Company map: https://github.com/mintoriakamoto/Cookla
 Hercules consumes this via OpenAI-compat:
 
 ```bash
-./build/bin/llama-server -m MODEL.gguf --port 8080
+bash scripts/cooklabs_serve.sh MODEL.gguf     # measured config for the 170HX + 3060 box
 # then on the agent box:
 hercules config set model.provider custom
 hercules config set model.base_url http://127.0.0.1:8080/v1
 ```
 
-Planner: `python3 scripts/svmi-plan.py MODEL.gguf --gpu 3060`
+The serve script encodes what was measured on the box (`benches/cmp170hx-3060/`):
+4 slots on a unified KV pool, no MTP, `reasoning_effort=low`. Sizing and the
+slot table: `docs/rig-cmp170hx-3060.md`, "Serving Hercules".
 
 Upstream is ggml-org/llama.cpp. Rebase from there. Do not drop the SVMI docs in `docs/svmi.md`.
