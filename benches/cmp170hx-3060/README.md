@@ -391,6 +391,15 @@ that matters there is per-turn latency (46 tok/s greedy MTP), and every
 extra slot on the same card slows it. Measure N=32 if the goal is a
 multi-tenant server; do not tune the Hercules launch by it.
 
+On "the card goes compute-bound at N=16": the sweep shows the *step* still
+getting cheaper per sequence from N=8 to N=16 (the MMQ regime) and the
+aggregate flattening because the per-sequence cost (~5.6 ms, the GDN block's
+per-token work plus KV) stops shrinking. Bytes, not flops: tensor-core
+utilisation at N=16 is under 10%. Two predictions for N=32 are on record,
+~130-180 (a box session) and ~170-220 (above); they overlap at 170-180 and
+the run decides. q4_0 KV cannot be the relief either way: it measured 8%
+slower per token than q8_0 at depth.
+
 `--logit-bias TOKEN-INF` for the `<think>` loop bans one token id; a
 repetition loop is a phrase, not a token, so it moves the loop rather than
 ending it. `--sampling dry` / `--sampling low` are the two guards under test.

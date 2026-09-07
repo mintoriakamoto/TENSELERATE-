@@ -73,28 +73,52 @@ width and beat dp4a from width 2: target ~20-25 ms at width 2 (from 55), which
 puts a retrained depth-3 head near 85-95 tok/s instead of ~70
 (`docs/mtp-realign-davidau.md`).
 
-## 3. Fused gated-delta-net step for Ampere
+## 3. The GDN block at batch 1 - what the arithmetic says before anyone writes a kernel
 
-**Symptom.** Unmeasured share of the 18.5 ms single-token step is the GDN
-layers (3 of every 4 layers in Qwen3.5/3.8). The weight read alone (~15 ms
-at the measured 890 GB/s) leaves ~3.5 ms for everything else, so the ceiling
-here is small on a single stream and larger at width 16 (the width sweep's
-~5.6 ms per extra sequence has a GDN component).
+**Claim to test (from a box session):** a specialised n_tokens = 1 GDN kernel
+with the state in shared memory and `mma.sync` for S^T k would take single
+stream from 33 to 45-55 tok/s.
 
-**Where.** `ggml/src/ggml-cuda/gated_delta_net.cu` and the cache fusion in
-`ggml-cuda.cu` (`ggml_cuda_try_gdn_cache_fusion`), which already fuses the
-state snapshot copy.
+**What the current kernel does** (`ggml/src/ggml-cuda/gated_delta_net.cu`):
+one warp per state column, the 128x128 per-head state held in registers
+(4 floats per lane), two warp reductions per token (S^T k, then S^T q after the
+rank-1 update). Grid = heads x sequences x S_v/4 blocks of 128 threads. At
+n_tokens = 1 that is already the minimal form of the recurrence: a rank-1
+update and two matvecs per head.
 
-**Change.** Profile first (`nsys profile` on `llama-bench -n 16`, per-op
-breakdown; the README's still-to-measure list has the command). Only if GDN
-plus its surrounding elementwise ops (gating, norms, the conv) show up above
-~2 ms per step is a fused kernel worth writing; the fusion target would be
-conv + gate + delta-rule update + output norm in one launch per layer.
+**The bytes and flops:** state per layer = H x 128 x 128 x 4 B = 2-4 MB
+(H = 32-64); read once, write once, 48 GDN layers -> ~0.2-0.4 GB per token,
+~0.3-0.5 ms at the measured bandwidth. Flops are ~3 x 128 x 128 x H per layer,
+microseconds. A matvec has no use for `mma.sync`: tensor cores need an N
+dimension, and at one token there is none. The recurrence math cannot be
+where the ~11 ms residual (29.9 ms step - 18.5 ms weight read) goes.
 
-**Prove.** Per-op time before/after at width 1 and width 16.
+**Where it plausibly goes:** kernel count. A GDN block in this model is a
+conv1d, several norms, SiLU/gating elementwise ops, the q/k/v/z/b/a
+projections, the recurrence, an output norm and gate - roughly 15-25 launches
+per layer, ~1000 per token across 48 layers, plus the attention layers. Even
+under CUDA graphs (reused = 247, so graphs are on) each small kernel costs a
+few microseconds of latency and tail; 1000 x 5 us = 5 ms is the right order
+of magnitude, and it does not shrink with a faster recurrence. This is also
+consistent with the width sweep: the residual amortises across sequences
+because those same launches then carry N tokens each.
+
+**So the fix is fusion, not tensor cores:** fold the conv + SiLU + gating +
+norm chain of the GDN block into one or two kernels per layer (and the
+attention-layer elementwise chain likewise), cutting launches per token by
+several hundred. Expected: a few ms off the 29.9 ms step -> ~38-42 tok/s
+single stream before speculation, and the same saving under MTP. 45-55 from
+the recurrence alone is not supported by the byte/flop count.
+
+**Prove before writing:** `nsys profile --stats=true llama-bench -n 16`
+(or `-b 1` in llama-cli) and read two numbers: kernels per token and the
+summed time of kernels under 20 us. If the sum of the small kernels is not
+several ms, this whole section is wrong and the residual is somewhere else
+(the attention path, the MTP verify columns, or a host-side gap).
 
 ## Order
 
-2 first: it is the only one that changes what the retrained head is worth and
-it has a clean, already-measured harness (the NO_MMVQ sweep). 1 second: it is
-the deep-slot number for Hercules' main loop. 3 only after the profile.
+The profile in 3 first: it is one command and it decides whether the
+single-stream residual is launches (fuse), or something else. Then 2: it
+changes what the retrained head is worth and has a measured harness (the
+NO_MMVQ sweep). 1 is written; its A/B is on the open-items list.
