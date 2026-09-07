@@ -110,21 +110,113 @@ def rope_partial(
 # --------------------------------------------------------------------------
 # softmax full attention (the 16 full-attention layers, causal, GQA)
 # --------------------------------------------------------------------------
+def int8_qk_scores(q: NDArray[np.float32], k: NDArray[np.float32]) -> NDArray[np.float32]:
+    """
+    Attention scores q @ k^T / sqrt(head_dim) with q and k int8-quantized per row
+    and the dot products accumulated in int32 — the same IMMA GEMM the linear
+    layers use, applied to the QK^T product. This is the part of attention that
+    is a matmul and therefore benefits from int8; softmax and the PV product
+    stay float32 (softmax is elementwise exp/sum, int8 buys nothing there).
+
+    q: [n_q, head_dim], k: [n_k, head_dim] -> [n_q, n_k] float32. A real kernel
+    quantizes K once when it enters the cache; the reference just does it here.
+    """
+    qq, qs = quantize_int8_symmetric(q, axis=-1)
+    kq, ks = quantize_int8_symmetric(k, axis=-1)
+    return int8_matmul(qq, qs, kq, ks) / np.sqrt(f32(q.shape[-1]))
+
+
 def softmax_attention(
     q: NDArray[np.float32], k: NDArray[np.float32], v: NDArray[np.float32],
+    int8_qk: bool = False,
 ) -> NDArray[np.float32]:
     """
     Causal single-head attention. q,k,v: [seq, head_dim]. GQA head-sharing is
-    handled by the caller repeating k/v across query heads.
+    handled by the caller repeating k/v across query heads. int8_qk routes the
+    QK^T product through int8_qk_scores.
     """
     seq, head_dim = q.shape
-    scores = (q @ k.T) / np.sqrt(f32(head_dim))          # [seq, seq]
+    if int8_qk:
+        scores = int8_qk_scores(q, k)
+    else:
+        scores = (q @ k.T) / np.sqrt(f32(head_dim))      # [seq, seq]
     mask = np.triu(np.full((seq, seq), -np.inf, dtype=f32), k=1)
     scores = scores + mask
     scores -= scores.max(axis=-1, keepdims=True)
     w = np.exp(scores)
     w /= w.sum(axis=-1, keepdims=True)
     return w @ v
+
+
+# --------------------------------------------------------------------------
+# provable-mass KV page skipping (decode row over a long cache)
+# --------------------------------------------------------------------------
+PAGE_SKIP_EPS = 2.0 ** -24   # below fp32 resolution: skipping is bit-identical up to summation order
+
+
+def page_skip_gap(page: int = 64, eps: float = PAGE_SKIP_EPS) -> float:
+    """
+    How far (in scaled-logit units, i.e. after the 1/sqrt(hd)) the row max must
+    sit above a page's upper bound for that page to be provably skippable:
+    ln(page / eps). At the defaults that is ~20.8. This is the honest limit of
+    the method: pages are skipped only where attention is peaked by at least
+    that margin over the page's box bound, which the tests below make explicit.
+    """
+    return float(np.log(page / eps))
+
+
+def kv_page_bounds(k: NDArray[np.float32], page: int = 64):
+    """
+    Per-page coordinate-wise (min, max) of the keys. [n_k, hd] -> two [n_pages, hd]
+    arrays; the last page may be short. A kernel stores these next to the KV
+    blocks (2 * hd floats per page, ~3% of q8_0 KV) when a key enters the cache.
+    """
+    n_k, hd = k.shape
+    n_pages = -(-n_k // page)
+    kmin = np.empty((n_pages, hd), f32)
+    kmax = np.empty((n_pages, hd), f32)
+    for p in range(n_pages):
+        blk = k[p * page:(p + 1) * page]
+        kmin[p] = blk.min(axis=0)
+        kmax[p] = blk.max(axis=0)
+    return kmin, kmax
+
+
+def decode_attention_page_skip(
+    q: NDArray[np.float32], k: NDArray[np.float32], v: NDArray[np.float32],
+    page: int = 64, eps: float = PAGE_SKIP_EPS,
+) -> tuple[NDArray[np.float32], int]:
+    """
+    One query row against a long cache, reading only the pages that can matter.
+
+    For page p, ub_p = sum_d max(q_d * kmin_pd, q_d * kmax_pd) is a true upper
+    bound on every logit in the page. The page holding the largest ub is scored
+    exactly, which gives a lower bound m_lb on the row max. Since the softmax
+    denominator is >= 1 after subtracting the true max, page p's share of the
+    output is <= n_p * exp(ub_p - m_lb); when that is below eps the page is
+    skipped. This is a proof of negligibility, not a top-k heuristic: at the
+    default eps the skipped mass is below what fp32 can represent, so the result
+    equals the dense row up to summation order. Returns (out [hd], pages_read).
+
+    q: [hd] (already the current token's query), k, v: [n_k, hd].
+    """
+    hd = q.shape[-1]
+    qs = (q / np.sqrt(f32(hd))).astype(f32)
+    kmin, kmax = kv_page_bounds(k, page)
+    ub = np.maximum(qs * kmin, qs * kmax).sum(axis=-1)         # [n_pages]
+    n_pages = ub.shape[0]
+    sizes = np.full(n_pages, page, np.int64)
+    sizes[-1] = k.shape[0] - page * (n_pages - 1)
+    p_star = int(np.argmax(ub))
+    m_lb = float((qs @ k[p_star * page:(p_star + 1) * page].T).max())
+    keep = sizes * np.exp(ub - m_lb) >= eps
+    keep[p_star] = True
+    idx = np.concatenate([np.arange(p * page, p * page + sizes[p]) for p in np.flatnonzero(keep)])
+    scores = qs @ k[idx].T
+    scores -= scores.max()
+    w = np.exp(scores)
+    w /= w.sum()
+    return (w @ v[idx]).astype(f32), int(keep.sum())
 
 
 # --------------------------------------------------------------------------

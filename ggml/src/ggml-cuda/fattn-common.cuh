@@ -718,6 +718,9 @@ static __global__ void flash_attn_mask_to_KV_max(
     KV_max[sequence*ne31 + jt] = KV_max_sj;
 }
 
+void ggml_cuda_flash_attn_ext_compact_mask(
+        const ggml_tensor * mask, int32_t * indices, int32_t n_kv_max, cudaStream_t stream);
+
 template<int D, int ncols1, int ncols2> // D == head size
 __launch_bounds__(D, 1)
 static __global__ void flash_attn_stream_k_fixup_uniform(
@@ -969,10 +972,66 @@ static __global__ void flash_attn_combine_results(
     dst[tid] = VKQ_numerator / VKQ_denominator;
 }
 
+// GQA-packed vector attention (fattn-vec.cuh, gqa_pack): at single-token decode with quantized
+// K/V the vector kernel is the only kernel that reads the cache without an f16 conversion, but it
+// runs one block per Q head, so a GQA ratio r re-reads and re-dequantizes every K/V byte r times.
+// Measured on a CMP 170HX at 262K context with q8_0 KV: the KV read cost 51 ms per token where
+// the bytes say ~11. Packing the r heads of one K/V head into one block reads them once.
+// Returns the columns per block (8, 4 or 2), or 0 to keep the one-head-per-block kernel.
+// GGML_CUDA_FATTN_VEC_GQA=0 disables it, =1 forces it at any depth; unset = on from 4096 KV.
+static inline int ggml_cuda_fattn_vec_gqa_cols(const ggml_tensor * dst) {
+    static const int mode = [] {
+        const char * s = getenv("GGML_CUDA_FATTN_VEC_GQA");
+        return s == nullptr || *s == '\0' ? -1 : atoi(s);
+    }();
+    if (mode == 0) {
+        return 0;
+    }
+    const ggml_tensor * Q     = dst->src[0];
+    const ggml_tensor * K     = dst->src[1];
+    const ggml_tensor * V     = dst->src[2];
+    const ggml_tensor * mask  = dst->src[3];
+    const ggml_tensor * sinks = dst->src[4];
+    if (Q->ne[1] != 1 || mask == nullptr || sinks != nullptr) {
+        return 0;
+    }
+    if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
+        return 0; // f16 K/V has the tensor-core path with its own GQA batching
+    }
+    float max_bias      = 0.0f;
+    float logit_softcap = 0.0f;
+    memcpy(&max_bias,      (const float *) dst->op_params + 1, sizeof(float));
+    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
+    if (max_bias != 0.0f || logit_softcap != 0.0f) {
+        return 0; // ALiBi slopes are per head; the packed block shares one
+    }
+    if (K->ne[2] == 0 || Q->ne[2] % K->ne[2] != 0) {
+        return 0;
+    }
+    const int gqa_ratio = Q->ne[2] / K->ne[2];
+    if (gqa_ratio < 2) {
+        return 0;
+    }
+    if (mode < 0 && K->ne[1] < 4096) {
+        return 0; // shallow contexts: the KV read is not the cost, keep the tuned default
+    }
+    if (gqa_ratio % 8 == 0) {
+        return 8;
+    }
+    if (gqa_ratio % 4 == 0) {
+        return 4;
+    }
+    if (gqa_ratio % 2 == 0) {
+        return 2;
+    }
+    return 0;
+}
+
 template <int DV, int ncols1, int ncols2>
 void launch_fattn(
     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
-    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE
+    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const bool use_sparse,
+    const int warp_size = WARP_SIZE
 ) {
     constexpr int ncols = ncols1 * ncols2;
 
@@ -1088,10 +1147,20 @@ void launch_fattn(
     const int ntiles_z_gqa = ((gqa_ratio + ncols2 - 1) / ncols2);
     const int ntiles_dst   = ntiles_x * ntiles_z_gqa * K->ne[2] * Q->ne[3];
 
+    const int32_t n_kv_max = use_sparse ? ggml_get_op_params_i32(KQV, 4) : 0;
+    if (use_sparse) {
+        GGML_ASSERT(mask != nullptr);
+        GGML_ASSERT(n_kv_max > 0);
+        const size_t mask_rows = size_t(mask->ne[1]) * mask->ne[3];
+
+        KV_max.alloc(size_t(n_kv_max) * mask_rows);
+        ggml_cuda_flash_attn_ext_compact_mask(mask, KV_max.ptr, n_kv_max, main_stream);
+    }
+
     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
     //     multiple sequences of possibly different lengths.
-    if (mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+    if (!use_sparse && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
         const int64_t s31 = mask->nb[1] / sizeof(half2);
         const int64_t s33 = mask->nb[3] / sizeof(half2);
 
@@ -1114,7 +1183,8 @@ void launch_fattn(
     GGML_ASSERT(max_blocks_per_sm > 0);
     int parallel_blocks = max_blocks_per_sm;
 
-    const int ntiles_KV = (K->ne[1] + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
+    const int64_t n_kv = use_sparse ? n_kv_max : K->ne[1];
+    const int ntiles_KV = (n_kv + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
 
     dim3 blocks_num;
     if (stream_k) {
@@ -1218,7 +1288,7 @@ void launch_fattn(
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
         scale, max_bias, m0, m1, n_head_log2, logit_softcap,
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
-        K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
+        K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0

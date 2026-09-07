@@ -31,6 +31,30 @@ def test_step_returns_vocab_logits():
     assert np.all(np.isfinite(logits))
 
 
+def test_int8_qk_model_tracks_float_model():
+    m_f = ReferenceModel(TINY, seed=1)
+    m_q = ReferenceModel(TINY, seed=1, int8_qk=True)
+    st_f, st_q = m_f.new_state(), m_q.new_state()
+    for pos, tok in enumerate([3, 1, 4, 1, 5, 9]):
+        lf = m_f.step(tok, pos, st_f)
+        lq = m_q.step(tok, pos, st_q)
+    assert np.all(np.isfinite(lq))
+    rel = np.linalg.norm(lq - lf) / np.linalg.norm(lf)
+    assert rel < 0.05, rel
+
+
+def test_page_skip_model_is_bit_close_to_dense_model():
+    m_d = ReferenceModel(TINY, seed=1)
+    m_p = ReferenceModel(TINY, seed=1, page_skip_eps=2.0 ** -24)
+    st_d, st_p = m_d.new_state(), m_p.new_state()
+    toks = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3]
+    for pos, tok in enumerate(toks):
+        ld = m_d.step(tok, pos, st_d)
+        lp = m_p.step(tok, pos, st_p)
+    assert np.allclose(lp, ld, atol=1e-4, rtol=1e-4)
+    assert np.argmax(lp) == np.argmax(ld)
+
+
 def test_full_layers_grow_cache_linear_layers_do_not():
     m = ReferenceModel(TINY, seed=2)
     st = m.new_state()

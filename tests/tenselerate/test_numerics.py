@@ -127,6 +127,141 @@ def test_attention_is_causal():
 
 
 # ---- gated delta net ------------------------------------------------------
+def test_int8_qk_scores_match_float_within_quant_error():
+    rng = _rng(20)
+    q = rng.standard_normal((4, 128)).astype(f32)
+    k = rng.standard_normal((64, 128)).astype(f32)
+    ref = (q @ k.T) / np.sqrt(f32(128))
+    got = nx.int8_qk_scores(q, k)
+    rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
+    assert rel < 0.02, rel
+
+
+def test_int8_qk_attention_close_to_float_and_still_causal():
+    rng = _rng(21)
+    seq, hd = 16, 128
+    q = rng.standard_normal((seq, hd)).astype(f32)
+    k = rng.standard_normal((seq, hd)).astype(f32)
+    v = rng.standard_normal((seq, hd)).astype(f32)
+    ref = nx.softmax_attention(q, k, v)
+    got = nx.softmax_attention(q, k, v, int8_qk=True)
+    rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
+    assert rel < 0.05, rel
+    # future keys/values must still not leak into earlier rows
+    k2, v2 = k.copy(), v.copy()
+    k2[10:] = rng.standard_normal((seq - 10, hd))
+    v2[10:] = rng.standard_normal((seq - 10, hd))
+    out2 = nx.softmax_attention(q, k2, v2, int8_qk=True)
+    assert np.allclose(got[:10], out2[:10], atol=1e-5)
+
+
+def test_int8_qk_decode_row_over_long_cache_keeps_argmax():
+    # the decode shape: one query against a long cache. The int8 scores must
+    # still rank the same key first and produce a normalized row.
+    rng = _rng(22)
+    n_keys, hd = 4096, 128
+    q = rng.standard_normal((1, hd)).astype(f32)
+    k = rng.standard_normal((n_keys, hd)).astype(f32)
+    k[1234] = q[0] * 3.0            # a clearly matching key
+    ref = (q @ k.T) / np.sqrt(f32(hd))
+    got = nx.int8_qk_scores(q, k)
+    assert np.argmax(got) == np.argmax(ref) == 1234
+    w = np.exp(got - got.max())
+    w /= w.sum()
+    assert np.isclose(w.sum(), 1.0, atol=1e-5)
+    assert np.argmax(w) == 1234
+
+
+def _dense_row(q, k, v):
+    s = (q / np.sqrt(f32(q.shape[-1]))) @ k.T
+    s -= s.max()
+    w = np.exp(s)
+    w /= w.sum()
+    return w @ v
+
+
+def test_page_skip_bound_is_a_true_upper_bound():
+    rng = _rng(30)
+    k = rng.standard_normal((1000, 64)).astype(f32)
+    q = rng.standard_normal(64).astype(f32)
+    kmin, kmax = nx.kv_page_bounds(k, page=64)
+    ub = np.maximum(q * kmin, q * kmax).sum(axis=-1)
+    exact = q @ k.T
+    for p in range(ub.shape[0]):
+        assert exact[p * 64:(p + 1) * 64].max() <= ub[p] + 1e-4
+
+
+def test_page_skip_matches_dense_row_on_random_keys():
+    # random keys are the worst case for skipping; correctness must hold regardless
+    rng = _rng(31)
+    n_k, hd = 4096 + 17, 128           # ragged last page
+    q = rng.standard_normal(hd).astype(f32)
+    k = rng.standard_normal((n_k, hd)).astype(f32)
+    v = rng.standard_normal((n_k, hd)).astype(f32)
+    out, pages = nx.decode_attention_page_skip(q, k, v)
+    assert np.allclose(out, _dense_row(q, k, v), atol=1e-5)
+    assert 1 <= pages <= -(-n_k // 64)
+
+
+def _peaked_row(rng, n_k, hd, n_hot, hot_logit_scaled):
+    """A few keys the query matches at a chosen scaled logit; the rest random."""
+    q = rng.standard_normal(hd).astype(f32)
+    q /= np.linalg.norm(q)
+    k = rng.standard_normal((n_k, hd)).astype(f32) * 0.5
+    hot = rng.choice(n_k, n_hot, replace=False)
+    k[hot] = q * (hot_logit_scaled * np.sqrt(hd)) + rng.standard_normal((n_hot, hd)).astype(f32) * 0.5
+    v = rng.standard_normal((n_k, hd)).astype(f32)
+    return q, k, v
+
+
+def test_page_skip_skips_most_pages_when_peak_clears_the_gap():
+    # Peak sits page_skip_gap() above the random pages' box bound (~1 scaled
+    # unit here): nearly every page is provably negligible and is skipped.
+    rng = _rng(32)
+    n_k, hd = 262144 // 8, 128        # 32K keys, 512 pages
+    q, k, v = _peaked_row(rng, n_k, hd, 12, nx.page_skip_gap() + 4.0)
+    out, pages = nx.decode_attention_page_skip(q, k, v)
+    assert np.allclose(out, _dense_row(q, k, v), atol=1e-5)
+    assert pages <= 0.1 * (n_k // 64), pages       # >= 90% of the KV read skipped
+
+
+def test_page_skip_reads_everything_when_peak_is_below_the_gap():
+    # The same row with a realistic-looking peak (scaled logit ~4): every page's
+    # bound is within the gap, nothing is provably negligible, all pages read.
+    # This pins the method's limit; a kernel gets bytes back only past the gap.
+    rng = _rng(32)
+    n_k, hd = 8192, 128
+    q, k, v = _peaked_row(rng, n_k, hd, 12, 4.0)
+    out, pages = nx.decode_attention_page_skip(q, k, v)
+    assert np.allclose(out, _dense_row(q, k, v), atol=1e-5)
+    assert pages == n_k // 64
+    assert 20.0 < nx.page_skip_gap() < 21.5
+
+
+def test_page_skip_skipped_mass_is_below_eps():
+    rng = _rng(33)
+    n_k, hd = 8192, 128
+    q = rng.standard_normal(hd).astype(f32)
+    k = rng.standard_normal((n_k, hd)).astype(f32)
+    hot = rng.choice(n_k, 4, replace=False)
+    k[hot] = q * 3.0
+    v = np.eye(n_k, hd, dtype=f32)     # not used for the bound; any v works
+    eps = 1e-6
+    _, pages = nx.decode_attention_page_skip(q, k, v, eps=eps)
+    qs = q / np.sqrt(f32(hd))
+    s = qs @ k.T
+    w = np.exp(s - s.max())
+    w /= w.sum()
+    kmin, kmax = nx.kv_page_bounds(k, 64)
+    ub = np.maximum(qs * kmin, qs * kmax).sum(axis=-1)
+    p_star = int(np.argmax(ub))
+    m_lb = (qs @ k[p_star * 64:(p_star + 1) * 64].T).max()
+    skipped = np.flatnonzero(64 * np.exp(ub - m_lb) < eps)
+    for p in skipped:
+        assert w[p * 64:(p + 1) * 64].sum() < eps
+    assert pages == ub.shape[0] - len(skipped) or pages == ub.shape[0] - len(skipped) + 1
+
+
 def test_gdn_chunked_equals_sequential():
     rng = _rng(10)
     seq, d = 40, 24

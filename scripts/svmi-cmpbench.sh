@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # svmi-cmpbench - find where a CMP card stops being throttled.
 #
+# NOTE: on a fully compute-unlocked unit (the raven-9950x 170HX measures 162-170
+# TFLOPS FP16, see benches/cmp170hx-3060/) neither path is throttled and the
+# per-sequence curve below should be flat. Run it anyway: a curve that degrades
+# past npl=8 means the unlock has regressed. The throttle analysis that follows
+# applies to capacity-only or MMA-gated cards.
+#
 # The CUDA backend has two INT8 matmul paths and the CMP firmware throttle only
 # hits one of them:
 #

@@ -40,8 +40,11 @@ class LayerState:
 class ReferenceModel:
     """A structurally-faithful, weight-random qwen3_5 hybrid for pipeline bring-up."""
 
-    def __init__(self, cfg: ModelConfig, seed: int = 0):
+    def __init__(self, cfg: ModelConfig, seed: int = 0, int8_qk: bool = False,
+                 page_skip_eps: float | None = None):
         self.cfg = cfg
+        self.int8_qk = int8_qk
+        self.page_skip_eps = page_skip_eps
         rng = np.random.default_rng(seed)
         h, inter = cfg.hidden_size, cfg.intermediate_size
         scale = 1.0 / np.sqrt(h)
@@ -153,7 +156,13 @@ class ReferenceModel:
             qh = q[hh][None]                              # [1, hd]
             kh = K[:, kvh]                                # [seq, hd]
             vh = V[:, kvh]
-            scores = (qh @ kh.T) / np.sqrt(f32(cfg.head_dim))
+            if self.page_skip_eps is not None:
+                out[hh], _ = nx.decode_attention_page_skip(qh[0], kh, vh, eps=self.page_skip_eps)
+                continue
+            if self.int8_qk:
+                scores = nx.int8_qk_scores(qh, kh)
+            else:
+                scores = (qh @ kh.T) / np.sqrt(f32(cfg.head_dim))
             scores -= scores.max()
             wts = np.exp(scores)
             wts /= wts.sum()

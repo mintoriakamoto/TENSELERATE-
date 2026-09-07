@@ -1,60 +1,162 @@
 name: Release
 
+# Every native-code push to main publishes a `main-b<N>-<sha>` release with the
+# binaries scripts/tenselerate-update.sh downloads (`--binary`):
+#   tenselerate-<tag>-bin-ubuntu-x64.tar.gz                  CPU build
+#   tenselerate-<tag>-bin-ubuntu-cuda-12.8-sm80-86-x64.tar.gz CMP 170HX + RTX 3060 build
+# <N> is `git rev-list --count HEAD`, the same number cmake/build-info.cmake
+# stamps into `llama-cli --version`, so the updater can compare a running
+# binary against the newest release. Docs-only pushes publish nothing.
+
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'benches/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE*'
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CUDA_ARCHS: "80-real;86-real"
+
 jobs:
+  meta:
+    name: tag for HEAD
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.m.outputs.tag }}
+      sha: ${{ steps.m.outputs.sha }}
+      exists: ${{ steps.m.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: m
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(git rev-list --count HEAD)
+          SHORT=$(git rev-parse --short=7 HEAD)
+          TAG="main-b${COUNT}-${SHORT}"
+          echo "tag=$TAG"                          >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)"         >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists - nothing to do"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-cpu:
+    name: build bin-ubuntu-x64 (cpu)
+    needs: meta
+    if: needs.meta.outputs.exists == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build libcurl4-openssl-dev
+      - name: Build llama-server + llama-cli
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+          cmake --build build --target llama-server llama-cli
+          ./build/bin/llama-cli --version
+      - name: Package
+        run: bash .github/actions/package-release.sh "${{ needs.meta.outputs.tag }}" cpu
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-ubuntu-x64
+          path: dist/*.tar.gz
+          retention-days: 7
+
+  build-cuda:
+    name: build bin-ubuntu-cuda-12.8-sm80-86-x64 (CMP 170HX + RTX 3060)
+    needs: meta
+    if: needs.meta.outputs.exists == 'false'
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 240
+    steps:
+      - name: Install build deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git cmake ninja-build build-essential libcurl4-openssl-dev ca-certificates
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Trust the checkout inside the container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Build llama-server + llama-cli (CUDA, sm_80 + sm_86)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+            -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+          cmake --build build --target llama-server llama-cli
+          ./build/bin/llama-cli --version
+      - name: Build the TENSELERATE int8 kernel bridge (.so)
+        run: |
+          cmake -S tenselerate/csrc -B build-kernels -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}"
+          cmake --build build-kernels
+          test -f build-kernels/libtenselerate_int8_gemm_c.so
+      - name: Package
+        run: bash .github/actions/package-release.sh "${{ needs.meta.outputs.tag }}" cuda-12.8-sm80-86
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-ubuntu-cuda-12.8-sm80-86-x64
+          path: dist/*.tar.gz
+          retention-days: 7
+
   release:
-    name: Create main-b<N>-<SHA> release for HEAD
+    name: publish ${{ needs.meta.outputs.tag }}
+    needs: [meta, build-cpu, build-cuda]
+    if: needs.meta.outputs.exists == 'false'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - name: Create release tag and GitHub release
+      - uses: actions/download-artifact@v7
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the release with its assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          SHA: ${{ needs.meta.outputs.sha }}
         run: |
-          #!/bin/bash
-          set -e
-
-          # Get current commit info
-          SHA=$(git rev-parse --short HEAD)
-          FULL_SHA=$(git rev-parse HEAD)
-          COUNT=$(git rev-list --count HEAD)
-          TAG="main-b${COUNT}-${SHA}"
-          MSG=$(git log -1 --pretty=%B)
-
-          echo "Creating release: $TAG"
-          echo "SHA: $FULL_SHA"
-          echo "Message: $MSG"
-
-          # Check if tag already exists in GitHub
-          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag already exists locally, skipping"
-            exit 0
-          fi
-
-          # Check via GitHub API if release exists
-          RELEASE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
-            || echo '{}')
-
-          if echo "$RELEASE" | grep -q '"id"'; then
-            echo "Release already exists on GitHub, skipping"
-            exit 0
-          fi
-
-          # Create the release via GitHub API
-          curl -X POST \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d "{\"tag_name\": \"$TAG\", \"target_commitish\": \"$FULL_SHA\", \"name\": \"$TAG\", \"body\": $(echo "$MSG" | jq -Rs .), \"draft\": false, \"prerelease\": false}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases"
-
-          echo "Release created: $TAG"
+          ls -la assets
+          {
+            git log -1 --pretty=%B
+            echo
+            echo '---'
+            echo "Assets: \`bin-ubuntu-x64\` (CPU) and \`bin-ubuntu-cuda-12.8-sm80-86-x64\`"
+            echo "(CMP 170HX + RTX 3060, needs the NVIDIA driver only - CUDA runtime is linked"
+            echo "statically). Install: \`scripts/tenselerate-update.sh --binary\`"
+            echo "(\`FLAVOR=cuda\` for the GPU build). Serve Hercules:"
+            echo "\`tenselerate boot --backend llamacpp --model MODEL.gguf\`."
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" --title "$TAG" --notes-file notes.md --latest \
+            assets/*.tar.gz
+          echo "published $TAG"

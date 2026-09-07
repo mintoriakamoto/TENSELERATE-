@@ -19,6 +19,8 @@ add_library(${TARGET} STATIC
     server-stream.h
     server-tools.cpp
     server-tools.h
+    server-mcp.cpp
+    server-mcp.h
     server-schema.cpp
     server-schema.h
 )
@@ -47,6 +49,8 @@ set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${TARGET} PRIVATE ../mtmd ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PUBLIC server-context llama-ui cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+
+add_dependencies(${TARGET} llama-ui-assets)
 
 if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)

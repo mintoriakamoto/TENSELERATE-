@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', '.github/workflows/tenselerate-engine.yml']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/mmvq.*', 'ggml/src/ggml-cuda/ggml-cuda.cu', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', '.github/workflows/tenselerate-engine.yml']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/mmvq.*', 'ggml/src/ggml-cuda/ggml-cuda.cu', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -35,6 +35,14 @@ jobs:
         run: ty check tenselerate/ tests/tenselerate/
       - name: pytest (reference numerics + engine wiring)
         run: PYTHONPATH=. pytest tests/tenselerate/ -q
+      - name: lifecycle scripts (syntax + self-tests + the Hercules launch, dry run)
+        run: |
+          for f in scripts/*.sh .github/actions/*.sh; do bash -n "$f"; done
+          bash scripts/tenselerate-update.sh --self-test
+          python3 scripts/mtp-realign-gen.py --self-test
+          python3 scripts/mtp-head-train.py --self-test
+          bash benches/cmp170hx-3060/run-open-items.sh --self-test
+          PYTHONPATH=. python -m tenselerate serve --backend llamacpp --model /nonexistent.gguf --dry-run
       - name: host int8 GEMM reference test
         run: |
           cmake -S tenselerate/csrc -B build-kernels -DCMAKE_BUILD_TYPE=Release
@@ -68,6 +76,14 @@ jobs:
           ./build-cuda/tenselerate_gemm_test
           echo "ok: int8_gemm.cu compiled for sm_80;sm_86 (CMP 170HX + RTX 3060), the shared lib exports the C ABI,"
           echo "    and the reference test passed"
+      - name: Compile ggml-cuda (sm_80 only) - the MMVQ routing threshold lives here
+        run: |
+          cmake -S . -B build-ggml-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80-real" \
+            -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
+          cmake --build build-ggml-cuda --target ggml-cuda
+          echo "ok: ggml-cuda compiled for sm_80 with GGML_CUDA_MMVQ_MAX routing"
       - name: Upload the shared library (for backend bridge smoke testing)
         uses: actions/upload-artifact@v7
         with:

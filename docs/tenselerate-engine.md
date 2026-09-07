@@ -158,7 +158,18 @@ and `plan --kv-bits N --spec mtp` models them at the locked window:
 At the locked 256K window on the Ampere box these model **~301 tok/s** — below
 the 400 target, and there is no narrower window to close the gap, because
 quality is pinned at maximum. 400 is a target, not a wall the box is expected to
-clear at max recall; the engine reports the gap honestly
+clear at max recall; the engine reports the gap honestly.
+
+**Measured on the box (2026-09-07, `benches/cmp170hx-3060/`)**, against that
+model: single stream 33.5 tok/s; 2 x 256K 48.2 aggregate; 4 x 256K 59;
+16 x 16K 141.5. The modeled ~301 assumed an MTP head with ~1.8x acceptance and
+65% of nominal bandwidth; the weight read measures 60% (fine), but MTP on the
+DavidAU merge measures 7-11% acceptance (x0.45, slower than plain), and below
+8 concurrent sequences ggml's dp4a vector path adds ~11.5 ms per sequence
+until the tensor-core GEMM takes over past batch 8. The lever list is
+therefore, in measured order: `--kv-unified` slots, `GGML_CUDA_NO_MMVQ=1`
+(under test), fewer thinking tokens (`reasoning_effort`), then a drafter that
+agrees with the served trunk
 (`tests/tenselerate/test_acceleration.py`). The numbers are a roofline;
 `svmi-*` measures the real MTP acceptance rate and q4_0 quality delta before
 either is trusted.
@@ -214,6 +225,31 @@ CUDA kernel (`int8_gemm.cu`) is a portable **dp4a** implementation, correct and
 validated, as the baseline. The CMP win comes from the `mma.sync` s8 IMMA kernel
 (CC ≥ 7.5) that replaces it on that hardware — that is a roadmap item, and it will
 be validated against the same reference before it ships.
+
+The same GEMM is the int8 lever for the 16 full-attention layers. Attention is
+one matmul (`QK^T`), an elementwise softmax, and another matmul (`PV`); only the
+matmuls gain from int8, and at 256K keys `QK^T` is the one that scales with
+context. `numerics.int8_qk_scores` computes it with per-row int8 Q and K and an
+int32 accumulator — bit-for-bit the `int8_gemm.h` semantics — and
+`softmax_attention(..., int8_qk=True)` / `ReferenceModel(int8_qk=True)` route
+through it; softmax and `PV` stay float32. Tests pin it against the float path
+(score error < 2%, decode-row argmax preserved over a 4096-key cache). What
+this does **not** yet have is a CUDA attention kernel: the vLLM backend cannot
+be handed a custom `QK^T`, so this ships only in the native engine, and no
+speedup number is claimed until it is measured on the cards.
+
+At the 262K window the KV read is ~9 GB of the ~25 GB a decode token moves, so
+the reference also carries **provable-mass page skipping**
+(`numerics.decode_attention_page_skip`, `ReferenceModel(page_skip_eps=...)`):
+per 64-key page it stores coordinate-wise (min, max) of K, bounds every logit in
+the page from above, and skips pages whose bounded share of the row is below
+`eps` (default 2^-24: below fp32 resolution, so the result is the dense row up
+to summation order). It is a proof, not a top-k heuristic — and the proof has a
+price the tests pin: a page is skippable only when the row max clears its bound
+by `ln(64/eps)` ≈ 21 scaled logits. Rows peaked that hard skip >90% of pages;
+rows with a realistic peak of a few units skip nothing. Whether real Qwen3.8
+attention rows at 262K clear that gap is an empirical question for the box, and
+the bytes saved are exactly the fraction that does.
 
 ## The kernel bridge
 
