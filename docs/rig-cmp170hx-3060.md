@@ -176,7 +176,7 @@ tenselerate boot --backend llamacpp --model qwen3.8-27b-UD-Q4_K_M.gguf
 ```
 
 Sizing from the measured width sweep (N = 1..16, short prompts): ~18.5 ms of
-weight read per step (~890 GB/s, 60% of nominal) plus a per-sequence cost that
+weight read per step (~890 GB/s, 60% of nominal, inferred as the width-sweep intercept; end to end a batch-1 step is 553 GB/s = 37%) plus a per-sequence cost that
 depends on which int8 matmul path ggml picks - `ne11 <= 8` uses the dp4a
 vector path (MMVQ, ~11.5 ms per sequence on this card), wider uses the
 tensor-core MMQ GEMM (~5.6 ms per sequence). Add ~5.4 ms per slot holding a

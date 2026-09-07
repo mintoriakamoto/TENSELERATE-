@@ -253,7 +253,7 @@ MACHINE_HW = {
     "cmp170hx+3060": (52.0, 1853.0),
 }
 # Memory bandwidth efficiency at sustained load. Modeling constant; the 170HX
-# weight read measured ~0.60 of nominal on 2026-09-07 (benches/cmp170hx-3060/),
+# weight read ~0.60 of nominal on 2026-09-07 as the width-sweep intercept (end to end 0.37 at batch 1; benches/cmp170hx-3060/),
 # so the number is close - the per-sequence costs the planner does NOT model
 # (see that README) are what separate its output from the measured tok/s.
 BW_EFFICIENCY = 0.65

@@ -43,7 +43,7 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 30 ms per token against 16.5 GB of weights read as "at most 37-48% of nominal
 bandwidth, kernel-side time". The diagnostics below then showed clocks maxed
 and CUDA graphs on, and the width sweep replaced this with the two-regime
-decomposition further down: ~18.5 ms of weight read (~890 GB/s, 60%) plus a
+decomposition further down: ~18.5 ms of weight read (~890 GB/s, 60%; this is the *intercept of the width sweep*, not a direct measurement - end to end, a 29.9 ms batch-1 step over 16.5 GB is 553 GB/s = 37% of nominal, and the ~11 ms difference is the GDN recurrence + attention + launch time that width amortizes) plus a
 per-sequence cost set by ggml's matmul dispatch.
 
 ## Diagnostics to run next (each answers one question)
@@ -384,7 +384,7 @@ contexts; at 32 x 32K that is on the order of 145-190 ms per step, so
 per-sequence cost and doubles the KV read; the step lengthens faster than the
 width grows, so aggregate flattens around 250 at best. Tensor-core
 utilization at these widths is 5-10% and stays there; the weight read is
-already at 60% of nominal bandwidth, which is where a Q4_K_M dequant lands.
+already at ~60% of nominal bandwidth by the width-sweep intercept (37% end to end at batch 1), which is where a Q4_K_M dequant lands.
 
 None of this is Hercules' workload. One operator is 1-4 slots; the number
 that matters there is per-turn latency (46 tok/s greedy MTP), and every
