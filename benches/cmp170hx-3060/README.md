@@ -363,6 +363,38 @@ distinct long prefixes and reports aggregate and per-stream tok/s;
 `--loop-check` flags a 12-gram repeated 4+ times. Logs: `logs/<experiment>-<ts>.log`
 plus the server's own log (`grep "draft acceptance" logs/*server*.log`).
 
+## The N=32 "300-400 tok/s" plan - predictions written before the run
+
+A proposal from another session: `-np 32 -c 1048576` with q4_0 KV plus
+`-bs`, `--stream-weights 2`, `--repack`, projecting 300-400 tok/s aggregate
+and "99% TFLOPS utilization" at N=64. The measured cost model says otherwise,
+and the flags are not what their names suggest:
+
+| flag | what it is | expected effect here |
+| --- | --- | --- |
+| `-bs` / `--backend-sampling` | samples on the GPU instead of the CPU | the only one that can help: at N=32 the CPU sampler is a few ms per step; worth measuring, maybe +5% |
+| `--stream-weights 2` | SVMI host-pinned weight streaming over PCIe for models that do not fit VRAM | the model fits; streaming through Gen2 x4 (~2 GB/s) can only be slower. Expect zero or negative |
+| `--repack` | CPU-backend weight repacking (extra buffer types) | no CPU layers with `-ngl 999`; no effect |
+| q4_0 KV | fits more, reads slower | measured -8% per token at depth vs q8_0; helps only if q8_0 does not fit 32 x 32K |
+
+The aggregate ceiling is bytes, not TFLOPS. A step at N=32 is the ~55 ms MMQ
+floor plus ~5.6 ms per sequence beyond 16, plus the KV read for 32 live
+contexts; at 32 x 32K that is on the order of 145-190 ms per step, so
+**~170-220 tok/s aggregate**, not 300-400. N=64 adds another ~180 ms of
+per-sequence cost and doubles the KV read; the step lengthens faster than the
+width grows, so aggregate flattens around 250 at best. Tensor-core
+utilization at these widths is 5-10% and stays there; the weight read is
+already at 60% of nominal bandwidth, which is where a Q4_K_M dequant lands.
+
+None of this is Hercules' workload. One operator is 1-4 slots; the number
+that matters there is per-turn latency (46 tok/s greedy MTP), and every
+extra slot on the same card slows it. Measure N=32 if the goal is a
+multi-tenant server; do not tune the Hercules launch by it.
+
+`--logit-bias TOKEN-INF` for the `<think>` loop bans one token id; a
+repetition loop is a phrase, not a token, so it moves the loop rather than
+ending it. `--sampling dry` / `--sampling low` are the two guards under test.
+
 ## Splitting the 27B across both cards - why it cannot be faster
 
 A layer split runs the two cards *in sequence* for every token: the 170HX
