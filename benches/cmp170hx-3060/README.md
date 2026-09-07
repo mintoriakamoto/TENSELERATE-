@@ -436,6 +436,7 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 - stock unsloth/Qwen3.8-27B-UD-Q4_K_M + its MTP head on the same build (acceptance; running) and the same file on an upstream build
 - `GGML_CUDA_F16=ON` rebuild: pp4096 and tg64 side by side with the current build
 - **262K single stream with `-ctk f16 -ctv f16`** (prediction ~22 tok/s vs 12.4; decides the KV type for deep slots)
+- **GQA-packed vector attention** (`docs/kernel-work.md` item 1, in the tree, unrun): `test-backend-ops -o FLASH_ATTN_EXT` with `GGML_CUDA_FATTN_VEC_GQA=1` first, then the 262K q8_0 tg number with the variable at 0 and 1 - prediction: the 51 ms KV term falls toward ~15 ms, 12.4 -> ~20 tok/s at q8_0 without the f16 memory cost
 - per-op profile of one MMQ-regime step (`nsys profile`, llama-bench `-n 16`) to
   split the remaining ~5.6 ms/sequence between GDN, attention and GEMM
 - tokens-to-answer, DavidAU merge vs base Qwen3.8 (decides the model)

@@ -6,6 +6,22 @@ from. Measured baselines: `benches/cmp170hx-3060/README.md`.
 
 ## 1. GQA-aware vector attention for quantized KV (the 51 ms KV term at 262K)
 
+**Status: written 2026-09-07, compiled by CI for sm_80, NOT yet run on the card.**
+`fattn-vec.cuh` gained a `gqa_pack` kernel variant: the block's columns are the
+Q heads sharing one K/V head at a single token, so K/V are read and
+dequantized once per block; `launch_fattn<D, 1, ncols2>` supplies the
+(sequence, K/V head, gqa tile) grid the MMA kernel already uses. The host gate
+`ggml_cuda_fattn_vec_gqa_cols` (fattn-common.cuh) turns it on for quantized
+K/V, one query token, a mask, no sinks, no ALiBi, D >= 128, GQA ratio even,
+and KV length >= 4096 (`GGML_CUDA_FATTN_VEC_GQA=1` forces it at any depth, `=0`
+disables). Before trusting a number:
+
+```
+GGML_CUDA_FATTN_VEC_GQA=1 build/bin/test-backend-ops -o FLASH_ATTN_EXT -b CUDA0   # correctness vs CPU
+GGML_CUDA_FATTN_VEC_GQA=0 llama-bench -m $GGUF -ngl 999 -fa 1 -ctk q8_0 -ctv q8_0 -p 262144 -n 32
+GGML_CUDA_FATTN_VEC_GQA=1 llama-bench -m $GGUF -ngl 999 -fa 1 -ctk q8_0 -ctv q8_0 -p 262144 -n 32
+```
+
 **Symptom.** Single-stream decode at 262K depth is 12.4 tok/s with q8_0 KV; the
 KV read costs 51 ms where the bytes say ~11. q4_0 is 8% slower still.
 

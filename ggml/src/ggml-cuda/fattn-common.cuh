@@ -972,6 +972,61 @@ static __global__ void flash_attn_combine_results(
     dst[tid] = VKQ_numerator / VKQ_denominator;
 }
 
+// GQA-packed vector attention (fattn-vec.cuh, gqa_pack): at single-token decode with quantized
+// K/V the vector kernel is the only kernel that reads the cache without an f16 conversion, but it
+// runs one block per Q head, so a GQA ratio r re-reads and re-dequantizes every K/V byte r times.
+// Measured on a CMP 170HX at 262K context with q8_0 KV: the KV read cost 51 ms per token where
+// the bytes say ~11. Packing the r heads of one K/V head into one block reads them once.
+// Returns the columns per block (8, 4 or 2), or 0 to keep the one-head-per-block kernel.
+// GGML_CUDA_FATTN_VEC_GQA=0 disables it, =1 forces it at any depth; unset = on from 4096 KV.
+static inline int ggml_cuda_fattn_vec_gqa_cols(const ggml_tensor * dst) {
+    static const int mode = [] {
+        const char * s = getenv("GGML_CUDA_FATTN_VEC_GQA");
+        return s == nullptr || *s == '\0' ? -1 : atoi(s);
+    }();
+    if (mode == 0) {
+        return 0;
+    }
+    const ggml_tensor * Q     = dst->src[0];
+    const ggml_tensor * K     = dst->src[1];
+    const ggml_tensor * V     = dst->src[2];
+    const ggml_tensor * mask  = dst->src[3];
+    const ggml_tensor * sinks = dst->src[4];
+    if (Q->ne[1] != 1 || mask == nullptr || sinks != nullptr) {
+        return 0;
+    }
+    if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
+        return 0; // f16 K/V has the tensor-core path with its own GQA batching
+    }
+    float max_bias      = 0.0f;
+    float logit_softcap = 0.0f;
+    memcpy(&max_bias,      (const float *) dst->op_params + 1, sizeof(float));
+    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
+    if (max_bias != 0.0f || logit_softcap != 0.0f) {
+        return 0; // ALiBi slopes are per head; the packed block shares one
+    }
+    if (K->ne[2] == 0 || Q->ne[2] % K->ne[2] != 0) {
+        return 0;
+    }
+    const int gqa_ratio = Q->ne[2] / K->ne[2];
+    if (gqa_ratio < 2) {
+        return 0;
+    }
+    if (mode < 0 && K->ne[1] < 4096) {
+        return 0; // shallow contexts: the KV read is not the cost, keep the tuned default
+    }
+    if (gqa_ratio % 8 == 0) {
+        return 8;
+    }
+    if (gqa_ratio % 4 == 0) {
+        return 4;
+    }
+    if (gqa_ratio % 2 == 0) {
+        return 2;
+    }
+    return 0;
+}
+
 template <int DV, int ncols1, int ncols2>
 void launch_fattn(
     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
