@@ -2,8 +2,16 @@
 #include "cp-async.cuh"
 #include "mma.cuh"
 #include "fattn-common.cuh"
+#include "fattn-softmax-opt.cuh"
 
 using namespace ggml_cuda_mma;
+
+// Enable optimized softmax computation (reduced register pressure, mixed precision)
+// Controlled via GGML_FATTN_SOFTMAX_OPT=1 environment variable or compile flag
+// Can be disabled via GGML_FATTN_SOFTMAX_OPT=0 for baseline comparison
+#ifndef GGML_FATTN_SOFTMAX_OPT
+#define GGML_FATTN_SOFTMAX_OPT 1
+#endif
 
 // Config options for the MMA kernel.
 // Should not affect results, only speed/register pressure/shared memory use.
