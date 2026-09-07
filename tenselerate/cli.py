@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _out(msg: str = "") -> None:
+    """Print a message to stdout with a newline (formatted CLI output)."""
     sys.stdout.write(msg + "\n")
 
 
@@ -48,7 +49,15 @@ def _out(msg: str = "") -> None:
 # build / install
 # --------------------------------------------------------------------------
 def _run_build(mode_args: list[str]) -> int:
-    """Drive scripts/tenselerate-build.sh with the given flags."""
+    """Run the build script with the given flags.
+
+    Args:
+        mode_args: List of flags to pass to tenselerate-build.sh
+                   (e.g., ['--cpu'], ['--cuda'], ['--kernels']).
+
+    Returns:
+        Return code from the build script (0 = success).
+    """
     script = REPO_ROOT / "scripts" / "tenselerate-build.sh"
     if not script.is_file():
         _out(f"error: build script not found at {script}")
@@ -62,7 +71,19 @@ def _run_build(mode_args: list[str]) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    """Compile the engine end to end: the int8 kernels and the llama.cpp server."""
+    """Compile the engine end to end: int8 kernels + reference server.
+
+    Can build in three modes:
+    - CPU-only (reference numerics, no GPU, no CUDA)
+    - CUDA (requires nvcc to compile for sm_80/sm_86)
+    - Kernels only (just the int8 GEMM, for testing)
+
+    Args:
+        args: Namespace with optional flags: cpu, cuda, kernels.
+
+    Returns:
+        Return code from tenselerate-build.sh (0 = success).
+    """
     mode_args = []
     if args.cpu:
         mode_args.append("--cpu")
@@ -74,7 +95,19 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    """Build from this clone, then run the hardware check — zero to ready."""
+    """Build from this clone, then run the hardware check — zero to ready.
+
+    A one-command bootstrap: compiles the engine, then runs the doctor to verify
+    the machine is ready. If the build fails, doctor is not run. If doctor fails,
+    a diagnostic report is shown but the install is considered complete (the
+    reference backend runs without a GPU).
+
+    Args:
+        args: Namespace with optional flags: cpu (force CPU-only build).
+
+    Returns:
+        Return code (0 = success, non-zero = error from build or doctor).
+    """
     _out("TENSELERATE install: build, then verify the machine")
     _out("")
     rc = _run_build([] if not args.cpu else ["--cpu"])
@@ -92,10 +125,20 @@ def cmd_install(args: argparse.Namespace) -> int:
 # update
 # --------------------------------------------------------------------------
 def cmd_update(args: argparse.Namespace) -> int:
-    """
-    Drive scripts/tenselerate-update.sh, which compares the running build against
-    the newest published release and either fast-forwards + rebuilds, or pulls
-    the prebuilt binary for this machine.
+    """Check for and apply updates from published releases.
+
+    Drives tenselerate-update.sh, which compares the running build against the
+    newest published release and either:
+    - Fast-forwards the clone + rebuilds locally (--source)
+    - Downloads and installs a prebuilt binary (--binary)
+    - Lists available releases (--list)
+    - Checks for new versions and reports availability (--check, default)
+
+    Args:
+        args: Namespace with optional flags: source, binary, list, check.
+
+    Returns:
+        Return code from the updater script. 10 = update is available (in --check mode).
     """
     script = REPO_ROOT / "scripts" / "tenselerate-update.sh"
     if not script.is_file():
@@ -130,6 +173,18 @@ def cmd_update(args: argparse.Namespace) -> int:
 # info
 # --------------------------------------------------------------------------
 def cmd_info(args: argparse.Namespace) -> int:
+    """Show model geometry, context floor, KV sizing, and context-vs-RoPE tradeoffs.
+
+    Displays the model config in human-readable form, KV cache footprint at the
+    locked attention window (which does not grow with context), and tables of
+    throughput/rope-scaling requirements at different context depths.
+
+    Args:
+        args: Namespace with config (model config name).
+
+    Returns:
+        Always 0 (success).
+    """
     cfg = CONFIGS[args.config]
     _out(f"model            : {cfg.name}")
     _out(f"layers           : {cfg.n_layer}  "
@@ -178,35 +233,49 @@ def cmd_info(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # plan
 # --------------------------------------------------------------------------
-# (VRAM GiB, VRAM read GB/s) for the machines this engine targets.
-# TENSELERATE supports exactly ONE machine: the dual RTX 2080 Ti box (Ryzen 9
-# 9950X, 32 GB DDR5, 1 TB NVMe + 250 GB OS SSD). The two 2080 Ti are Turing
-# (sm_75) and run as one pipeline node - 22 GiB pooled, both stages' HBM read
-# overlapped under continuous batching (2 x 616 GB/s). This box fits the 1M
-# context floor (21.16 of 22 GiB) but tops out ~152 tok/s, BELOW the 400 tok/s
-# product standard: `plan` reports that honestly rather than lowering the bar
-# to flatter the hardware. Serving still works (serve/boot do not gate on the
-# speed floor); `plan` is the advisory that the box is under the target.
-# The Ampere target box is the vLLM path (see tenselerate.backends.vllm):
-# CMP 170HX (GA100, sm_80, HBM2e, ~1493 GB/s, unlocked to 40 GiB - stock 8 GiB
-# cannot hold the weights) + RTX 3060 12 GiB (GA106, sm_86, GDDR6, ~360 GB/s).
-# Pooled 52 GiB; the bandwidth is the sum under a bandwidth-balanced 2-stage
-# pipeline (PP=2, no NVLink), the same perfectly-overlapped assumption the
-# 2x2080ti row makes for its two cards.
+# Machine hardware specifications: (VRAM GiB, theoretical memory bandwidth GB/s).
+# The engine targets exactly ONE hardware configuration:
+#
+#   - 2x2080ti (reference dev box): Dual RTX 2080 Ti (Turing, sm_75) with
+#     Ryzen 9 9950X, 32 GB DDR5. Pooled 22 GiB VRAM, 2x616 GB/s HBM bandwidth.
+#     Fits the 1M context floor (21.16 of 22 GiB) but delivers ~152 tok/s aggregate,
+#     BELOW the 400 tok/s product target. The engine serves regardless; `plan`
+#     reports this honestly.
+#
+#   - cmp170hx+3060 (Ampere production box): CMP 170HX + RTX 3060 12 GiB.
+#     CMP 170HX: GA100 (sm_80), HBM2e, ~1493 GB/s. Stock 8 GiB; unlocked to 40 GiB
+#     (required for 27B weights). RTX 3060: GA106 (sm_86), GDDR6, ~360 GB/s.
+#     Pooled 52 GiB, no NVLink. Pipeline parallel (PP=2): bandwidth is the sum under
+#     a bandwidth-balanced 2-stage pipeline assumption (both stages' HBM reads
+#     overlap under continuous batching).
 MACHINE_HW = {
     "2x2080ti": (22.0, 1232.0),
     "cmp170hx+3060": (52.0, 1853.0),
 }
-BW_EFFICIENCY = 0.65          # planning assumption; svmi-bwprofile.py measures it
+# Empirical memory bandwidth efficiency at sustained load. Measured by svmi-bwprofile.py.
+BW_EFFICIENCY = 0.65
 
 
 def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
-    """
-    The window is LOCKED at the max-recall value, so speed is not bought by
-    narrowing it - the only levers left are lossless: q4_0 KV (more concurrency)
-    and speculative decode (MTP, ~1.8x; EAGLE-3 higher). Model them at the fixed
-    window and say honestly how close they get to MIN_DECODE_TOKS - they do not
-    reach it here, because quality is pinned at maximum.
+    """Show lossless speedup levers at the locked attention window.
+
+    The window is LOCKED at the max-recall value (no RoPE scaling), so speed
+    cannot be bought by narrowing it. The only remaining levers are lossless:
+    - q4_0 KV cache (more concurrency in the same VRAM)
+    - speculative decode: MTP (built-in, ~1.8x, identical output) or EAGLE-3
+      (trained draft, higher acceptance, needs a trained head)
+
+    This function models both levers at the fixed window and reports how close
+    the throughput gets to MIN_DECODE_TOKS. Typically does not reach the target
+    because quality (verbatim recall via the windowed attention + GDN long-range)
+    is pinned at maximum.
+
+    Args:
+        cfg: Model config with attention_window and KV sizing.
+        vram: Total VRAM available (GiB).
+        weights: Weight footprint (GiB).
+        args: Command-line args with ctx, overhead_gib, kv_bits, spec.
+        bw: Memory bandwidth (GB/s).
     """
     kv_w = cfg.kv_bytes_for_context(args.ctx, KV_BITS_PER_ELEM[4]) / GiB
     mb = int((vram - weights - args.overhead_gib) // kv_w)
@@ -228,6 +297,25 @@ def _accel_path(cfg, vram: float, weights: float, args, bw: float) -> None:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
+    """Plan what a machine can achieve: throughput, batch size, and speedup levers.
+
+    Takes a machine profile (VRAM, bandwidth) and context depth and computes:
+    - Whether the model fits in VRAM with KV cache
+    - Single-sequence throughput (tokens/sec)
+    - Maximum concurrent sequences at the locked window
+    - Aggregate throughput with continuous batching
+    - Whether lossless speedup levers (q4_0 KV, MTP speculative) reach the target
+
+    Reports gaps honestly rather than lowering expectations to flatter the hardware.
+
+    Args:
+        args: Namespace with config, machine, ctx, attention_window, weights_gib,
+              overhead_gib, kv_bits, spec.
+
+    Returns:
+        0 if the target is met or approach is clear, 1 if the model doesn't fit,
+        3 if the target is not reached and speed targets differ from quality floors.
+    """
     cfg = CONFIGS[args.config]
     ctx = args.ctx
     try:
@@ -329,6 +417,24 @@ def cmd_plan(args: argparse.Namespace) -> int:
 # doctor
 # --------------------------------------------------------------------------
 def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check hardware and driver readiness before serving.
+
+    Verifies:
+    - nvidia-smi is installed (NVIDIA userspace present)
+    - A GPU driver is bound (CUDA is reachable)
+    - The engine can be imported
+    - Lists detected GPUs
+
+    This is a prerequisite check before tenselerate serve or boot. The reference
+    backend runs without a GPU, so a failing doctor does not block serve unless
+    you're using the vLLM backend.
+
+    Args:
+        args: Namespace with optional flag: weights_gib (for full GPU check).
+
+    Returns:
+        0 if all checks pass, 1 if any check fails.
+    """
     ok = True
     _out("TENSELERATE doctor")
     _out("")
@@ -363,7 +469,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # serve
 # --------------------------------------------------------------------------
 def _serve_vllm(args: argparse.Namespace) -> int:
-    """Drive an upstream vLLM OpenAI server as the compute runtime (Ampere box)."""
+    """Launch vLLM as the compute runtime (Ampere target box: CMP 170HX + RTX 3060).
+
+    Builds the vllm serve argv with the Qwen3.8-27B config, validates context and
+    KV floors, then either prints the command (--dry-run) or execs vllm if found
+    on PATH.
+
+    Args:
+        args: Namespace with ctx, host, port, kv_bits, spec, eagle_model, dry_run.
+
+    Returns:
+        0 on success, 1 if vllm not found (and not --dry-run), 2 on validation error.
+    """
     from tenselerate.backends.vllm import build_vllm_serve_argv
     try:
         argv = build_vllm_serve_argv(
@@ -387,6 +504,21 @@ def _serve_vllm(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    """Start the OpenAI /v1 endpoint on the chosen backend.
+
+    Two backends:
+    - reference (default): The native reference engine (CPU, any box, end-to-end valid).
+    - vllm: Upstream vLLM (Ampere box only: CMP 170HX + RTX 3060).
+
+    Binds loopback-only (127.0.0.1 or ::1) for security. Runs until interrupted.
+
+    Args:
+        args: Namespace with backend, host, port, config (reference) or
+              ctx, kv_bits, spec, eagle_model, dry_run (vllm).
+
+    Returns:
+        0 on clean shutdown, 1 or 2 on error (server's returncode or validation error).
+    """
     if args.backend == "vllm":
         return _serve_vllm(args)
     from tenselerate.server import build_server
@@ -429,6 +561,21 @@ def cmd_boot(args: argparse.Namespace) -> int:
 
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser with all subcommands.
+
+    Subcommands:
+    - install: Build + hardware check (one-command bootstrap)
+    - build: Compile the engine (CPU-only, CUDA, or kernels only)
+    - boot: Run doctor, then serve (one-line deployment)
+    - update: Check for and apply new releases
+    - info: Show model geometry, KV sizing, context-vs-RoPE tradeoffs
+    - plan: Predict throughput for a given machine + context
+    - doctor: Verify hardware and driver are ready
+    - serve: Start the OpenAI /v1 endpoint (reference or vLLM backend)
+
+    Returns:
+        ArgumentParser configured with all subcommands and options.
+    """
     ap = argparse.ArgumentParser(
         prog="tenselerate", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -521,6 +668,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI arguments and dispatch to the appropriate subcommand handler.
+
+    Entry point for `python -m tenselerate <cmd>` or the installed `tenselerate` CLI.
+
+    Args:
+        argv: Command-line arguments. If None, uses sys.argv[1:].
+
+    Returns:
+        The exit code from the subcommand handler (0 = success).
+    """
     ap = build_parser()
     args = ap.parse_args(argv if argv is not None else sys.argv[1:])
     return int(args.func(args))

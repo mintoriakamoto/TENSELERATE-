@@ -29,16 +29,38 @@ from tenselerate.reference.model import ReferenceModel
 
 
 class ByteTokenizer:
-    """Trivial UTF-8 byte tokenizer for the dev server (vocab 256)."""
+    """Trivial UTF-8 byte tokenizer for the dev server (vocab 256).
+
+    At bring-up, the tokenizer is byte-level (256 unique tokens, one per byte value).
+    This enables end-to-end testing without external tokenizer weights. A real
+    tokenizer + model weights will load behind the same interface when they exist.
+    """
     def encode(self, text: str) -> list[int]:
+        """Encode UTF-8 text to token ids (one per byte). Empty text returns [0]."""
         return list(text.encode("utf-8")) or [0]
 
     def decode(self, tokens: list[int]) -> str:
+        """Decode token ids back to UTF-8 text. Invalid bytes are replaced."""
         return bytes(t & 0xFF for t in tokens).decode("utf-8", errors="replace")
 
 
 class Engine:
+    """Reference generation engine: model + tokenizer + generator for development.
+
+    The engine chains a reference model (the oracle for validating kernels) with
+    a single-sequence generator and byte-level tokenizer. This brings up an end-to-end
+    inference path without external weights or a real tokenizer at bring-up. The
+    compute backend (vLLM, CUDA kernels) is swapped under this same HTTP contract
+    as production code lands.
+    """
     def __init__(self, config_name: str = TINY.name, seed: int = 0):
+        """Initialize the engine with a model config and RNG seed.
+
+        Args:
+            config_name: Name of the model config (e.g. 'tiny', 'qwen38-27b').
+                        Must be a key in CONFIGS.
+            seed: RNG seed for sampling (passed to the generator).
+        """
         self.cfg = CONFIGS[config_name]
         self.model = ReferenceModel(self.cfg, seed=seed)
         self.generator = Generator(self.model)
@@ -49,13 +71,32 @@ class Engine:
         )
 
     def complete(self, prompt: str, params: SamplingParams) -> tuple[str, int, int]:
+        """Generate completion for a prompt string.
+
+        Args:
+            prompt: The input text to complete.
+            params: Sampling parameters (max_tokens, temperature, repeat_penalty, seed).
+
+        Returns:
+            A tuple of (generated_text, prompt_token_count, generation_token_count).
+        """
         ids = self.tokenizer.encode(prompt)
         out = self.generator.generate_list(ids, params)
         return self.tokenizer.decode(out), len(ids), len(out)
 
 
 def _messages_to_prompt(messages: list[dict]) -> str:
-    # minimal chat template; a real jinja template loads with the real model
+    """Convert OpenAI chat format to Qwen3.8 chat template format.
+
+    This implements the minimal Qwen3.8 chat template used during development.
+    A real tokenizer/model loads the template as Jinja when they exist.
+
+    Args:
+        messages: List of dicts with 'role' (user/assistant) and 'content' (text).
+
+    Returns:
+        The formatted prompt string with role markers and message delimiters.
+    """
     parts = []
     for m in messages:
         parts.append(f"<|im_start|>{m.get('role','user')}\n{m.get('content','')}<|im_end|>")
@@ -64,9 +105,21 @@ def _messages_to_prompt(messages: list[dict]) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
+    """OpenAI-compatible HTTP request handler for the reference engine.
+
+    Implements the /v1 API contract: /v1/models, /v1/chat/completions, /v1/completions,
+    and /health. The engine instance is bound per-server via a subclass created in
+    build_server(), allowing each handler instance to access the same engine.
+    """
     engine: Engine    # bound per-server via a subclass in build_server
 
     def _send(self, code: int, obj: dict):
+        """Send a JSON response with the given HTTP status code.
+
+        Args:
+            code: HTTP status code (200, 400, 404, etc).
+            obj: Python dict to serialize as JSON and send.
+        """
         body = json.dumps(obj).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -75,9 +128,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format, *args):     # noqa: A002 - match base signature
-        pass  # quiet by default
+        """Suppress request logging (quiet by default)."""
+        pass
 
     def do_GET(self):
+        """Handle GET requests: /v1/models and /health."""
         if self.path.rstrip("/") == "/v1/models":
             self._send(200, {"object": "list", "data": [
                 {"id": self.engine.served_name, "object": "model",
@@ -88,6 +143,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"message": "not found"}})
 
     def do_POST(self):
+        """Handle POST requests: /v1/chat/completions and /v1/completions."""
         path = self.path.rstrip("/")
         if path not in ("/v1/chat/completions", "/v1/completions"):
             self._send(404, {"error": {"message": "not found"}})
@@ -135,12 +191,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_server(host: str, port: int, config_name: str) -> ThreadingHTTPServer:
+    """Create an OpenAI-compatible HTTP server instance.
+
+    Creates a reference engine with the given config and binds a request handler
+    that shares that engine instance. Each handler gets the same engine, so all
+    requests run against one model.
+
+    Args:
+        host: Bind address (loopback-only for security).
+        port: TCP port to listen on.
+        config_name: Model config name (e.g. 'tiny', 'qwen38-27b').
+
+    Returns:
+        A ThreadingHTTPServer bound to (host, port) with handlers connected
+        to the engine.
+    """
     engine = Engine(config_name=config_name)
     handler = type("BoundHandler", (Handler,), {"engine": engine})
     return ThreadingHTTPServer((host, port), handler)
 
 
 def main() -> int:
+    """Command-line entry point for `python -m tenselerate.server`.
+
+    Parses --host, --port, and --config arguments, validates loopback-only bind,
+    creates the server, and runs it until interrupted.
+
+    Returns:
+        0 on clean shutdown, 1 on error.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1", help="loopback only by design")
     ap.add_argument("--port", type=int, default=8080)
