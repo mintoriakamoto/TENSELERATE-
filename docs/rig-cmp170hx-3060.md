@@ -17,11 +17,30 @@ to an A100, not the throttled mining card the arXiv:2505.03782 case study measur
 | --- | --- | --- |
 | Silicon | GA100 (A100), sm_80 | GA106, sm_86 |
 | VRAM bandwidth | ~1493 GB/s (verify; unlock reports 0.73-1.4 TB/s) | ~360 GB/s |
-| PCIe link | 1.1 x4 native; software patch -> Gen2 (~2 GB/s); cap mod -> Gen2 x16 (~8 GB/s) | 4.0 x16 - healthy |
+| PCIe link | Gen2 x4 (~2 GB/s) measured; cap mod -> Gen2 x16 (~8 GB/s) | Gen4 x4 (~8 GB/s) measured - fine for draft/IO, poor for streaming |
 | Tensor cores | restored, but 256-cycle MMA throttle (ILP cannot hide it) | yes (FP16/BF16) |
 | FP32 | restored by the unlock | full |
 | FP16 / BF16 | restored | full |
 | INT8 / dp4a | uncrippled | full |
+
+## Measured state (this box) and the power-limit lever
+
+Live readout: 170HX at Gen2 x4, 40 GiB, 33 C, power limited to **100 W of its 250 W
+default**; 3060 at Gen4 x4, 12 GiB, 34 C, idle. Persistence ON both.
+
+The 100 W cap is the biggest throughput limiter here. Decode is bandwidth-bound and a
+GA100 held at 40% of its power budget down-clocks cores and memory, so it will NOT reach
+the ~1493 GB/s / A100-class decode the unlock makes possible. Thermal is not the reason -
+33 C leaves ~50 C of headroom - so if the PSU can supply it, raise the limit and
+re-measure:
+
+```
+sudo nvidia-smi -i <170hx> -pl 200      # step 150 -> 200 -> 250 as the PSU allows
+# bench decode at 100 W vs the raised cap (scripts/svmi-bitspec.py) to see the cost.
+```
+
+If the box is genuinely PSU-limited to 100 W, keep the cap but scale throughput
+expectations down - the case-study and "best config" numbers assume full power.
 
 ## Unlock state: full compute unlock (fuse-map reset)
 
