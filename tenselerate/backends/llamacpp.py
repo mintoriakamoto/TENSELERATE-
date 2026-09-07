@@ -154,8 +154,14 @@ def build_llama_server_argv(
     return argv
 
 
-def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None) -> dict[str, str]:
+def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
+               device: int | None = None) -> dict[str, str]:
     """
+    The launch environment. `device=N` pins the server to one CUDA device
+    (CUDA_VISIBLE_DEVICES=N, so `--main-gpu 0` inside the process is that card):
+    the RTX 3060 side server for Hermes delegation children and the compaction
+    summarizer, which otherwise occupy 170HX slots at the 27B's per-token cost.
+
     The matmul-routing environment. `no_mmvq` sends every width to the tensor-core
     MMQ path (GGML_CUDA_NO_MMVQ=1). `mmvq_max=N` keeps batches up to N on the dp4a
     vector path and routes wider ones - speculative verification, multi-slot steps -
@@ -164,7 +170,11 @@ def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None) -> dict[st
     """
     if mmvq_max is not None and not 0 <= mmvq_max <= MMVQ_MAX_BATCH:
         raise ValueError(f"mmvq_max must be 0..{MMVQ_MAX_BATCH}, got {mmvq_max}")
+    if device is not None and device < 0:
+        raise ValueError(f"device must be a CUDA device index >= 0, got {device}")
     out: dict[str, str] = {}
+    if device is not None:
+        out["CUDA_VISIBLE_DEVICES"] = str(device)
     if no_mmvq:
         out["GGML_CUDA_NO_MMVQ"] = "1"
     elif mmvq_max is not None:
@@ -173,17 +183,18 @@ def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None) -> dict[st
 
 
 def llama_server_env(
-    *, no_mmvq: bool = False, mmvq_max: int | None = None,
+    *, no_mmvq: bool = False, mmvq_max: int | None = None, device: int | None = None,
     base: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """The environment for the launch: the caller's, plus the matmul-routing flags."""
+    """The environment for the launch: the caller's, plus device pin and routing flags."""
     env = dict(os.environ if base is None else base)
-    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max))
+    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device))
     return env
 
 
 def llama_server_command(model: str, *, no_mmvq: bool = False, mmvq_max: int | None = None,
-                         **kw) -> str:
+                         device: int | None = None, **kw) -> str:
     """The launch as one copy-pasteable shell line, env prefix included."""
-    prefix = "".join(f"{k}={v} " for k, v in env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max).items())
+    prefix = "".join(f"{k}={v} " for k, v in env_prefix(
+        no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device).items())
     return prefix + " ".join(build_llama_server_argv(model, **kw))

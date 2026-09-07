@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_serve.sh', 'ggml/src/ggml-cuda/mmvq.*', 'ggml/src/ggml-cuda/ggml-cuda.cu', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'ggml/src/ggml-cuda/mmvq.*', 'ggml/src/ggml-cuda/ggml-cuda.cu', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_serve.sh', 'ggml/src/ggml-cuda/mmvq.*', 'ggml/src/ggml-cuda/ggml-cuda.cu', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'ggml/src/ggml-cuda/mmvq.*', 'ggml/src/ggml-cuda/ggml-cuda.cu', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}

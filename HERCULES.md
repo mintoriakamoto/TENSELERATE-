@@ -93,11 +93,14 @@ the speed case is that it takes subagent and summary traffic off the 27B
 entirely.
 
 ```
-CUDA_VISIBLE_DEVICES=<3060> llama-server -m qwen3.5-9b-Q4_K_M.gguf --alias side \
-  --host 127.0.0.1 --port 8081 --jinja --reasoning-format deepseek --no-context-shift \
-  -ngl 999 -fa on -c 131072 -np 4 --kv-unified -cb -ctk q8_0 -ctv q8_0 \
-  --chat-template-kwargs '{"reasoning_effort":"low"}'
+DEVICE=1 bash scripts/hercules_side_serve.sh qwen3.5-9b-Q4_K_M.gguf
+# = CUDA_VISIBLE_DEVICES=1 llama-server ... --alias side --port 8081 -c 262144 -np 4 \
+#   --kv-unified -cb -ctk q8_0 -ctv q8_0 --temp 0 --repeat-penalty 1.0 (dry-run to see it)
 ```
+
+Pick the CUDA index of the 3060 from `nvidia-smi -L`. `DEVICE` is
+`CUDA_VISIBLE_DEVICES`, so `--main-gpu 0` inside that process is the 3060 and
+the main server on the 170HX is untouched.
 
 ```yaml
 delegation:

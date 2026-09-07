@@ -138,6 +138,24 @@ def test_matmul_routing_is_environment_not_argv():
         env_prefix(mmvq_max=9)
 
 
+def test_device_pin_is_environment_for_the_3060_side_server():
+    # Hermes children and the compaction summary go to a ~9B model on the RTX
+    # 3060 so they stop occupying 170HX slots; pinning is CUDA_VISIBLE_DEVICES,
+    # never a different --main-gpu (it stays 0 inside the pinned process).
+    assert env_prefix(device=1) == {"CUDA_VISIBLE_DEVICES": "1"}
+    assert env_prefix(device=1, mmvq_max=3) == {
+        "CUDA_VISIBLE_DEVICES": "1", "GGML_CUDA_MMVQ_MAX": "3"}
+    assert "CUDA_VISIBLE_DEVICES" not in env_prefix()
+    with pytest.raises(ValueError, match="device"):
+        env_prefix(device=-1)
+    cmd = llama_server_command(MODEL, device=1, port=8081, alias="side")
+    assert cmd.startswith("CUDA_VISIBLE_DEVICES=1 ") and "--alias side" in cmd
+    assert "--main-gpu 0" in cmd
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--device", "1", "--port", "8081", "--dry-run"])
+    assert rc == 0 and "CUDA_VISIBLE_DEVICES=1 " in out and "--port 8081" in out
+
+
 def test_cli_serve_llamacpp_dry_run_prints_the_launch():
     rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--dry-run"])
     assert rc == 0

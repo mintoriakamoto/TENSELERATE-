@@ -538,9 +538,10 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
         _out(f"error: {e}")
         return 2
     try:
-        env = llama_server_env(no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max)
+        env = llama_server_env(no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max,
+                               device=args.device)
         prefix = "".join(f"{k}={v} " for k, v in env_prefix(
-            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max).items())
+            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max, device=args.device).items())
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -666,6 +667,10 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: GGML_CUDA_MMVQ_MAX - widest batch kept on "
                         "the dp4a vector path (0..8); 1 keeps single-token decode "
                         "there and routes draft verification to MMQ tensor cores")
+    p.add_argument("--device", type=int, default=None,
+                   help="llamacpp backend: pin the server to one CUDA device "
+                        "(CUDA_VISIBLE_DEVICES); the RTX 3060 side server for "
+                        "delegation children and compaction uses this")
     p.add_argument("--llama-server", default=None,
                    help="llamacpp backend: binary (default build/bin/llama-server, "
                         "then PATH)")
