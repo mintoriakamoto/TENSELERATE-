@@ -32,7 +32,7 @@ jobs:
       - name: flake8
         run: flake8 tenselerate/ tests/tenselerate/
       - name: ty type-check
-        run: ty check tenselerate/backends tenselerate/cli.py tenselerate/config.py tenselerate/engine tenselerate/server.py tests/tenselerate/
+        run: ty check tenselerate/ tests/tenselerate/
       - name: pytest (reference numerics + engine wiring)
         run: PYTHONPATH=. pytest tests/tenselerate/ -q
       - name: host int8 GEMM reference test

@@ -215,6 +215,18 @@ validated, as the baseline. The CMP win comes from the `mma.sync` s8 IMMA kernel
 (CC ≥ 7.5) that replaces it on that hardware — that is a roadmap item, and it will
 be validated against the same reference before it ships.
 
+The same GEMM is the int8 lever for the 16 full-attention layers. Attention is
+one matmul (`QK^T`), an elementwise softmax, and another matmul (`PV`); only the
+matmuls gain from int8, and at 256K keys `QK^T` is the one that scales with
+context. `numerics.int8_qk_scores` computes it with per-row int8 Q and K and an
+int32 accumulator — bit-for-bit the `int8_gemm.h` semantics — and
+`softmax_attention(..., int8_qk=True)` / `ReferenceModel(int8_qk=True)` route
+through it; softmax and `PV` stay float32. Tests pin it against the float path
+(score error < 2%, decode-row argmax preserved over a 4096-key cache). What
+this does **not** yet have is a CUDA attention kernel: the vLLM backend cannot
+be handed a custom `QK^T`, so this ships only in the native engine, and no
+speedup number is claimed until it is measured on the cards.
+
 ## The kernel bridge
 
 `tenselerate/backend/int8_gemm.py` is what turns a compiled CUDA kernel into

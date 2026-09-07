@@ -127,6 +127,51 @@ def test_attention_is_causal():
 
 
 # ---- gated delta net ------------------------------------------------------
+def test_int8_qk_scores_match_float_within_quant_error():
+    rng = _rng(20)
+    q = rng.standard_normal((4, 128)).astype(f32)
+    k = rng.standard_normal((64, 128)).astype(f32)
+    ref = (q @ k.T) / np.sqrt(f32(128))
+    got = nx.int8_qk_scores(q, k)
+    rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
+    assert rel < 0.02, rel
+
+
+def test_int8_qk_attention_close_to_float_and_still_causal():
+    rng = _rng(21)
+    seq, hd = 16, 128
+    q = rng.standard_normal((seq, hd)).astype(f32)
+    k = rng.standard_normal((seq, hd)).astype(f32)
+    v = rng.standard_normal((seq, hd)).astype(f32)
+    ref = nx.softmax_attention(q, k, v)
+    got = nx.softmax_attention(q, k, v, int8_qk=True)
+    rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
+    assert rel < 0.05, rel
+    # future keys/values must still not leak into earlier rows
+    k2, v2 = k.copy(), v.copy()
+    k2[10:] = rng.standard_normal((seq - 10, hd))
+    v2[10:] = rng.standard_normal((seq - 10, hd))
+    out2 = nx.softmax_attention(q, k2, v2, int8_qk=True)
+    assert np.allclose(got[:10], out2[:10], atol=1e-5)
+
+
+def test_int8_qk_decode_row_over_long_cache_keeps_argmax():
+    # the decode shape: one query against a long cache. The int8 scores must
+    # still rank the same key first and produce a normalized row.
+    rng = _rng(22)
+    n_keys, hd = 4096, 128
+    q = rng.standard_normal((1, hd)).astype(f32)
+    k = rng.standard_normal((n_keys, hd)).astype(f32)
+    k[1234] = q[0] * 3.0            # a clearly matching key
+    ref = (q @ k.T) / np.sqrt(f32(hd))
+    got = nx.int8_qk_scores(q, k)
+    assert np.argmax(got) == np.argmax(ref) == 1234
+    w = np.exp(got - got.max())
+    w /= w.sum()
+    assert np.isclose(w.sum(), 1.0, atol=1e-5)
+    assert np.argmax(w) == 1234
+
+
 def test_gdn_chunked_equals_sequential():
     rng = _rng(10)
     seq, d = 40, 24

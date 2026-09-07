@@ -110,15 +110,36 @@ def rope_partial(
 # --------------------------------------------------------------------------
 # softmax full attention (the 16 full-attention layers, causal, GQA)
 # --------------------------------------------------------------------------
+def int8_qk_scores(q: NDArray[np.float32], k: NDArray[np.float32]) -> NDArray[np.float32]:
+    """
+    Attention scores q @ k^T / sqrt(head_dim) with q and k int8-quantized per row
+    and the dot products accumulated in int32 — the same IMMA GEMM the linear
+    layers use, applied to the QK^T product. This is the part of attention that
+    is a matmul and therefore benefits from int8; softmax and the PV product
+    stay float32 (softmax is elementwise exp/sum, int8 buys nothing there).
+
+    q: [n_q, head_dim], k: [n_k, head_dim] -> [n_q, n_k] float32. A real kernel
+    quantizes K once when it enters the cache; the reference just does it here.
+    """
+    qq, qs = quantize_int8_symmetric(q, axis=-1)
+    kq, ks = quantize_int8_symmetric(k, axis=-1)
+    return int8_matmul(qq, qs, kq, ks) / np.sqrt(f32(q.shape[-1]))
+
+
 def softmax_attention(
     q: NDArray[np.float32], k: NDArray[np.float32], v: NDArray[np.float32],
+    int8_qk: bool = False,
 ) -> NDArray[np.float32]:
     """
     Causal single-head attention. q,k,v: [seq, head_dim]. GQA head-sharing is
-    handled by the caller repeating k/v across query heads.
+    handled by the caller repeating k/v across query heads. int8_qk routes the
+    QK^T product through int8_qk_scores.
     """
     seq, head_dim = q.shape
-    scores = (q @ k.T) / np.sqrt(f32(head_dim))          # [seq, seq]
+    if int8_qk:
+        scores = int8_qk_scores(q, k)
+    else:
+        scores = (q @ k.T) / np.sqrt(f32(head_dim))      # [seq, seq]
     mask = np.triu(np.full((seq, seq), -np.inf, dtype=f32), k=1)
     scores = scores + mask
     scores -= scores.max(axis=-1, keepdims=True)

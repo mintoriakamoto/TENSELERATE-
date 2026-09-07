@@ -40,8 +40,9 @@ class LayerState:
 class ReferenceModel:
     """A structurally-faithful, weight-random qwen3_5 hybrid for pipeline bring-up."""
 
-    def __init__(self, cfg: ModelConfig, seed: int = 0):
+    def __init__(self, cfg: ModelConfig, seed: int = 0, int8_qk: bool = False):
         self.cfg = cfg
+        self.int8_qk = int8_qk
         rng = np.random.default_rng(seed)
         h, inter = cfg.hidden_size, cfg.intermediate_size
         scale = 1.0 / np.sqrt(h)
@@ -153,7 +154,10 @@ class ReferenceModel:
             qh = q[hh][None]                              # [1, hd]
             kh = K[:, kvh]                                # [seq, hd]
             vh = V[:, kvh]
-            scores = (qh @ kh.T) / np.sqrt(f32(cfg.head_dim))
+            if self.int8_qk:
+                scores = nx.int8_qk_scores(qh, kh)
+            else:
+                scores = (qh @ kh.T) / np.sqrt(f32(cfg.head_dim))
             scores -= scores.max()
             wts = np.exp(scores)
             wts /= wts.sum()

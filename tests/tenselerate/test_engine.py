@@ -31,6 +31,18 @@ def test_step_returns_vocab_logits():
     assert np.all(np.isfinite(logits))
 
 
+def test_int8_qk_model_tracks_float_model():
+    m_f = ReferenceModel(TINY, seed=1)
+    m_q = ReferenceModel(TINY, seed=1, int8_qk=True)
+    st_f, st_q = m_f.new_state(), m_q.new_state()
+    for pos, tok in enumerate([3, 1, 4, 1, 5, 9]):
+        lf = m_f.step(tok, pos, st_f)
+        lq = m_q.step(tok, pos, st_q)
+    assert np.all(np.isfinite(lq))
+    rel = np.linalg.norm(lq - lf) / np.linalg.norm(lf)
+    assert rel < 0.05, rel
+
+
 def test_full_layers_grow_cache_linear_layers_do_not():
     m = ReferenceModel(TINY, seed=2)
     st = m.new_state()
