@@ -105,6 +105,22 @@ def test_greedy_sampling_is_the_server_default_because_acceptance_is_exact_match
         argv(sampling="warm")
 
 
+def test_retrained_head_is_a_sidecar_at_depth_three():
+    # scripts/mtp-head-train.py exports a re-aligned head as its own GGUF; it is
+    # served with -md and, unless told otherwise, at the healthy-curve optimum n-max 3.
+    a = argv(mtp_model="/models/mtp-head-q8_0.gguf")
+    assert after(a, "-md") == "/models/mtp-head-q8_0.gguf"
+    assert after(a, "--spec-type") == "draft-mtp" and after(a, "--spec-draft-n-max") == "3"
+    b = argv(mtp_model="/m/head.gguf", mtp_draft=5)
+    assert after(b, "--spec-draft-n-max") == "5"
+    with pytest.raises(ValueError, match="mtp_model"):
+        argv(mtp_model="/m/head.gguf", mtp_draft=0)
+    assert "-md" not in argv(mtp_draft=1)
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mtp-model", "/m/head.gguf", "--dry-run"])
+    assert rc == 0 and "-md /m/head.gguf" in out and "--spec-draft-n-max 3" in out
+
+
 def test_pool_must_hold_one_locked_window():
     with pytest.raises(ValueError, match="locked"):
         argv(ctx_pool=MIN_ATTENTION_WINDOW - 1)

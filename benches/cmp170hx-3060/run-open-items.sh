@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+# run-open-items - run the still-unmeasured configurations from
+# benches/cmp170hx-3060/README.md ("Still to measure") unattended, one
+# llama-server per configuration, and append rows to results-<date>.md.
+#
+#   MODEL=/models/Qwen3.8-27B-TURBO-MTP-Q4_K_M.gguf \
+#     bash benches/cmp170hx-3060/run-open-items.sh              # everything, in order
+#   EXPERIMENTS=loop_guard,deep_kv MODEL=... bash .../run-open-items.sh   # a subset
+#   DRY=1 MODEL=/x/Foo-MTP.gguf bash .../run-open-items.sh     # print what would run (uses --dry-run)
+#   bash benches/cmp170hx-3060/run-open-items.sh --self-test    # no GPU, no server; exit 0
+#
+# Experiments (functions exp_<name>, run in this order):
+#   loop_guard       --sampling greedy | dry | low, plus low with client temp 0.15 / 0.5:
+#                    tok/s, draft acceptance, <think> loop check per shape. Picks a winner.
+#   client_override  greedy server, client sends temp 0.7 + repeat_penalty 1.15
+#   deep_kv          1 slot x 262144, kv q8_0 vs f16, ~250K-token prefill, decode at depth
+#   slot4_width      4 slots x 524288, MTP depth 1, default routing vs --mmvq-max 3 vs --no-mmvq
+#   mtp_control      MTP off vs on under the winning sampling
+#
+# Env: MODEL (required) LLAMA_SERVER (binary; default tenselerate's) PORT (8089)
+#      N (requests per shape, 3) MAX_TOKENS (400) HEALTH_TIMEOUT (600 s)
+#      VRAM_FREE_MB (GPU 0 must be below this before a launch, 2000) VRAM_TIMEOUT (180 s)
+#      GPU (0) WIN_SAMPLING (mode[:temp], overrides loop_guard's pick for mtp_control)
+#      DEEP_PREFILL (250000) RESULTS (results-<date>.md) LOGS (logs/) EXPERIMENTS DRY
+#
+# Every server launch goes through `python3 -m tenselerate serve --backend llamacpp`
+# on 127.0.0.1:PORT (a production server on 8080 is untouched). Server logs are
+# kept next to the experiment logs; `grep "draft acceptance" logs/*server*.log`.
+
+set -euo pipefail
+
+BENCH_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$BENCH_DIR/../.." && pwd)
+MEASURE="$BENCH_DIR/measure.py"
+HOST=127.0.0.1
+PORT="${PORT:-8089}"
+BASE_URL="http://$HOST:$PORT"
+N="${N:-3}"
+MAX_TOKENS="${MAX_TOKENS:-400}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
+VRAM_FREE_MB="${VRAM_FREE_MB:-2000}"
+VRAM_TIMEOUT="${VRAM_TIMEOUT:-180}"
+GPU="${GPU:-0}"
+DEEP_PREFILL="${DEEP_PREFILL:-250000}"
+DRY="${DRY:-}"
+LOGS="${LOGS:-$BENCH_DIR/logs}"
+RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
+ALL_EXPERIMENTS="loop_guard client_override deep_kv slot4_width mtp_control"
+EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
+SUMMARY=""          # "name: status" lines, printed at the end
+SERVER_PID=""
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+ts() { date +%Y%m%d-%H%M%S; }
+
+# ---------------------------------------------------------------- results
+
+results_header() {
+    [ -s "$RESULTS" ] && return 0
+    mkdir -p "$(dirname "$RESULTS")"
+    printf '# CMP 170HX + RTX 3060 - open items, %s\n\n' "$(date +%F)" > "$RESULTS"
+    printf 'Rows appended by `run-open-items.sh`; fold the keepers into README.md.\n\n' >> "$RESULTS"
+    printf '| date | quantity | value | how | notes |\n| --- | --- | --- | --- | --- |\n' >> "$RESULTS"
+}
+
+# add_row QUANTITY VALUE HOW NOTES   (pipes in the text are escaped)
+add_row() {
+    results_header
+    local q v h n
+    q=${1//|/\\|}; v=${2//|/\\|}; h=${3//|/\\|}; n=${4//|/\\|}
+    printf '| %s | %s | %s | %s | %s |\n' "$(date +%F)" "$q" "$v" "$h" "$n" >> "$RESULTS"
+    log "row: $q -> $v"
+}
+
+# ---------------------------------------------------------------- GPU
+
+vram_used_mb() {
+    have nvidia-smi || { echo 0; return; }
+    nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$GPU" 2>/dev/null |
+        head -n 1 | tr -dc '0-9'
+}
+
+# block until GPU 0 is below VRAM_FREE_MB (a stale server OOMed the MTP launch once)
+wait_vram_free() {
+    [ -n "$DRY" ] && { log "(dry) wait for VRAM on GPU $GPU < ${VRAM_FREE_MB} MiB"; return 0; }
+    have nvidia-smi || { log "nvidia-smi not found; skipping the VRAM check"; return 0; }
+    local deadline=$((SECONDS + VRAM_TIMEOUT)) used
+    while :; do
+        used=$(vram_used_mb); used=${used:-0}
+        if [ "$used" -lt "$VRAM_FREE_MB" ]; then
+            log "GPU $GPU: ${used} MiB used, clear"
+            return 0
+        fi
+        [ "$SECONDS" -lt "$deadline" ] || { log "GPU $GPU still holds ${used} MiB after ${VRAM_TIMEOUT}s"; return 1; }
+        sleep 3
+    done
+}
+
+# ---------------------------------------------------------------- server
+
+# serve_args EXTRA... -> the tenselerate serve argv (no launch)
+serve_args() {
+    printf '%s\n' python3 -m tenselerate serve --backend llamacpp --model "$MODEL" \
+        --host "$HOST" --port "$PORT"
+    [ -n "${LLAMA_SERVER:-}" ] && printf '%s\n' --llama-server "$LLAMA_SERVER"
+    printf '%s\n' "$@"
+}
+
+# start_server SERVER_LOG EXTRA...   ; leaves SERVER_PID set (the process group)
+start_server() {
+    local slog=$1; shift
+    local -a cmd
+    mapfile -t cmd < <(serve_args "$@")
+    if [ -n "$DRY" ]; then
+        log "(dry) would launch: ${cmd[*]}"
+        # validate the configuration through the backend's own checks
+        (cd "$ROOT" && "${cmd[@]}" --dry-run) >> "$slog" 2>&1 || die "dry-run rejected: ${cmd[*]}"
+        return 0
+    fi
+    wait_vram_free || return 1
+    log "launching: ${cmd[*]}"
+    log "server log: $slog"
+    # setsid: llama-server is a child of the python launcher; killing the group gets both
+    (cd "$ROOT" && exec setsid "${cmd[@]}") > "$slog" 2>&1 &
+    SERVER_PID=$!
+    printf '%s\n' "$SERVER_PID" > "$LOGS/.server.pid"
+    wait_health
+}
+
+wait_health() {
+    local deadline=$((SECONDS + HEALTH_TIMEOUT))
+    log "waiting for $BASE_URL/health (up to ${HEALTH_TIMEOUT}s; the load is slow over PCIe Gen2 x4)"
+    while :; do
+        if python3 "$MEASURE" --base-url "$BASE_URL" --health; then
+            log "server healthy after $((SECONDS))s"
+            return 0
+        fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            log "server process exited before becoming healthy; last lines:"
+            tail -n 15 "$LOGS/.current-server.log" 2>/dev/null || true
+            return 1
+        fi
+        [ "$SECONDS" -lt "$deadline" ] || { log "health timeout"; return 1; }
+        sleep 5
+    done
+}
+
+stop_server() {
+    if [ -n "$DRY" ]; then log "(dry) would stop the server"; return 0; fi
+    local pid=${SERVER_PID:-$(cat "$LOGS/.server.pid" 2>/dev/null || true)}
+    if [ -n "$pid" ]; then
+        log "stopping server group $pid"
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        local i
+        for i in $(seq 1 30); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    # anything else still bound to our port (never the production 8080 server)
+    pkill -f -- "llama-server .*--port $PORT( |$)" 2>/dev/null || true
+    SERVER_PID=""
+    rm -f "$LOGS/.server.pid"
+    wait_vram_free || log "warning: VRAM did not come back; the next launch may OOM"
+}
+
+# last "draft acceptance = X" the server logged (empty when no drafter ran)
+grep_acceptance() {
+    [ -f "$1" ] || return 0
+    sed -n 's/.*draft acceptance = \([0-9.]*\).*/\1/p' "$1" | tail -n 1
+}
+
+# ---------------------------------------------------------------- measure
+
+MEASURE_VALUE=""
+MEASURE_KV=""
+# run_measure LOG ARGS... ; sets MEASURE_VALUE / MEASURE_KV from measure.py's trailer lines
+run_measure() {
+    local mlog=$1; shift
+    MEASURE_VALUE=""; MEASURE_KV=""
+    if [ -n "$DRY" ]; then
+        log "(dry) would measure: python3 $MEASURE --base-url $BASE_URL $*"
+        MEASURE_VALUE="(dry)"; MEASURE_KV="tok_s=0	acceptance=-	loops=0	n=0"
+        return 0
+    fi
+    python3 "$MEASURE" --base-url "$BASE_URL" --n "$N" --max-tokens "$MAX_TOKENS" "$@" 2>&1 |
+        tee -a "$mlog"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
+    MEASURE_VALUE=$(sed -n 's/^VALUE\t//p' "$mlog" | tail -n 1)
+    MEASURE_KV=$(sed -n 's/^KV\t//p' "$mlog" | tail -n 1)
+    [ -n "$MEASURE_VALUE" ]
+}
+
+kv_get() { printf '%s\n' "$MEASURE_KV" | tr '\t' '\n' | sed -n "s/^$1=//p" | head -n 1; }
+
+# one server + one or more measurements, rows appended, server stopped in every case
+# measure_config NAME QUANTITY HOW NOTES -- SERVE_ARGS... -- MEASURE_ARGS...
+measure_config() {
+    local name=$1 quantity=$2 how=$3 notes=$4; shift 4
+    [ "$1" = "--" ] && shift
+    local -a sargs=() margs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do sargs+=("$1"); shift; done
+    [ $# -gt 0 ] && shift
+    margs=("$@")
+    local stamp slog mlog acc
+    stamp=$(ts); slog="$LOGS/$name-server-$stamp.log"; mlog="$LOGS/$name-$stamp.log"
+    ln -sf "$slog" "$LOGS/.current-server.log"
+    if ! start_server "$slog" "${sargs[@]}"; then
+        add_row "$quantity" "FAILED to start" "$how" "$notes; see $(basename "$slog")"
+        stop_server; return 1
+    fi
+    local rc=0
+    run_measure "$mlog" "${margs[@]}" || rc=1
+    acc=$(grep_acceptance "$slog")
+    [ -n "$acc" ] && notes="$notes; server log draft acceptance $acc"
+    if [ $rc -eq 0 ]; then
+        add_row "$quantity" "$MEASURE_VALUE" "$how" "$notes"
+    else
+        add_row "$quantity" "FAILED" "$how" "$notes; see $(basename "$mlog")"
+    fi
+    stop_server
+    return $rc
+}
+
+# ---------------------------------------------------------------- experiments
+
+PROD_ARGS=(--slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 1)   # the Hercules launch shape
+WINNER_FILE=""
+
+# track the best loop-free sampling for mtp_control: "mode" or "mode:temp"
+note_candidate() {
+    local label=$1 tok loops
+    tok=$(kv_get tok_s); loops=$(kv_get loops)
+    printf '%s\t%s\t%s\n' "$label" "${tok:-0}" "${loops:-0}" >> "$WINNER_FILE"
+}
+
+pick_winner() {
+    [ -s "$WINNER_FILE" ] || return 0
+    # loop-free first, then highest tok/s
+    awk -F'\t' '$3 == 0' "$WINNER_FILE" | sort -t$'\t' -k2,2gr | head -n 1 | cut -f1
+}
+
+exp_loop_guard() {
+    WINNER_FILE="$LOGS/loop-guard-candidates.tsv"; : > "$WINNER_FILE"
+    local how="llama-server via tenselerate serve, 4x524288 q8_0, MTP depth 1, measure.py --loop-check, N=$N per shape"
+    local mode
+    for mode in greedy dry low; do
+        measure_config "loop_guard-$mode" "loop guard: --sampling $mode (MTP depth 1)" "$how" \
+            "server default sampling; client sends none" \
+            -- "${PROD_ARGS[@]}" --sampling "$mode" -- --loop-check || continue
+        note_candidate "$mode"
+    done
+    local temp
+    for temp in 0.15 0.5; do
+        measure_config "loop_guard-low-t$temp" "loop guard: --sampling low, client temp $temp (MTP depth 1)" "$how" \
+            "client overrides temperature only; min-p 0.1 and repeat-penalty 1.0 from the server" \
+            -- "${PROD_ARGS[@]}" --sampling low -- --loop-check --send-sampling "temp=$temp" || continue
+        note_candidate "low:$temp"
+    done
+    local w
+    w=$(pick_winner)
+    if [ -n "$w" ]; then
+        printf '%s\n' "$w" > "$LOGS/winning-sampling"
+        add_row "loop guard winner" "$w" "highest mean tok/s among loop-free candidates" \
+            "candidates in logs/loop-guard-candidates.tsv; mtp_control uses it unless WIN_SAMPLING is set"
+    else
+        add_row "loop guard winner" "none loop-free" "all candidates looped or failed" "mtp_control falls back to dry"
+    fi
+}
+
+exp_client_override() {
+    measure_config "client_override" \
+        "client override: server --sampling greedy, request temp 0.7 + repeat_penalty 1.15 (MTP depth 1)" \
+        "measure.py --send-sampling temp=0.7,rp=1.15 against the greedy server" \
+        "expect ~0.22 acceptance and <34 tok/s if the request wins over the server default" \
+        -- "${PROD_ARGS[@]}" --sampling greedy -- --loop-check --send-sampling temp=0.7,rp=1.15
+}
+
+exp_deep_kv() {
+    local kv
+    for kv in q8_0 f16; do
+        measure_config "deep_kv-$kv" \
+            "262K single stream, kv $kv: decode at ~${DEEP_PREFILL} tokens" \
+            "1 slot x 262144, no spec, measure.py --prefill-tokens $DEEP_PREFILL (synthetic numbered paragraphs), N=2" \
+            "prediction: f16 ~22 tok/s (MMA_F16 + GQA) vs q8_0 12.4 (vec kernel, 6x redundant KV read)" \
+            -- --slots 1 --ctx-pool 262144 --kv "$kv" --mtp-draft 0 --sampling greedy \
+            -- --prefill-tokens "$DEEP_PREFILL" --slot-size 262144 --n 2 --max-tokens 200 --loop-check || true
+    done
+}
+
+exp_slot4_width() {
+    local how="4 slots x 524288 q8_0, MTP depth 1, greedy, measure.py --concurrency 4 (distinct 1500-token prefixes)"
+    measure_config "slot4_width-default" "4 slots active, MTP depth 1, default MMVQ routing" "$how" \
+        "verification width 8 on the dp4a path" \
+        -- "${PROD_ARGS[@]}" --sampling greedy -- --concurrency 4 --loop-check || true
+    measure_config "slot4_width-mmvq3" "4 slots active, MTP depth 1, --mmvq-max 3" "$how" \
+        "GGML_CUDA_MMVQ_MAX=3: width 8 goes to MMQ, single-slot turns stay on dp4a; predicted ~70" \
+        -- "${PROD_ARGS[@]}" --sampling greedy --mmvq-max 3 -- --concurrency 4 --loop-check || true
+    measure_config "slot4_width-nommvq" "4 slots active, MTP depth 1, --no-mmvq" "$how" \
+        "GGML_CUDA_NO_MMVQ=1: every width on MMQ" \
+        -- "${PROD_ARGS[@]}" --sampling greedy --no-mmvq -- --concurrency 4 --loop-check || true
+}
+
+exp_mtp_control() {
+    local w mode temp
+    w=${WIN_SAMPLING:-$(cat "$LOGS/winning-sampling" 2>/dev/null || true)}
+    w=${w:-dry}
+    mode=${w%%:*}; temp=""
+    [ "$mode" != "$w" ] && temp=${w#*:}
+    local -a margs=(--loop-check)
+    [ -n "$temp" ] && margs+=(--send-sampling "temp=$temp")
+    local how="4x524288 q8_0, --sampling $mode${temp:+ + client temp $temp}, measure.py N=$N per shape"
+    measure_config "mtp_control-off" "control: MTP off, sampling $w" "$how" "--mtp-draft 0" \
+        -- --slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 0 --sampling "$mode" -- "${margs[@]}" || true
+    measure_config "mtp_control-on" "control: MTP depth 1, sampling $w" "$how" "--mtp-draft 1" \
+        -- --slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 1 --sampling "$mode" -- "${margs[@]}" || true
+}
+
+# ---------------------------------------------------------------- driver
+
+run_experiment() {
+    local name=$1 elog rc=0
+    case " $EXPERIMENTS " in
+        *" $name "*) ;;
+        *) SUMMARY+="$name: skipped"$'\n'; return 0 ;;
+    esac
+    elog="$LOGS/$name-$(ts).log"
+    log "=== experiment $name (log $elog)"
+    local fn="exp_$name"
+    [ "${FAIL_EXPERIMENT:-}" = "$name" ] && fn=false    # self-test fault injection
+    set +e
+    { "$fn"; } 2>&1 | tee -a "$elog"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -eq 0 ]; then SUMMARY+="$name: ok"$'\n'; else SUMMARY+="$name: FAILED (rc $rc, see $elog)"$'\n'; fi
+    return 0
+}
+
+cleanup() {
+    [ -n "$DRY" ] && return 0
+    local pid
+    pid=$(cat "$LOGS/.server.pid" 2>/dev/null || true)
+    if [ -n "$pid" ]; then
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        sleep 2
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        rm -f "$LOGS/.server.pid"
+    fi
+    pkill -f -- "llama-server .*--port $PORT( |$)" 2>/dev/null || true
+}
+
+main() {
+    [ -n "${MODEL:-}" ] || die "MODEL=/path/to/model.gguf is required (or --self-test)"
+    [ -n "$DRY" ] || [ -f "$MODEL" ] || die "MODEL not found: $MODEL"
+    [ -f "$MEASURE" ] || die "missing $MEASURE"
+    EXPERIMENTS=${EXPERIMENTS//,/ }
+    local e
+    for e in $EXPERIMENTS; do
+        case " $ALL_EXPERIMENTS " in *" $e "*) ;; *) die "unknown experiment '$e'; have: $ALL_EXPERIMENTS" ;; esac
+    done
+    mkdir -p "$LOGS"
+    results_header
+    trap cleanup EXIT INT TERM
+    if [ -z "$DRY" ]; then
+        python3 "$MEASURE" --base-url "$BASE_URL" --health && \
+            die "something already answers on $BASE_URL; pick another PORT"
+    fi
+    log "model: $MODEL"; log "results: $RESULTS"; log "logs: $LOGS"; log "experiments: $EXPERIMENTS"
+    for e in $ALL_EXPERIMENTS; do
+        run_experiment "$e"
+    done
+    printf '\n==> summary\n%s' "$SUMMARY"
+    printf '==> rows in %s:\n' "$RESULTS"
+    grep -c '^| 20' "$RESULTS" || true
+    printf 'draft acceptance per server: grep "draft acceptance" %s/*server*.log\n' "$LOGS"
+}
+
+self_test() {
+    bash -n "$0" || die "bash -n failed"
+    python3 "$MEASURE" --self-test || die "measure.py self-test failed"
+
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    # unit checks of the pure helpers
+    printf 'x\nslot 0: draft acceptance = 0.88100 (  335 accepted /   380 generated), mean len =  1.88\n' > "$tmp/s.log"
+    [ "$(grep_acceptance "$tmp/s.log")" = "0.88100" ] || die "grep_acceptance failed"
+    [ -z "$(grep_acceptance "$tmp/none.log")" ] || die "grep_acceptance on a missing log"
+    MEASURE_KV=$'tok_s=44.40\tacceptance=0.85\tloops=1\tn=9'
+    [ "$(kv_get tok_s)" = "44.40" ] && [ "$(kv_get loops)" = "1" ] || die "kv_get failed"
+    WINNER_FILE="$tmp/c.tsv"
+    printf 'greedy\t46.2\t2\ndry\t45.1\t0\nlow\t41.0\t0\nlow:0.15\t44.0\t0\n' > "$WINNER_FILE"
+    [ "$(pick_winner)" = "dry" ] || die "pick_winner failed: $(pick_winner)"
+    RESULTS="$tmp/r.md"; add_row "q|x" "v" "h" "n" >/dev/null
+    grep -q '^| .* | q\\|x | v | h | n |$' "$RESULTS" || die "add_row failed: $(cat "$RESULTS")"
+    [ "$(grep -c '^| --- ' "$RESULTS")" = "1" ] || die "results header"
+
+    # the full driver in DRY mode: every launch is validated with tenselerate --dry-run
+    local out
+    out=$(DRY=1 MODEL="$tmp/Fake-27B-TURBO-MTP-Q4_K_M.gguf" LOGS="$tmp/logs" RESULTS="$tmp/dry.md" \
+          bash "$0") || die "DRY driver failed:
+$out"
+    printf '%s\n' "$out" | grep -q 'loop_guard: ok' || die "dry summary missing loop_guard"
+    printf '%s\n' "$out" | grep -q 'mtp_control: ok' || die "dry summary missing mtp_control"
+    local rows; rows=$(grep -c '^| 20' "$tmp/dry.md")
+    [ "$rows" -ge 13 ] || die "expected >= 13 dry rows, got $rows"
+    grep -q -- '--spec-draft-n-max 1' "$tmp"/logs/slot4_width-mmvq3-server-*.log || die "dry-run argv not logged"
+    grep -q 'GGML_CUDA_MMVQ_MAX=3' "$tmp"/logs/slot4_width-mmvq3-server-*.log || die "mmvq-max not in env prefix"
+    grep -q -- '-ctk f16' "$tmp"/logs/deep_kv-f16-server-*.log || die "f16 kv not in argv"
+    grep -q -- '--port 8089' "$tmp"/logs/loop_guard-greedy-server-*.log || die "port not 8089"
+    grep -q -- '--host 127.0.0.1' "$tmp"/logs/loop_guard-greedy-server-*.log || die "not loopback"
+    out=$(DRY=1 MODEL=x EXPERIMENTS=deep_kv LOGS="$tmp/logs2" RESULTS="$tmp/sub.md" bash "$0")
+    printf '%s\n' "$out" | grep -q 'loop_guard: skipped' || die "EXPERIMENTS subset not honoured"
+    [ "$(grep -c '^| 20' "$tmp/sub.md")" = "2" ] || die "subset row count"
+    ! DRY=1 MODEL=x EXPERIMENTS=bogus LOGS="$tmp/logs3" RESULTS="$tmp/b.md" bash "$0" >/dev/null 2>&1 || die "unknown experiment accepted"
+    # one failing experiment is reported and does not stop the rest
+    out=$(DRY=1 MODEL=x EXPERIMENTS=client_override,mtp_control FAIL_EXPERIMENT=client_override \
+          LOGS="$tmp/logs4" RESULTS="$tmp/f.md" bash "$0")
+    printf '%s\n' "$out" | grep -q 'client_override: FAILED' || die "failed experiment not reported:
+$out"
+    printf '%s\n' "$out" | grep -q 'mtp_control: ok' || die "a failure stopped the following experiment"
+
+    printf 'self-test OK: bash -n, measure.py stub run, acceptance grep, kv parse, winner pick,\n'
+    printf '              row escaping, DRY driver (all launches validated by tenselerate --dry-run),\n'
+    printf '              EXPERIMENTS subset, unknown experiment rejected, failure isolation\n'
+}
+
+case "${1:-}" in
+    --self-test) self_test ;;
+    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
+    "") main ;;
+    *) die "unknown option: $1 (try --help)" ;;
+esac

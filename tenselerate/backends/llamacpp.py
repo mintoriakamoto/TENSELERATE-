@@ -107,6 +107,7 @@ def build_llama_server_argv(
     reasoning: str = DEFAULT_REASONING,
     alias: str = DEFAULT_ALIAS,
     mtp_draft: int | None = DEFAULT_MTP_DRAFT,
+    mtp_model: str | None = None,
     sampling: str = DEFAULT_SAMPLING,
     extra: Sequence[str] = (),
 ) -> list[str]:
@@ -131,7 +132,11 @@ def build_llama_server_argv(
         raise ValueError("alias must be a non-empty model id for the agent to address")
     if sampling not in SAMPLING_MODES:
         raise ValueError(f"sampling must be one of {SAMPLING_MODES}, got {sampling!r}")
+    if mtp_model is not None and mtp_draft is None:
+        mtp_draft = 3          # a retrained head is served at the healthy-curve optimum
     mtp_draft = resolve_mtp_draft(model, mtp_draft)
+    if mtp_model is not None and mtp_draft == 0:
+        raise ValueError("mtp_model given but mtp_draft is 0; a sidecar head needs a draft depth")
     if not 0 <= mtp_draft <= MAX_MTP_DRAFT:
         raise ValueError(f"mtp_draft must be 0 (off) .. {MAX_MTP_DRAFT}, got {mtp_draft}")
     argv = [
@@ -148,8 +153,11 @@ def build_llama_server_argv(
     # sampled token, so temperature and repeat penalty fight the draft head
     argv += list(SAMPLING_ARGV[sampling])
     if mtp_draft:
-        # the MTP head lives inside the -MTP- GGUF; no -md needed
+        # the MTP head lives inside the -MTP- GGUF; -md only for a retrained
+        # sidecar head exported by convert_hf_to_gguf.py --mtp (scripts/mtp-head-train.py)
         argv += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft)]
+        if mtp_model is not None:
+            argv += ["-md", mtp_model]
     argv += list(extra)
     return argv
 

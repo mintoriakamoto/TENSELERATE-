@@ -323,6 +323,44 @@ q4_0 KV 34->18 KiB/token: 131K adds ~2.7 ms -> ~30 tok/s; 262K adds ~5.4 ms
 262K lands near 28-30 the bytes model holds and page-skip / q4_0 K are worth
 exactly the fraction of that KV term they remove.
 
+## How to run the open items
+
+`run-open-items.sh` works the list below unattended: one `llama-server` per
+configuration on `127.0.0.1:8089` (a production server on 8080 is left alone),
+launched through `python3 -m tenselerate serve --backend llamacpp`, health-polled
+for up to 10 min (the load is slow over PCIe Gen2 x4), measured, killed, and
+GPU 0's VRAM watched until it is back under 2 GiB before the next launch (a
+stale server OOMed the MTP launch once). Rows land in `results-<date>.md` with
+this table's columns; fold the keepers into the table above by hand.
+
+```
+MODEL=/models/Qwen3.8-27B-TURBO-MTP-Q4_K_M.gguf bash benches/cmp170hx-3060/run-open-items.sh
+EXPERIMENTS=loop_guard,deep_kv MODEL=... bash benches/cmp170hx-3060/run-open-items.sh   # a subset
+DRY=1 MODEL=... bash benches/cmp170hx-3060/run-open-items.sh                            # print the launches
+bash benches/cmp170hx-3060/run-open-items.sh --self-test                                # no GPU needed
+```
+
+Experiments, in order: `loop_guard` (`--sampling greedy` / `dry` / `low`, and
+`low` with client temp 0.15 / 0.5 - tok/s, draft acceptance and a `<think>`
+loop check per shape; the loop-free mode with the highest tok/s is written to
+`logs/winning-sampling`), `client_override` (greedy server, request carries
+temp 0.7 + repeat_penalty 1.15), `deep_kv` (1 slot x 262144, q8_0 vs f16,
+~250K-token synthetic prefill, decode at depth), `slot4_width` (4 slots, MTP
+depth 1, default routing vs `--mmvq-max 3` vs `--no-mmvq`, 4 concurrent
+streams), `mtp_control` (MTP off vs on under the winner). One failing
+experiment does not stop the rest; a summary prints at the end.
+
+`measure.py` is the stdlib client behind it: `stream: false` chat completions on
+three fixed prompt shapes (JSON tool calls, code, prose), reading llama-server's
+`timings` object - `predicted_per_second`, `predicted_n`, `prompt_per_second`,
+and `draft_n` / `draft_n_accepted` when a drafter ran. It sends no
+`temperature` / `top_p` / `repeat_penalty` unless `--send-sampling temp=..,rp=..`
+is given, so what it measures is the server's request defaults - the
+same contract Hermes has to honour. `--concurrency N` occupies N slots behind
+distinct long prefixes and reports aggregate and per-stream tok/s;
+`--loop-check` flags a 12-gram repeated 4+ times. Logs: `logs/<experiment>-<ts>.log`
+plus the server's own log (`grep "draft acceptance" logs/*server*.log`).
+
 ## Still to measure
 
 Leads from this week's scan (drafters that run on upstream llama-server, the

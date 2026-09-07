@@ -119,3 +119,69 @@ fork synced to upstream, where `draft-dspark` works in server mode.
 4. Start regenerating data with `scripts/mtp-realign-gen.py` against the
    running server; it needs no GPU time of its own beyond what the server
    already spends.
+
+## Running the retrain
+
+Everything below is `scripts/mtp-head-train.py` (Route A, native head) plus the
+existing tools. Paths: `$HF` is the merge's BF16 HF checkpoint (the `-NM-DAU`
+repo), `$BASE` the stock base-model HF checkpoint (its `mtp.*` are the healthier
+warm start), `$GGUF` the served Q4_K_M trunk. Times are for the 170HX (40 GiB,
+A100-class compute); the 3060 does not take part.
+
+```bash
+# 0. sanity: the script's torch-free plumbing (args, data, packing, name maps)
+python3 scripts/mtp-head-train.py --self-test
+
+# 1. data - regenerate answers with the SERVED model on the served workload.
+#    Needs no GPU time of its own; the server does the work. ~40K prompts at
+#    4 slots and ~45 tok/s per slot: ~8-10 h for 40M tokens (mostly `low`, every
+#    4th prompt `xhigh`). Resumable; stop early and train on what is there.
+bash scripts/hercules_serve.sh $GGUF          # greedy default, 4 slots
+python3 scripts/mtp-realign-gen.py prompts.jsonl -o gen.jsonl --workers 4 \
+    --reasoning low --xhigh-every 4 --max-tokens 2048
+# keep the last ~2% (or a separate Hercules capture) as heldout.jsonl
+
+# 2. train - trunk frozen in NF4 (~15 GiB, matches the Q4_K_M statistics),
+#    head in fp32 with AdamW (~6.5 GiB), depth 3 unrolled teacher-forced,
+#    lr 1e-4 cosine, 2 epochs. Stop the server first: the card is needed whole.
+#    Throughput: one 27B NF4 forward + a 0.4B head at seq 2048 is ~1.5-2 s per
+#    window on the 170HX -> ~40M tokens = ~20K windows = ~8-11 h per epoch.
+#    Start with --epochs 1 and read the periodic eval; add the second epoch
+#    only if position-2 agreement is still rising (the doc's go/no-go).
+python3 scripts/mtp-head-train.py --model $HF --init-from $BASE --trunk-4bit \
+    --data gen.jsonl --eval-data heldout.jsonl --depth 3 --seq-len 2048 \
+    --batch-size 1 --grad-accum 8 --lr 1e-4 --epochs 1 \
+    --save-every 100 --eval-every 200 --out-dir mtp-retrain
+#   crashed / rebooted: same command plus --resume
+
+# 3. eval - position-wise top-1 agreement with the trunk's argmax (greedy
+#    acceptance proxy) for positions 1..3, on held-out traffic. Target curve:
+#    0.86 / 0.77 / 0.67. Compare against the stock head (omit --head).
+python3 scripts/mtp-head-train.py --model $HF --trunk-4bit --eval \
+    --eval-data heldout.jsonl --depth 3 --head mtp-retrain/mtp-head.safetensors
+python3 scripts/mtp-head-train.py --model $HF --trunk-4bit --eval \
+    --eval-data heldout.jsonl --depth 3          # stock head, for the delta
+
+# 4. export - build an HF export dir (trunk shards symlinked, mtp.* swapped for
+#    the trained head, index rewritten), then the Q8_0 sidecar with --mtp.
+#    A few minutes; the 15 GB trunk GGUF is untouched.
+python3 scripts/mtp-head-train.py --model $HF --head mtp-retrain/mtp-head.safetensors \
+    --install-dir ${HF}-mtp-retrained
+python3 convert_hf_to_gguf.py --mtp --outtype q8_0 ${HF}-mtp-retrained --outfile mtp-retrain/
+
+# 5. serve - depth 3 on the trained head (greedy stays a precondition), then
+#    the acceptance check from the go/no-go section on held-out Hercules turns.
+#    `--mtp-model` serves the sidecar with -md and defaults the depth to 3
+#    (`--mtp-draft N` / MTP=N overrides). At depth 3-5 the verify width is 4-6,
+#    where MMQ beats dp4a: add --no-mmvq (or --mmvq-max 3 for mixed slots).
+python3 -m tenselerate serve --backend llamacpp --model $GGUF \
+    --mtp-model mtp-retrain/mtp-head-q8_0.gguf --no-mmvq
+# or: MTP_MODEL=mtp-retrain/mtp-head-q8_0.gguf NO_MMVQ=1 bash scripts/hercules_serve.sh $GGUF
+```
+
+Wall clock on the 170HX, end to end: ~8-10 h of server time for the data (can
+overlap with normal use since it *is* normal use), ~8-11 h per training epoch,
+minutes for eval and export. Two evenings, or one rented A100/H100 hour for the
+training step (the data still has to come from the served model). If the
+trained head's position-2 agreement stays under 50% on held-out traffic, add
+data before adding epochs.

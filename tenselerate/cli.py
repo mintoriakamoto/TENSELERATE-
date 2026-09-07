@@ -533,7 +533,7 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
             args.model, host=args.host, port=args.port, binary=binary,
             slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
             reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft,
-            sampling=args.sampling)
+            mtp_model=args.mtp_model, sampling=args.sampling)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -657,6 +657,10 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: MTP draft depth (default: 1 when the GGUF "
                         "name carries -MTP-, else 0; 1 measured +13..38%% on this "
                         "merge, deeper loses until the head is retrained)")
+    p.add_argument("--mtp-model", default=None,
+                   help="llamacpp backend: a retrained MTP head GGUF served as a sidecar "
+                        "(-md; scripts/mtp-head-train.py -> convert_hf_to_gguf.py --mtp); "
+                        "defaults --mtp-draft to 3")
     p.add_argument("--sampling", default=DEFAULT_SAMPLING, choices=SAMPLING_MODES,
                    help="llamacpp backend: server-default sampling. greedy (default): "
                         "--temp 0 --repeat-penalty 1.0, the only sampling under which the "
