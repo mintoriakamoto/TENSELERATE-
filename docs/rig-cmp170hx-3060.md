@@ -191,8 +191,9 @@ Then confirm token-identity with `scripts/svmi-verify.sh` before trusting a long
 
 ## Sources
 
+- Consensus-Protocol/cmp170hx - the authoritative technical wiki (silicon, firmware, unlock, procedures, open problems)
 - d3dx9/cmpunlocker - GA100 fuse-map reset via the Falcon BootROM .fwsignature_ga100 bug (2026-07)
-- amoghmunikote/cmpunlocker - SM + HBM2e restore, 40/80 GB targets
+- amoghmunikote/cmpunlocker - SM + HBM2e restore, 40/80 GB targets; hosts the 170th-Street benchmarks
 - abobasixseven/unlock-cmp-170hx - in-driver kernel patches for 610.43.03 (no BootROM exploit)
 - thaurock-x/CMP-170HX-64GB-Unlocked-VBIOS - standalone 64 GB vBIOS flash (persistent)
 - Tom's Hardware - software mod unlocks 64 GB on the CMP 170HX
