@@ -443,6 +443,54 @@ binary), the prefill micro-batch sweep (`-ub 512/1024/2048` at pp4096), and
 the quant A/B (`MODEL_ALT=` a Q4_0 or IQ4_XS GGUF). Rows land in the same
 results file.
 
+## The "518 tok/s aggregate" run - the aggregate is an artifact, the acceptance is real
+
+An 8-slot run reported per-slot rates of 38.7-48.0 tok/s at 42-58% draft
+acceptance, then a headline of **518 tok/s aggregate**. The per-slot numbers
+refute the headline:
+
+| | |
+| --- | --- |
+| sum of the 8 per-slot rates | **342.8 tok/s** - the ceiling |
+| reported aggregate | 518 tok/s, **1.51x over the ceiling** |
+
+For N streams sharing one window, aggregate can never exceed the sum of the
+per-stream rates. Exceeding it means the token count and the elapsed time came
+from different clocks. Reconstructing from the screenshot's own counters (all
+draft totals are even, so depth 2; emitted = passes + accepted = 3230 tokens),
+the per-slot elapsed times run 5.4-12.0 s, so:
+
+| denominator | aggregate |
+| --- | --- |
+| true wall clock if the 8 overlapped (12.0 s) | ~270 tok/s |
+| the 6.23 s the 518 figure implies | 518 - shorter than 6 of the 8 requests took |
+| if they ran back to back (75.6 s) | ~43 tok/s, i.e. no concurrency at all |
+
+Even ~270 sits far above this ledger (70.5 at 4 slots, 122.4 at N=16, 134 at
+N=32) and above what the step model allows at 8 slots (~55 ms MMQ floor + 8 x
+5.6 ms ≈ 100 ms per pass, ~118 tok/s with depth-2 speculation). A per-slot
+42.8 tok/s at 8 concurrent slots is also within noise of our **single-stream**
+greedy-MTP number (46.2), which is what you measure when requests do not
+actually overlap.
+
+**What is real and is good news:** 49% average acceptance at draft depth 2,
+against the 7-11% and 22% in this ledger. That is issue #56 moving. Acceptance
+only becomes speed through tok/s, so the run to keep is the same burst with an
+honest denominator.
+
+`benches/cmp170hx-3060/agg-report.py` now refuses to print a bad aggregate. It
+takes the burst's wall clock and the server's own per-request timings and adds
+two guards:
+
+- **aggregate <= sum of per-request rates**, or it says the number is impossible.
+- **concurrency factor** = sum(per-request elapsed) / wall. Near N the requests
+  overlapped and the aggregate means something; near 1 they ran sequentially and
+  every per-slot rate is a single-stream rate.
+
+Fed the screenshot's own counters it reproduces 518.5 and rejects it.
+`fork-vs-upstream-ab.sh` reports through it, so every aggregate in this file
+from here on has passed both guards.
+
 ## The "TENSELERATE's GDN is corrupted" diagnosis - checked, stale
 
 A parallel session concluded that MTP acceptance was 3x lower here than on

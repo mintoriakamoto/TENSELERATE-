@@ -52,9 +52,11 @@ measure() {  # $1 = tag, $2 = n_parallel
     wait
     t1=$(date +%s.%N)
     local wall; wall=$(echo "$t1 - $t0" | bc)
-    local gen; gen=$(cat "$OUT/$tag"-*.json | grep -o '"completion_tokens":[0-9]*' | cut -d: -f2 | paste -sd+ | bc)
-    gen="${gen:-0}"
-    echo "$tag np=$np wall=${wall}s generated=$gen aggregate=$(echo "scale=1; $gen / $wall" | bc) tok/s" | tee -a "$OUT/summary.txt"
+    # agg-report.py prints the aggregate AND refuses to report one that exceeds
+    # the sum of per-request rates or that came from requests which never
+    # overlapped - the two ways a concurrency number goes wrong.
+    python3 "$ROOT/benches/cmp170hx-3060/agg-report.py" --label "$tag np=$np" \
+        --wall "$wall" "$OUT/$tag"-*.json 2>&1 | tee -a "$OUT/summary.txt" || true
 }
 
 run_side() {  # $1 = tag, $2 = binary, $3 = extra args
