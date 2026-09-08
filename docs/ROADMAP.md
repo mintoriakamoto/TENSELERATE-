@@ -13,6 +13,7 @@ measured against those on the release binary, not a dev build.
 
 | # | Item | Why first | Done when |
 | --- | --- | --- | --- |
+| [#67](https://github.com/mintoriakamoto/TENSELERATE-/issues/67) | Fork, don't fetch: on-card sequence fork for delegation and a prefix checkpoint | Every other way to start an agent moves bytes over the 2 GB/s link; a fork moves none and gives the child the parent's whole context | Delegation child starts in one decode step; 16 pinned-prompt slots fit; `docs/bounded-window-serving.md` |
 | [#63](https://github.com/mintoriakamoto/TENSELERATE-/issues/63) | Bounded attention window (PR #62): grade the slot table and the needle test | The one lever that turns the depth penalty into slots: 16 x 32K or 9 x 64K unbounded sequences instead of 2 x 256K capped | Rows in the benches README next to the predictions in `docs/bounded-window-serving.md`; default decided |
 | [#60](https://github.com/mintoriakamoto/TENSELERATE-/issues/60) | Run the open-items bench experiments | Fills every "predicted" row with a number; every other item depends on these numbers | "Still to measure" in the benches README has no empty rows |
 | [#53](https://github.com/mintoriakamoto/TENSELERATE-/issues/53) | Profile the GDN block at batch 1 (`nsys`) | The ~11 ms non-weight residual is launch count by the arithmetic; measure before writing a kernel | Launch count and ms-per-launch recorded in `docs/kernel-work.md` §3 |
