@@ -219,11 +219,6 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         // partial rotary: n_rot must not exceed the indexer key length (64)
         ms.add_kv(LLM_KV_ROPE_DIMENSION_COUNT,       uint32_t(64));
     }
-    // dspark drafter: required hparams (block size, mask token, target tap layers)
-    ms.add_kv(LLM_KV_DSPARK_BLOCK_SIZE,    uint32_t(7));
-    ms.add_kv(LLM_KV_DSPARK_MASK_TOKEN_ID, uint32_t(0));
-    ms.add_kv(LLM_KV_DSPARK_TARGET_LAYERS, std::vector<uint32_t>({1, 2}));
-
     ms.add_kv(LLM_KV_ATTENTION_CLAMP_KQV,              1.0f);
     ms.add_kv(LLM_KV_ATTENTION_LAYERNORM_EPS,          1e-5f);
     ms.add_kv(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,      1e-5f);
@@ -619,12 +614,6 @@ static int save_models(const llm_arch target_arch, const size_t seed, const int 
         if (arch == LLM_ARCH_EAGLE3 || arch == LLM_ARCH_DFLASH) {
             continue;
         }
-        if (arch == LLM_ARCH_DSPARK) {
-            // the dspark drafter is not a generic LM: a decode without staged
-            // target-tap capture features produces no logits (see
-            // tests/test-dspark-forward.cpp for its dedicated gates)
-            continue;
-        }
         for (bool moe : {false, true}) {
             if (moe && !moe_implemented(arch)) {
                 continue;
@@ -734,12 +723,6 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
             continue; // FIXME: ISWA KV cache initialization needs more fixture params
         }
         if (arch == LLM_ARCH_EAGLE3 || arch == LLM_ARCH_DFLASH) {
-            continue;
-        }
-        if (arch == LLM_ARCH_DSPARK) {
-            // the dspark drafter is not a generic LM: a decode without staged
-            // target-tap capture features produces no logits (see
-            // tests/test-dspark-forward.cpp for its dedicated gates)
             continue;
         }
 

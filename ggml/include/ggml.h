@@ -2610,21 +2610,6 @@ extern "C" {
             struct ggml_tensor  * state,
             int64_t               K);
 
-    // rows-indexed state read: instead of a gathered/contiguous (D, K, n_seqs)
-    // scratch, the op reads each sequence's live state directly from `states`
-    // (2D cache view, D-wide rows) at row `rows[seq]` (I32, n_seqs entries).
-    // Removes the per-layer get_rows + slot-0 cpy from recurrent decode graphs.
-    // Output layout is identical to ggml_gated_delta_net with K = n_snap_slots.
-    GGML_API struct ggml_tensor * ggml_gated_delta_net_rows(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * q,
-            struct ggml_tensor  * k,
-            struct ggml_tensor  * v,
-            struct ggml_tensor  * g,
-            struct ggml_tensor  * beta,
-            struct ggml_tensor  * states,
-            struct ggml_tensor  * rows,
-            int                   n_snap_slots);
     // DSA lightning indexer
     //
     // q:       [n_embd_idx, n_head_idx, n_batch, ne3 ]
