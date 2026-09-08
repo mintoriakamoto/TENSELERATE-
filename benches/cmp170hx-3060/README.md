@@ -429,6 +429,15 @@ running *in parallel* with the main loop, taking Hermes' delegation children
 and compaction off the 27B. Parallel, not sequential, is the only way the
 second card adds throughput.
 
+### llama-bench experiments in the runner (no server)
+
+`EXPERIMENTS=bench_ab,prefill_ubatch,quant_ab` runs directly through
+llama-bench: the regression bisect (this binary with the packed attention off
+and forced on, at 512 and at 64K depth, plus `LLAMA_BENCH_OLD=` an older
+binary), the prefill micro-batch sweep (`-ub 512/1024/2048` at pp4096), and
+the quant A/B (`MODEL_ALT=` a Q4_0 or IQ4_XS GGUF). Rows land in the same
+results file.
+
 ## Still to measure
 
 Leads from this week's scan (drafters that run on upstream llama-server, the

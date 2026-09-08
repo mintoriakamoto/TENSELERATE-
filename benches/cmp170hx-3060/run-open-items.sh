@@ -18,6 +18,9 @@
 #   mtp_control      MTP off vs on under the winning sampling
 #
 # Env: MODEL (required) LLAMA_SERVER (binary; default tenselerate's) PORT (8089)
+#      LLAMA_BENCH (llama-bench binary; default next to LLAMA_SERVER or build/bin)
+#      LLAMA_BENCH_OLD (an older llama-bench, e.g. from the main-b138 tarball, for the regression A/B)
+#      MODEL_ALT (a second GGUF of the same model, e.g. Q4_0 or IQ4_XS, for the quant A/B)
 #      N (requests per shape, 3) MAX_TOKENS (400) HEALTH_TIMEOUT (600 s)
 #      VRAM_FREE_MB (GPU 0 must be below this before a launch, 2000) VRAM_TIMEOUT (180 s)
 #      GPU (0) WIN_SAMPLING (mode[:temp], overrides loop_guard's pick for mtp_control)
@@ -45,7 +48,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="loop_guard client_override deep_kv slot4_width mtp_control"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -318,6 +321,88 @@ exp_mtp_control() {
         -- --slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 0 --sampling "$mode" -- "${margs[@]}" || true
     measure_config "mtp_control-on" "control: MTP depth 1, sampling $w" "$how" "--mtp-draft 1" \
         -- --slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 1 --sampling "$mode" -- "${margs[@]}" || true
+}
+
+# ---------------------------------------------------------------- llama-bench experiments
+
+bench_bin() {
+    if [ -n "${LLAMA_BENCH:-}" ]; then printf '%s' "$LLAMA_BENCH"; return; fi
+    if [ -n "${LLAMA_SERVER:-}" ] && [ -x "$(dirname "$LLAMA_SERVER")/llama-bench" ]; then
+        printf '%s' "$(dirname "$LLAMA_SERVER")/llama-bench"; return
+    fi
+    printf '%s' "$ROOT/build/bin/llama-bench"
+}
+
+# run_bench NAME LOG ENVSPEC MODEL ARGS... ; prints "pp=<t/s> tg=<t/s>" from llama-bench -o jsonl
+# ENVSPEC is "-" or VAR=value[,VAR=value]
+run_bench() {
+    local name=$1 blog=$2 envspec=$3 model=$4; shift 4
+    local bin; bin=$(bench_bin)
+    local -a envs=()
+    [ "$envspec" != "-" ] && IFS=',' read -r -a envs <<< "$envspec"
+    if [ -n "$DRY" ]; then
+        log "(dry) $name: env ${envs[*]:-none} $bin -m $model -ngl 999 -fa on -o jsonl $*"
+        printf 'pp=0 tg=0'
+        return 0
+    fi
+    [ -x "$bin" ] || { log "no llama-bench at $bin (set LLAMA_BENCH)"; return 1; }
+    env "${envs[@]}" "$bin" -m "$model" -ngl 999 -fa on -o jsonl "$@" 2>>"$blog" | tee -a "$blog" |
+        python3 -c '
+import json, sys
+pp = tg = None
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    r = json.loads(line)
+    if r.get("n_gen", 0) > 0 and r.get("n_prompt", 0) == 0:
+        tg = r.get("avg_ts")
+    elif r.get("n_prompt", 0) > 0 and r.get("n_gen", 0) == 0:
+        pp = r.get("avg_ts")
+print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None else "%.1f" % tg))'
+}
+
+# the regression bisect: new binary with the packed attention off / on, and an older binary if given
+exp_bench_ab() {
+    local blog="$LOGS/bench_ab-$(ts).log" r
+    r=$(run_bench "new-gqa0" "$blog" "GGML_CUDA_FATTN_VEC_GQA=0" "$MODEL" -p 512 -n 64 -r 3) || return 1
+    add_row "llama-bench pp512/tg64, this binary, packed attention OFF" "$r" \
+        "$(bench_bin) -p 512 -n 64 -r 3, GGML_CUDA_FATTN_VEC_GQA=0" "baseline for the synced tree; pre-sync tg64 was 33.5"
+    r=$(run_bench "new-gqa1" "$blog" "GGML_CUDA_FATTN_VEC_GQA=1" "$MODEL" -p 512 -n 64 -r 3) || return 1
+    add_row "llama-bench pp512/tg64, this binary, packed attention FORCED at 512 tokens" "$r" \
+        "same, GGML_CUDA_FATTN_VEC_GQA=1" "if this is below the OFF row the packed kernel loses at shallow depth (auto gate is 32K)"
+    r=$(run_bench "new-depth-gqa0" "$blog" "GGML_CUDA_FATTN_VEC_GQA=0" "$MODEL" -p 65536 -n 32 -r 2 -ctk q8_0 -ctv q8_0) || return 1
+    add_row "llama-bench tg32 at 64K depth, q8_0 KV, packed attention OFF" "$r" "-p 65536 -n 32 -ctk q8_0 -ctv q8_0" "pre-sync 65K was 23.5"
+    r=$(run_bench "new-depth-gqa1" "$blog" "GGML_CUDA_FATTN_VEC_GQA=1" "$MODEL" -p 65536 -n 32 -r 2 -ctk q8_0 -ctv q8_0) || return 1
+    add_row "llama-bench tg32 at 64K depth, q8_0 KV, packed attention ON" "$r" "same, GGML_CUDA_FATTN_VEC_GQA=1" "the kernel's own A/B; prediction: higher than OFF"
+    if [ -n "${LLAMA_BENCH_OLD:-}" ]; then
+        r=$(LLAMA_BENCH="$LLAMA_BENCH_OLD" run_bench "old" "$blog" "-" "$MODEL" -p 512 -n 64 -r 3) || return 1
+        add_row "llama-bench pp512/tg64, OLD binary ($LLAMA_BENCH_OLD)" "$r" "same flags" \
+            "if OLD > new-OFF the regression is in upstream's kernels: nsys both and diff the top kernels"
+    else
+        log "LLAMA_BENCH_OLD not set: skipping the old-binary row (point it at the main-b138 tarball's llama-bench)"
+    fi
+}
+
+# prefill batch: the 35K system prompt costs ~40 s per cache miss at 855 tok/s
+exp_prefill_ubatch() {
+    local blog="$LOGS/prefill_ubatch-$(ts).log" ub r
+    for ub in 512 1024 2048; do
+        r=$(run_bench "ub$ub" "$blog" "-" "$MODEL" -p 4096 -n 0 -r 2 -b 2048 -ub "$ub") || return 1
+        add_row "llama-bench pp4096, -b 2048 -ub $ub" "$r" "$(bench_bin) -p 4096 -r 2" \
+            "prefill vs micro-batch; the launch uses 512. Pick the fastest that fits the compute buffer"
+    done
+}
+
+# weight bytes: decode is bytes-bound, so a smaller or cheaper-to-dequant quant is a direct speedup
+exp_quant_ab() {
+    [ -n "${MODEL_ALT:-}" ] || { log "MODEL_ALT not set (a Q4_0 or IQ4_XS GGUF of the same model): skipping"; return 0; }
+    local blog="$LOGS/quant_ab-$(ts).log" r
+    r=$(run_bench "quant-main" "$blog" "-" "$MODEL" -p 512 -n 64 -r 3) || return 1
+    add_row "llama-bench tg64, $(basename "$MODEL")" "$r" "-p 512 -n 64 -r 3" "the served quant"
+    r=$(run_bench "quant-alt" "$blog" "-" "$MODEL_ALT" -p 512 -n 64 -r 3) || return 1
+    add_row "llama-bench tg64, $(basename "$MODEL_ALT")" "$r" "same flags" \
+        "bytes per weight is the lever: Q4_0 ~+10-15% (cheapest dequant), IQ4_XS ~+12% (14 GB). Quality needs a tokens-to-answer A/B"
 }
 
 # ---------------------------------------------------------------- driver
