@@ -1,5 +1,11 @@
 # SVMI research notes — novel techniques for streamed 70B inference
 
+> **Reading guide.** Everything in this document is design and arithmetic. Where a
+> section says *validated* or *modeled*, it means a Python planner or a synthetic
+> C++ test reproduced the arithmetic; nothing here has been measured on hardware
+> against a real model unless the sentence says "measured" and names the box. The
+> hardware-measured record for this repository is `benches/cmp170hx-3060/README.md`.
+
 This document proposes techniques that are **not** in mainstream offloading engines
 (llama.cpp, ExLlama, vLLM, TensorRT-LLM, DeepSpeed-Inference, FlexGen, PowerInfer as of
 mid-2026) and are not already covered by the SVMI roadmap in [`svmi.md`](svmi.md). Each
@@ -17,7 +23,7 @@ Four of these ship with working, GPU-free validators: BitSpec
 
 ---
 
-## 1. BitSpec — bit-plane self-speculative decoding  *(amortize; validated)*
+## 1. BitSpec — bit-plane self-speculative decoding  *(amortize; modeled)*
 
 **Idea.** Speculative decoding needs a cheap draft model whose tokens the expensive model
 verifies in one pass. Instead of training draft heads (Medusa/EAGLE) or shipping a
@@ -482,7 +488,7 @@ machinery already in `ggml_backend_sched` (`ggml-backend.cpp`).
 1. **PQ landmarks (§11)** — pure index-side change, no numerics risk, unlocks 1M-token
    page tables; validated by `svmi-pqindex.py` and the C++ reference test
    (`tests/test-ctxvm-landmarks.cpp`).
-2. **SPEC-PF (§12)** — scheduler-only, composes with everything; simulator-validated.
+2. **SPEC-PF (§12)** — scheduler-only, composes with everything; simulator-modeled.
 3. **KV-LAT (§10)** — biggest bytes win (multiplies §8 everywhere) but needs
    calibration infrastructure; start with cold-tier-only deployment.
 4. **Unified pool (§14)** — allocator refactor, do it when §12 lands (same code area).
@@ -494,7 +500,7 @@ per agent** on a 12 GB card — 40 MiB index + 0.7 GiB window + latent cold tier
 RAM — with the same token-identity story as the first wave: approximate fast paths,
 exact verification available everywhere.
 
-## 15. MoE-EP — predictive expert paging (phase 6, validated)
+## 15. MoE-EP — predictive expert paging (phase 6, modeled)
 
 **Problem.** MoE checkpoints put most of their bytes in experts the average token never
 touches: a Mixtral-class 8x7B carries 42 GiB of experts and activates 2/8 per layer; a

@@ -16,8 +16,12 @@ partial-rotary factor) used by the tests and the dev server so the whole
 pipeline runs end to end without the 15.7 GB weights. TINY is not a second
 supported model — it is never loadable from a GGUF file.
 
-TENSELERATE runs at a HARD FLOOR of 1,000,000 tokens of context (MIN_CONTEXT_TOKENS).
-That is a product decision, and it has one unavoidable engineering consequence:
+The reference engine is designed around a 1,000,000-token context floor
+(MIN_CONTEXT_TOKENS). That is a design decision, not a measured capability: the
+served llama.cpp path caps a sequence at the 262,144-token trained range unless
+the opt-in bounded window (`--attn-window`) is set, and recall past the window
+has not been measured (docs/bounded-window-serving.md). The floor has one
+unavoidable engineering consequence:
 1M is far beyond this model's trained rotary range (262,144), so serving it with
 *full* attention would require RoPE scaling (YaRN), which we do not do. The only
 way to have both is the hybrid window:
@@ -31,6 +35,8 @@ way to have both is the hybrid window:
 So the floor forces windowing, and windowing pays for itself twice: no RoPE
 scaling (no quality loss from position extrapolation) and a KV cache whose size
 - and therefore decode speed - is constant no matter how long the context gets.
+What it costs is verbatim recall outside the window; that trade is measured,
+not assumed, before any window becomes a default.
 """
 
 from __future__ import annotations

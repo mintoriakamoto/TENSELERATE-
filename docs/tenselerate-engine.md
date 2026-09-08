@@ -295,7 +295,7 @@ is the claim that matters: swapping backends does not change the answer.
 | 1 | GDN linear-attention CUDA kernel (chunked scan) | not started |
 | 1 | Flash-style causal attention kernel (16 full layers) | not started |
 | 2 | Paged KV manager (full layers) + fixed GDN-state pool | **done, 16 tests** |
-| 2 | Continuous batching scheduler — the 600 tok/s lever | **done, 16 tests** |
+| 2 | Continuous batching scheduler — the aggregate-throughput lever | **done, 16 tests** (scheduler only; no real weights behind it yet) |
 | 2 | IMMA `mma.sync` s8 GEMM — the CMP fast path | not started |
 | 3 | MTP self-speculation (the built-in draft head) | not started |
 | 3 | SVMI weight streaming for models that overflow VRAM | not started |

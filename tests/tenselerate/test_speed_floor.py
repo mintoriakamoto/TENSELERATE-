@@ -28,7 +28,9 @@ def test_info_reports_the_speed_target():
     rc, out = run(["info"])
     assert rc == 0
     assert f"SPEED TARGET     : {MIN_DECODE_TOKS:,} tok/s" in out
-    assert "NOT a hard gate" in out
+    # the target is labeled as a target and sits next to the measured numbers
+    assert "a target, not a measurement" in out
+    assert "measured on the 170HX" in out
 
 
 def test_box_is_below_the_target_and_says_so():

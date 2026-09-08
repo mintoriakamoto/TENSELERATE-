@@ -1,8 +1,9 @@
 # The vLLM backend — the Ampere production path
 
 TENSELERATE's identity is the layer *above* the runtime: the single-model lock,
-the product floors (1M context, the 32K–262K no-RoPE window, the 400 tok/s
-speed floor), and the `plan` advisor. That layer is backend-agnostic. There are
+the product targets (a 1M context floor, the 32K–262K no-RoPE window, a 400
+tok/s speed target; none of these is a measured number on the current box),
+and the `plan` advisor. That layer is backend-agnostic. There are
 two backends:
 
 | backend | what it is | where it runs |
