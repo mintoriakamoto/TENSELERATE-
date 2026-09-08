@@ -44,8 +44,12 @@ Serving guide: **[HERCULES.md](HERCULES.md)**. Current work and numbers:
 ## What this fork adds (SVMI and friends)
 
 This fork implements **SVMI (Streaming Virtual Memory Inference)**: the GPU is treated
-as a cache over a host-RAM weight store, so 70B-class models run in **under 20 GB of
-VRAM with all matrix math on the GPU** and token-identical output.
+as a cache over a host-RAM weight store. The design goal is 70B-class models in **under
+20 GB of VRAM with all matrix math on the GPU** and token-identical output. What is
+measured on this branch: the pinned store's upload bandwidth and the ancestor's +64%
+prefill on an RTX 3060; the streamed-decode floor for a 70B is modeled at ~0.9 tok/s
+at batch 1 (PCIe physics) and has not been run here. The 27B on the 170HX, which
+fits in VRAM, does not use streaming at all.
 
 What's in this branch (all opt-in, off by default):
 

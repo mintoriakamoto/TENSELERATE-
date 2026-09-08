@@ -18,7 +18,7 @@ trained on — exactly the quality trade the rule exists to refuse:
 | LongRoPE / LongRoPE2 | searched per-dim rescale + fine-tune | needs retraining to hide the cost |
 | Self-Extend / Dual-Chunk | grouped/re-used positions at inference | positional aliasing, quality loss on recall |
 
-## Already running: the architectural answer
+## The architectural answer (reference-engine design; opt-in in the served path)
 
 The engine's core design *is* the strongest known no-remap method — the hybrid
 that Qwen3-Next introduced and `qwen3_5` ships:
@@ -30,7 +30,10 @@ that Qwen3-Next introduced and `qwen3_5` ships:
 - **16 full-attention layers on a bounded window** (>= the 32K quality floor,
   <= the 262K trained range): every attended position is one the model was
   trained on. KV is constant (~4.25 GiB at the 128K default), which is what
-  makes the 1M context floor and the 600 tok/s speed floor coexist.
+  makes a 1M context floor possible at all. In the served llama.cpp path this
+  is `--attn-window` (docs/bounded-window-serving.md), off by default until the
+  needle test grades it. The 600 tok/s figure is a design target; measured
+  aggregate on the 170HX is 134 tok/s at N=32.
 - **Paged KV + continuous batching** (`engine/kvpool.py`, `engine/scheduler.py`):
   the serving-side half of the same story.
 
@@ -52,9 +55,11 @@ Pinned by `tests/tenselerate/test_attention_sinks.py`.
 
 ## Candidates, in order of expected value
 
-1. **MTP self-speculation** (roadmap phase 3): the model's own draft head,
-   2-3 tokens per verify step. Multiplies throughput ~1.5-2x with *identical*
-   outputs — the only speed lever with provably zero quality cost.
+1. **MTP self-speculation**: the model's own draft head. Measured on the
+   170HX: 46.2 vs 33.5 tok/s (1.38x) at depth 1 under greedy sampling with
+   0.88 acceptance; 0.22 acceptance and no gain at temp 0.7. Output is
+   identical to non-speculative decoding under the same sampling, so the
+   cost is zero quality and the gain is bounded by acceptance.
 2. **KV cache precision A/B** (q8_0 vs q4_0/FP8): q4_0 halves KV per sequence
    (double concurrency), but it is a quality trade and therefore gated on a
    measured A/B, not adopted by default. FP8 is the same footprint as q8_0, so

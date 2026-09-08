@@ -1,8 +1,10 @@
 # SVMI — Streaming Virtual Memory Inference
 
 SVMI treats the GPU as a cache over a host-RAM weight store instead of a permanent home
-for the model: **weight residency is dynamic**. This is what makes 70B-class models run
-in under 20 GB of VRAM with all matrix math on the GPU and token-identical output.
+for the model: **weight residency is dynamic**. The design goal is 70B-class models in
+under 20 GB of VRAM with all matrix math on the GPU and token-identical output. The
+streaming core is in the tree; the 70B-in-20-GB decode number has not been measured on
+this branch (see "Measured expectations" below for what has, and the modeled floor).
 
 This fork implements the SVMI streaming core on top of upstream llama.cpp, plus the
 planning and measurement tools around it. The full research report and architecture
@@ -209,12 +211,12 @@ PCIe 4.0 x16 (~25 GB/s pinned):
 | --- | --- | --- |
 | 1 | pinned weight store, upload queues, staging ring, `--stream-weights` | **this branch** |
 | 2 | residency planner | **this branch** (`scripts/svmi-plan.py`) |
-| 3 | offload-aware speculative decoding — **BitSpec**: a low-bit resident copy of the model's own weights is the draft, verified per stream pass (validated: `scripts/svmi-bitspec.py`, see [svmi-research.md](svmi-research.md)) | next |
+| 3 | offload-aware speculative decoding — **BitSpec**: a low-bit resident copy of the model's own weights is the draft, verified per stream pass (modeled: `scripts/svmi-bitspec.py` self-test, see [svmi-research.md](svmi-research.md)) | next |
 | 4 | compressed transport: entropy-coded quantized blocks, GPU rANS decode fused with dequant (`scripts/svmi-entropy.py` decides go/no-go) | next |
 | 5 | paged KV with host spill on the same DMA engine | planned |
-| 6 | predictive MoE expert paging (router-logit lookahead) — **MoE-EP** (`scripts/svmi-expertpage.py`, §15) | validated |
-| 7 | **second wave (July 2026)** — PQ landmarks + two-level page table (`scripts/svmi-pqindex.py`, `tests/test-ctxvm-landmarks.cpp`) | validated |
-| 8 | second wave — speculative page prefetch on the streaming clock (`scripts/svmi-pageprefetch.py`) | validated |
+| 6 | predictive MoE expert paging (router-logit lookahead) — **MoE-EP** (`scripts/svmi-expertpage.py`, §15) | modeled (script self-test) |
+| 7 | **second wave (July 2026)** — PQ landmarks + two-level page table (`scripts/svmi-pqindex.py`, `tests/test-ctxvm-landmarks.cpp`) | modeled (synthetic-data test) |
+| 8 | second wave — speculative page prefetch on the streaming clock (`scripts/svmi-pageprefetch.py`) | modeled (script self-test) |
 | 9 | second wave — KV-LAT latent KV retrofit (`scripts/svmi-kvlat.py`), cold-tier ledger pruning, unified VRAM pool | designed |
 
 ---

@@ -194,24 +194,24 @@ def cmd_info(args: argparse.Namespace) -> int:
          f"({cfg.n_head_kv} KV heads, head_dim {cfg.head_dim})")
     _out(f"trained rotary   : {cfg.max_position_embeddings:,} tokens")
     _out("")
-    _out(f"CONTEXT FLOOR    : {MIN_CONTEXT_TOKENS:,} tokens (hard minimum)")
-    _out(f"SPEED TARGET     : {MIN_DECODE_TOKS:,} tok/s aggregate (NOT a hard "
-         "gate; the locked")
-    _out("                   window keeps the box below it - speed takes what "
-         "recall leaves)")
+    _out(f"CONTEXT FLOOR    : {MIN_CONTEXT_TOKENS:,} tokens (design floor of the "
+         "reference engine;")
+    _out("                   the served llama-server path caps a sequence at the "
+         "262,144 trained")
+    _out("                   range unless --attn-window is set, which makes "
+         "sequences unbounded)")
+    _out(f"SPEED TARGET     : {MIN_DECODE_TOKS:,} tok/s aggregate (a target, not a "
+         "measurement:")
+    _out("                   measured on the 170HX 33.5 single stream, 70.5 at "
+         "4x256K, 134 at N=32)")
     _out(f"QUALITY FLOOR    : window LOCKED at {MIN_ATTENTION_WINDOW:,} tokens "
          "(the max no-RoPE recall),")
-    _out("                   and no RoPE scaling, ever. The window never narrows "
-         "for speed:")
-    _out("                   verbatim recall is pinned at its deepest, and the "
-         "box takes")
-    _out("                   the throughput that leaves (below the speed target, "
-         "by design).")
-    _out(f"                   quality holds across the FULL {MIN_CONTEXT_TOKENS:,}"
-         "+ context: the GDN")
-    _out("                   layers carry long range, the windowed attention "
-         "stays inside")
-    _out("                   the trained range, and sinks anchor it.")
+    _out("                   and no RoPE scaling, ever. Verbatim recall exists "
+         "inside the window;")
+    _out("                   outside it recall goes through the GDN state "
+         "(associative, not")
+    _out("                   verbatim) and is UNMEASURED - the needle test is "
+         "issue #63.")
     win = cfg.attention_window
     _out(f"attention window : {win:,} tokens" if win else
          "attention window : unbounded (full attention)")
@@ -226,7 +226,8 @@ def cmd_info(args: argparse.Namespace) -> int:
         _out(f"  ctx {ctx:>12,}  ->  KV {kv:6.2f} GiB   rope scaling: {scaling}")
     _out("")
     _out("The 48 linear layers hold long range in a fixed recurrent state with no")
-    _out("positional encoding, so context is unbounded without YaRN or RoPE scaling.")
+    _out("positional encoding, so the sequence can be unbounded without YaRN or RoPE")
+    _out("scaling. How much of it the model recalls past the window is not yet measured.")
     return 0
 
 
