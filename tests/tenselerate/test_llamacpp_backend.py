@@ -251,3 +251,39 @@ def test_cli_boot_can_bring_up_the_llamacpp_backend():
                    "--force", "--dry-run"])
     assert rc == 0
     assert "--kv-unified" in out
+
+
+def test_env_prefix_attn_window():
+    from tenselerate.backends.llamacpp import env_prefix
+    assert env_prefix(attn_window=65536) == {"LLAMA_ATTN_WINDOW": "65536"}
+    assert env_prefix(attn_window=32768, attn_sinks=36000) == {
+        "LLAMA_ATTN_WINDOW": "32768", "LLAMA_ATTN_SINKS": "36000"}
+    assert "LLAMA_ATTN_WINDOW" not in env_prefix()
+    with pytest.raises(ValueError):
+        env_prefix(attn_window=0)
+    with pytest.raises(ValueError):
+        env_prefix(attn_sinks=4)          # sinks without a window
+
+
+def test_attn_window_relaxes_the_pool_floor_to_slots_x_window():
+    from tenselerate.backends.llamacpp import build_llama_server_argv
+    # without a window the pool must hold one locked 256K window
+    with pytest.raises(ValueError):
+        build_llama_server_argv(MODEL, ctx_pool=32768 * 4, slots=4)
+    # with a window the pool is sequence capacity: slots x window is the floor
+    argv = build_llama_server_argv(MODEL, ctx_pool=32768 * 4, slots=4, attn_window=32768)
+    assert "-np 4" in " ".join(argv) and "-c 131072" in " ".join(argv)
+    with pytest.raises(ValueError):
+        build_llama_server_argv(MODEL, ctx_pool=32768 * 3, slots=4, attn_window=32768)
+
+
+def test_cli_attn_window_flags():
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--attn-window", "65536", "--attn-sinks", "36000",
+                   "--slots", "9", "--ctx-pool", str(65536 * 9), "--dry-run"])
+    assert rc == 0
+    assert out.startswith("$ LLAMA_ATTN_WINDOW=65536 LLAMA_ATTN_SINKS=36000 ")
+    assert "-np 9" in out
+    rc, _ = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                 "--attn-window", "0", "--dry-run"])
+    assert rc == 2

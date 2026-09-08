@@ -39,9 +39,13 @@ Tests that matter for the fork's own code: `test-recurrent-state-rollback*`
 
 ## Rules
 
-1. **Upstream first.** If upstream has the feature, take upstream's version
-   and delete the fork's. Fork-only code needs a test and an entry in
-   `docs/upstream-sync.md`.
+1. **Upstream first, and stay out of upstream's files.** If upstream has the
+   feature, take upstream's version and delete the fork's. Fork code goes in
+   fork-owned files (`src/tenselerate-*.cpp`, `common/kv-mean-center.*`);
+   an upstream source gets at most a one-line hook, marked with a
+   `TENSELERATE` comment. `scripts/fork-hunks.sh` lists the footprint; that
+   list is what conflicts on every upstream sync, so keep it short.
+   Fork-only code needs a test and an entry in `docs/upstream-sync.md`.
 2. **Measure on the release binary.** Performance claims go in
    `benches/cmp170hx-3060/README.md` as measured rows, with the prediction
    they grade. A dev-build number is a note, not a result.

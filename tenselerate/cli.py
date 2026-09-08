@@ -535,15 +535,18 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
             reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft,
             mtp_model=args.mtp_model, sampling=args.sampling,
             cache_ram_mib=args.cache_ram, cache_idle_slots=not args.no_cache_idle_slots,
-            slot_similarity=args.slot_similarity, slot_save_path=args.slot_save_path)
+            slot_similarity=args.slot_similarity, slot_save_path=args.slot_save_path,
+            attn_window=args.attn_window)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
     try:
         env = llama_server_env(no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max,
-                               device=args.device)
+                               device=args.device, attn_window=args.attn_window,
+                               attn_sinks=args.attn_sinks)
         prefix = "".join(f"{k}={v} " for k, v in env_prefix(
-            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max, device=args.device).items())
+            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max, device=args.device,
+            attn_window=args.attn_window, attn_sinks=args.attn_sinks).items())
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -688,6 +691,17 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: GGML_CUDA_MMVQ_MAX - widest batch kept on "
                         "the dp4a vector path (0..8); 1 keeps single-token decode "
                         "there and routes draft verification to MMQ tensor cores")
+    p.add_argument("--attn-window", type=int, default=None,
+                   help="llamacpp backend: bound the 16 full-attention layers to a "
+                        "sliding window of N tokens (LLAMA_ATTN_WINDOW). The GDN layers "
+                        "carry the long range, so sequences are unbounded and KV per slot "
+                        "is O(N): 65536 fits ~9 slots at q8_0 on the 40 GiB 170HX, 32768 "
+                        "~16 (docs/bounded-window-serving.md). Off by default")
+    p.add_argument("--attn-sinks", type=int, default=None,
+                   help="llamacpp backend: with --attn-window, leading positions pinned "
+                        "in attention forever (LLAMA_ATTN_SINKS, default 4). Set it to the "
+                        "system-prompt length to keep tools and instructions attendable at "
+                        "any depth")
     p.add_argument("--device", type=int, default=None,
                    help="llamacpp backend: pin the server to one CUDA device "
                         "(CUDA_VISIBLE_DEVICES); the RTX 3060 side server for "

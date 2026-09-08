@@ -4,7 +4,8 @@ What is being worked on, in order, and how each item is judged done. Every
 item is a GitHub issue; this page is the ordering and the reasoning.
 
 Target: the CMP 170HX (40 GiB) + RTX 3060 box serving a 27B Q4_K_M model to
-Hercules. Numbers to beat: **33.5 tok/s** single stream, **70.5 tok/s**
+Hercules, with the most parallel agents at the longest context the card can
+hold. The method for that is `docs/bounded-window-serving.md`. Numbers to beat: **33.5 tok/s** single stream, **70.5 tok/s**
 aggregate at 4 x 256K, **12.4 tok/s** at 262K depth. Everything below is
 measured against those on the release binary, not a dev build.
 
@@ -12,6 +13,7 @@ measured against those on the release binary, not a dev build.
 
 | # | Item | Why first | Done when |
 | --- | --- | --- | --- |
+| [#63](https://github.com/mintoriakamoto/TENSELERATE-/issues/63) | Bounded attention window (PR #62): grade the slot table and the needle test | The one lever that turns the depth penalty into slots: 16 x 32K or 9 x 64K unbounded sequences instead of 2 x 256K capped | Rows in the benches README next to the predictions in `docs/bounded-window-serving.md`; default decided |
 | [#60](https://github.com/mintoriakamoto/TENSELERATE-/issues/60) | Run the open-items bench experiments | Fills every "predicted" row with a number; every other item depends on these numbers | "Still to measure" in the benches README has no empty rows |
 | [#53](https://github.com/mintoriakamoto/TENSELERATE-/issues/53) | Profile the GDN block at batch 1 (`nsys`) | The ~11 ms non-weight residual is launch count by the arithmetic; measure before writing a kernel | Launch count and ms-per-launch recorded in `docs/kernel-work.md` §3 |
 | [#57](https://github.com/mintoriakamoto/TENSELERATE-/issues/57) | Grade GQA-packed attention at 262K | Predicted 12.4 to ~20 tok/s; the code is in, only the A/B is missing | Gate default set from measured rows |

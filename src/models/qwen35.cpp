@@ -1,5 +1,6 @@
 #include "models.h"
 #include "llama-memory-recurrent.h"
+#include "tenselerate-attn-window.h" // TENSELERATE
 
 void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
@@ -28,6 +29,8 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
         case 64: type = LLM_TYPE_27B; break;
         default: type = LLM_TYPE_UNKNOWN;
     }
+
+    tenselerate_attn_window_apply(hparams, __func__); // TENSELERATE: LLAMA_ATTN_WINDOW
 }
 
 void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
@@ -146,7 +149,19 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
 
     cb(inpL, "model.input_embed", -1);
 
-    auto * inp = build_inp_mem_hybrid();
+    // TENSELERATE: with LLAMA_ATTN_WINDOW the memory is hybrid-iswa and the
+    // attention input is the iSWA one; build_layer_attn dispatches on the type
+    llm_graph_input_i  * inp_attn = nullptr;
+    llm_graph_input_rs * inp_recr = nullptr;
+    if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+        auto * inp = build_inp_mem_hybrid_iswa();
+        inp_attn = inp->get_attn();
+        inp_recr = inp->get_recr();
+    } else {
+        auto * inp = build_inp_mem_hybrid();
+        inp_attn = inp->get_attn();
+        inp_recr = inp->get_recr();
+    }
 
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
@@ -165,10 +180,10 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
         // Determine layer type and build appropriate attention mechanism
         if (hparams.is_recr(il)) {
             // Linear attention layer (gated delta net)
-            cur = build_layer_attn_linear(inp->get_recr(), cur, il);
+            cur = build_layer_attn_linear(inp_recr, cur, il);
         } else {
             // Full attention layer
-            cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
+            cur = build_layer_attn(inp_attn, cur, inp_pos, sections, il);
         }
 
         if (il == n_layer - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
@@ -252,7 +267,7 @@ ggml_tensor * llama_model_qwen35::graph::build_norm_gated(
 }
 
 ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
-        llm_graph_input_attn_kv * inp,
+        llm_graph_input_i *       inp, // TENSELERATE: attn_kv, or attn_kv_iswa under LLAMA_ATTN_WINDOW
         ggml_tensor *             cur,
         ggml_tensor *             inp_pos,
         int *                     sections,
@@ -315,9 +330,16 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
     // Attention computation
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
-    cur = build_attn(inp,
-                nullptr, nullptr, nullptr,
-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+    // TENSELERATE: the bounded window carries an iSWA input
+    if (auto * inp_iswa = dynamic_cast<llm_graph_input_attn_kv_iswa *>(inp)) {
+        cur = build_attn(inp_iswa,
+                    nullptr, nullptr, nullptr,
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+    } else {
+        cur = build_attn(static_cast<llm_graph_input_attn_kv *>(inp),
+                    nullptr, nullptr, nullptr,
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+    }
     cb(cur, "attn_pregate", il);
 
     ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);

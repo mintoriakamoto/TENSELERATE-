@@ -31,6 +31,7 @@ add_library(llama
             llama-memory.cpp
             llama-memory-hybrid.cpp
             llama-memory-hybrid-iswa.cpp
+            tenselerate-attn-window.cpp # TENSELERATE
             llama-memory-hybrid-idx.cpp
             llama-memory-recurrent.cpp
             llama-mmap.cpp

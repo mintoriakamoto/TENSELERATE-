@@ -73,6 +73,27 @@ Verify in the server log: a child's request should show `selected slot by LCP
 similarity` or a `prompt cache` load with `n_past` near 35K, not a full
 prefill.
 
+## More agents, unbounded sequences: the bounded attention window
+
+Only 16 of the 27B's 64 layers cache KV; the other 48 are Gated-DeltaNet
+with a fixed state and no positions. `--attn-window N` (env `ATTN_WINDOW`)
+bounds those 16 layers to a sliding window of N tokens plus pinned leading
+positions (`--attn-sinks`, default 4), so KV per slot is O(N), sequences run
+past 262K without RoPE extrapolation, and decode at 1M depth costs what it
+costs at N. Slots that fit the 40 GiB card at q8_0: 16 at 32K, 9 at 64K, 4
+at 128K.
+
+```bash
+# every slot always attends to the 35K system prompt (pinned) + the last 32K
+ATTN_WINDOW=32768 ATTN_SINKS=36000 NP=9 CTX=$((1048576*9)) \
+  bash scripts/hercules_serve.sh MODEL.gguf
+```
+
+Recall outside sinks + window is through the GDN state (associative, not
+verbatim); measure the needle test before making it the default. Off by
+default. Arithmetic, predictions and the grading plan:
+[docs/bounded-window-serving.md](docs/bounded-window-serving.md).
+
 ## The Hermes knobs that actually move speed on a local server
 
 From Hermes' configuration reference (v0.21). Defaults in parentheses; the

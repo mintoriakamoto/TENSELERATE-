@@ -149,6 +149,7 @@ if (LLAMA_LLGUIDANCE)
 endif ()
 
 llama_build(test-recurrent-state-rollback.cpp)
+llama_build(test-attn-window.cpp) # TENSELERATE
 llama_build(test-save-load-state.cpp)
 
 if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
@@ -216,6 +217,15 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
         test-recurrent-state-rollback
         LABEL main
         ARGS -m "${MODEL_DIR}/qwen35-dense.gguf"
+    )
+    # TENSELERATE: bounded attention window on the hybrid GDN model (LLAMA_ATTN_WINDOW)
+    llama_test(
+        test-attn-window
+        LABEL main
+        ARGS -m "${MODEL_DIR}/qwen35-dense.gguf"
+    )
+    set_tests_properties(test-attn-window PROPERTIES
+        FIXTURES_REQUIRED generate-models
     )
     set_tests_properties(test-recurrent-state-rollback PROPERTIES
         FIXTURES_REQUIRED generate-models
