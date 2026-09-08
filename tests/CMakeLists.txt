@@ -150,6 +150,7 @@ endif ()
 
 llama_build(test-recurrent-state-rollback.cpp)
 llama_build(test-attn-window.cpp) # TENSELERATE
+llama_build(test-seq-fork.cpp) # TENSELERATE
 llama_build(test-save-load-state.cpp)
 
 if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
@@ -225,6 +226,15 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
         ARGS -m "${MODEL_DIR}/qwen35-dense.gguf"
     )
     set_tests_properties(test-attn-window PROPERTIES
+        FIXTURES_REQUIRED generate-models
+    )
+    # TENSELERATE: sequence fork by reference (KV cells shared, recurrent state COW)
+    llama_test(
+        test-seq-fork
+        LABEL main
+        ARGS -m "${MODEL_DIR}/qwen35-dense.gguf"
+    )
+    set_tests_properties(test-seq-fork PROPERTIES
         FIXTURES_REQUIRED generate-models
     )
     set_tests_properties(test-recurrent-state-rollback PROPERTIES

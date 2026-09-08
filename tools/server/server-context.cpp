@@ -927,6 +927,9 @@ private:
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
 
+    // TENSELERATE: fork-instead-of-fetch (LLAMA_SERVER_SLOT_FORK=1), see get_available_slot()
+    bool tenselerate_slot_fork = false;
+
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
     std::set<std::string> model_tags;    // informational tags
@@ -1205,6 +1208,12 @@ private:
 
         // Necessary similarity of prompt for slot selection
         slot_prompt_similarity = params_base.slot_prompt_similarity;
+
+        // TENSELERATE: fork-instead-of-fetch needs the LCP search to be on
+        if (const char * env = getenv("LLAMA_SERVER_SLOT_FORK"); env != nullptr && env[0] == '1') {
+            tenselerate_slot_fork = slot_prompt_similarity > 0.0f;
+            SRV_INF("slot fork (fork-instead-of-fetch): %s\n", tenselerate_slot_fork ? "enabled" : "disabled (needs --slot-prompt-similarity > 0)");
+        }
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
 
@@ -1605,6 +1614,70 @@ private:
                 // if we are about to lose a large portion of the existing context - save it in the prompt cache
                 if (f_keep < 0.5f) {
                     update_cache = true;
+                }
+            }
+        }
+
+        // TENSELERATE: fork instead of fetch. A slot whose whole cached context is a
+        // prefix of this task can be forked into a free slot by reference
+        // (llama_memory_seq_cp: KV cells get a sequence bit, the recurrent state
+        // cell is shared and copied on first write). Zero bytes cross PCIe, the
+        // donor keeps its context, and the donor may be busy (a live fork). The
+        // whole-context condition is what makes the fork exact: the recurrent
+        // state exists at one position only. tests/test-seq-fork.cpp.
+        if (tenselerate_slot_fork && task.id_slot == -1 && task.type == SERVER_TASK_TYPE_COMPLETION) {
+            server_slot * donor    = nullptr;
+            size_t        lcp_best = 0;
+
+            for (server_slot & slot : slots) {
+                const auto & tokens = slot.prompt.tokens;
+                if (tokens.empty() || tokens.size() > task.tokens.size()) {
+                    continue;
+                }
+                const size_t lcp = tokens.get_common_prefix(task.tokens);
+                if (lcp != tokens.size()) {
+                    continue; // diverges before its end: not an exact fork point
+                }
+                if (lcp > lcp_best && float(lcp) / task.tokens.size() > slot_prompt_similarity) {
+                    donor    = &slot;
+                    lcp_best = lcp;
+                }
+            }
+
+            // the idle slot the LCP search picked already holds at least this prefix; forking
+            // only beats it when the donor is a different slot (the picked one would lose its
+            // own context) or when the donor is busy
+            const size_t lcp_ret = ret ? ret->prompt.tokens.get_common_prefix(task.tokens) : 0;
+
+            if (donor != nullptr && lcp_best >= lcp_ret && (ret == nullptr || ret == donor || donor->is_processing())) {
+                server_slot * target = nullptr;
+                int64_t       t_last = -1;
+                for (server_slot & slot : slots) {
+                    if (&slot == donor || slot.is_processing()) {
+                        continue;
+                    }
+                    if (!target || slot.t_last_used <= t_last) {
+                        t_last = slot.t_last_used;
+                        target = &slot;
+                    }
+                }
+
+                if (target != nullptr) {
+                    // the target's own context goes to the prompt cache first, as the LRU path does
+                    if (prompt_cache && !target->prompt.tokens.empty()) {
+                        target->prompt_save(*prompt_cache);
+                        prompt_cache->update();
+                    }
+
+                    target->mem.seq_rm(target->id, -1, -1);
+                    donor ->mem.seq_cp(donor->id, target->id, -1, -1);
+                    target->prompt = donor->prompt.clone();
+
+                    SLT_INF(*target, "forked from slot %d: %zu shared tokens, donor %s\n",
+                            donor->id, lcp_best, donor->is_processing() ? "busy (live fork)" : "idle, kept intact");
+
+                    ret          = target;
+                    update_cache = false;
                 }
             }
         }
