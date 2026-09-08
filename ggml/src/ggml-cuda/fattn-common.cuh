@@ -978,7 +978,7 @@ static __global__ void flash_attn_combine_results(
 // Measured on a CMP 170HX at 262K context with q8_0 KV: the KV read cost 51 ms per token where
 // the bytes say ~11. Packing the r heads of one K/V head into one block reads them once.
 // Returns the columns per block (8, 4 or 2), or 0 to keep the one-head-per-block kernel.
-// GGML_CUDA_FATTN_VEC_GQA=0 disables it, =1 forces it at any depth; unset = on from 4096 KV.
+// GGML_CUDA_FATTN_VEC_GQA=0 disables it, =1 forces it at any depth; unset = on from 32K KV.
 static inline int ggml_cuda_fattn_vec_gqa_cols(const ggml_tensor * dst) {
     static const int mode = [] {
         const char * s = getenv("GGML_CUDA_FATTN_VEC_GQA");
@@ -1012,8 +1012,11 @@ static inline int ggml_cuda_fattn_vec_gqa_cols(const ggml_tensor * dst) {
     if (gqa_ratio < 2) {
         return 0;
     }
-    if (mode < 0 && K->ne[1] < 4096) {
-        return 0; // shallow contexts: the KV read is not the cost, keep the tuned default
+    if (mode < 0 && K->ne[1] < 32768) {
+        // shallow contexts: the KV read is not the cost (measured 33.5 -> 30.3 tok/s from 0 to
+        // 16K), and packing r heads per block leaves only n_kv_head x KV/nbatch blocks to fill
+        // the SMs. Auto-on only where the read dominates; GGML_CUDA_FATTN_VEC_GQA=1 forces it.
+        return 0;
     }
     if (gqa_ratio % 8 == 0) {
         return 8;

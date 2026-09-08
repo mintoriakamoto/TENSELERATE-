@@ -94,7 +94,7 @@ right-hand column is what they cost or save on this box.
 | `terminal.timeout` | 180 s | raise for long builds/tests; this is tool time, not model time |
 | `terminal.backend`, `container_cpu`, `container_memory` | local, 1, 5120 | if sandboxing in Docker, give it real cores (4-8) - tool latency is wall-clock on the agent loop |
 | `agent.max_turns` | none | cap runaway loops (e.g. 60) |
-| `model.reasoning_effort` | unset | llama-server does **not** map this request field into the chat template; keep `--chat-template-kwargs reasoning_effort` on the server side (the launch does) |
+| `model.reasoning_effort` | unset | **honored since the upstream sync**: the server maps a request's `reasoning_effort` into the template (`none` disables thinking for that request). The launch's `--reasoning-effort low` is the default; set this per model in Hermes only if you want a different level, and use `none` for tool-heavy turns that need no thinking |
 | **`temperature` / `repeat_penalty` in requests** | Hermes sends none by default | **leave them unset.** llama.cpp accepts a drafted token only if the sampled token equals it; a request that carries temp 0.7 / repeat-penalty 1.15 overrides the server's greedy defaults and drops MTP from 46.2 to 29.9 tok/s (below no-MTP). Verify in the server log: `draft acceptance` ~0.88 during a Hermes turn |
 | `model.streaming` | true | leave on |
 | `HERMES_STREAM_READ_TIMEOUT` | 120 s (1800 auto for local) | 1800 explicitly if deep prefills trip it |

@@ -25,8 +25,11 @@ What the measurements decided, and where each one lands in the argv:
     temp 0.7 + repeat-penalty 1.15 gives 29.9 tok/s at 22% - slower than no
     MTP at all. These are server defaults; a request that carries its own
     temperature/repeat_penalty overrides them, so the client must not send them
-  * `reasoning_effort=low`: Qwen3.8's chat template defaults to xhigh; fewer
-    thinking tokens outranks any decode lever on an agent loop
+  * `--reasoning-effort low`: Qwen3.8's chat template defaults to xhigh; fewer
+    thinking tokens outranks any decode lever on an agent loop. Since the
+    upstream sync this is a first-class server flag (it sets the template's
+    default kwarg), and a request's own `reasoning_effort` field overrides it
+    per turn - `none` disables thinking for that request entirely
   * prefill is 855 tok/s, so a prompt-cache miss on a 60K agent context costs
     ~70 s; `-cb --cache-reuse 256` keep slots sticky and prefixes reusable
   * the ~35K-token Hermes system prompt is shared by the main loop and every
@@ -47,9 +50,8 @@ What the measurements decided, and where each one lands in the argv:
 
 What Hermes needs from the server (docs/integrations/providers.md upstream):
   * `--jinja`: without it llama-server ignores the `tools` parameter entirely,
-    so every Hermes tool call silently degrades to text - and the
-    `--chat-template-kwargs` reasoning_effort lever is a template kwarg, so it
-    needs jinja too. Mandatory.
+    so every Hermes tool call silently degrades to text - and reasoning_effort
+    is a template kwarg, so it needs jinja too. Mandatory.
   * `--reasoning-format deepseek`: thinking comes back as
     `message.reasoning_content`, which Hermes keeps in `assistant_msg["reasoning"]`
     (set `reasoning_content: true` on the Hermes side).
@@ -60,7 +62,6 @@ What Hermes needs from the server (docs/integrations/providers.md upstream):
 """
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -173,7 +174,7 @@ def build_llama_server_argv(
         "--cache-ram", str(cache_ram_mib),
         "--cache-idle-slots" if cache_idle_slots else "--no-cache-idle-slots",
         "--slot-prompt-similarity", f"{slot_similarity:g}",
-        "--chat-template-kwargs", json.dumps({"reasoning_effort": reasoning}),
+        "--reasoning-effort", reasoning,
     ]
     if slot_save_path is not None:
         if not slot_save_path:

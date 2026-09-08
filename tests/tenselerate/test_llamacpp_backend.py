@@ -6,7 +6,6 @@ requests before anything is launched. No GPU, no build needed.
 from __future__ import annotations
 
 import io
-import json
 from contextlib import redirect_stdout
 
 import pytest
@@ -45,8 +44,8 @@ def test_measured_defaults_land_in_the_argv():
     assert after(a, "-ctk") == "q8_0" and after(a, "-ctv") == "q8_0"
     assert after(a, "-ngl") == "999" and after(a, "-fa") == "on"
     assert after(a, "--cache-reuse") == "256"
-    kwargs = json.loads(after(a, "--chat-template-kwargs"))
-    assert kwargs == {"reasoning_effort": "low"}
+    assert after(a, "--reasoning-effort") == "low"       # first-class since the upstream sync
+    assert "--chat-template-kwargs" not in a
 
 
 def test_agent_contract_flags_are_present():
