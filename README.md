@@ -1,10 +1,47 @@
-# llama.cpp
+# TENSELERATE
 
-![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
+**A maintained llama.cpp fork for serving large models on small and unusual NVIDIA cards**
+(CMP 170HX, RTX 3060, Turing) as the model provider for agent frameworks such as Hercules.
+Tracks upstream `ggml-org/llama.cpp` (last sync: upstream `67672dc5`, 2026-09-07) and adds
+streaming virtual memory (SVMI), all-integer CUDA builds, prompt-cache serving flags, and a
+measured performance record for the hardware it targets.
 
-<div align="center">
+[![CI](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE-/tenselerate-engine.yml?branch=main&label=CI)](https://github.com/mintoriakamoto/TENSELERATE-/actions/workflows/tenselerate-engine.yml)
+[![Release](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE-/release.yml?branch=main&label=Release)](https://github.com/mintoriakamoto/TENSELERATE-/actions/workflows/release.yml)
+[![Latest](https://img.shields.io/github/v/release/mintoriakamoto/TENSELERATE-?label=latest&color=brightgreen)](https://github.com/mintoriakamoto/TENSELERATE-/releases/latest)
+[![Issues](https://img.shields.io/github/issues/mintoriakamoto/TENSELERATE-)](https://github.com/mintoriakamoto/TENSELERATE-/issues)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## This fork — llama.cpp TURBO-VECx-MoE (SVMI)
+## Status
+
+| | |
+| --- | --- |
+| Maintained | Yes. Every native push to `main` is CI-built (CPU + CUDA sm_80/86) and auto-published as a `main-b<N>-<sha>` release with CPU and static-CUDA tarballs. |
+| Latest release | [`main-b11044-073223f`](https://github.com/mintoriakamoto/TENSELERATE-/releases/latest) (2026-09-08) |
+| Upstream | Merged with `ggml-org/llama.cpp` master `67672dc5` (2026-09-07); weekly sync tracked in [#59](https://github.com/mintoriakamoto/TENSELERATE-/issues/59) |
+| Roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) and the [open issues](https://github.com/mintoriakamoto/TENSELERATE-/issues) |
+| Changelog | [CHANGELOG.md](CHANGELOG.md) |
+| Reference box | CMP 170HX 40 GiB (unlocked) + RTX 3060 12 GiB, Qwen3.8-27B Q4_K_M: **pp4096 856 tok/s, tg 33.5 tok/s single stream, 70.5 tok/s aggregate at 4 x 256K** ([measured](benches/cmp170hx-3060/README.md)) |
+
+## Install
+
+```bash
+# prebuilt (needs only the NVIDIA driver; CUDA runtime is linked statically)
+FLAVOR=cuda scripts/tenselerate-update.sh --binary
+
+# serve a model for Hercules (doctor, then llama-server with the tuned flags)
+tenselerate boot --backend llamacpp --model MODEL.gguf
+
+# from source
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80;86" -DLLAMA_BUILD_TESTS=ON
+cmake --build build -j && ctest -L main --test-dir build
+```
+
+Serving guide: **[HERCULES.md](HERCULES.md)**. Current work and numbers:
+**[docs/status-2026-09-07.md](docs/status-2026-09-07.md)**. Open CUDA kernel work:
+**[docs/kernel-work.md](docs/kernel-work.md)**. Development loop: **[docs/dev-workflow.md](docs/dev-workflow.md)**.
+
+## What this fork adds (SVMI and friends)
 
 This fork implements **SVMI (Streaming Virtual Memory Inference)**: the GPU is treated
 as a cache over a host-RAM weight store, so 70B-class models run in **under 20 GB of
@@ -27,6 +64,10 @@ What's in this branch (all opt-in, off by default):
 | CMP card support — build/quant advice per card, HBM2e unlock detection (170HX: 8→64 GiB, 10→40 GiB), and a probe for the dp4a-vs-tensor-core throttle crossover | `scripts/svmi-gpucheck.py`, `scripts/svmi-cmpbench.sh` |
 | **All-integer CUDA build** — every matmul on MMQ, no cuBLAS FP16 GEMM, dp4a emulated via prmt+dp2a; CI-built for sm_70/80/86 | `cmake --preset cmp170hx-int8` (also `cmp90hx-int8`, `cmp100-210-int8`) |
 | Update channel — `main` auto-publishes `main-b<N>-<sha>` releases; this is the client that checks and applies them, with or without a git clone | `scripts/tenselerate-update.sh` |
+| **GQA-packed vector attention** — quantized-KV decode reads each K/V byte once per KV head instead of once per Q head; auto above 32K KV | `GGML_CUDA_FATTN_VEC_GQA=-1\|0\|1` |
+| **MMVQ width cap** — keep multi-slot decode on dp4a MMVQ up to N streams, hand wider batches to MMQ (crossover measured at 3-4 on the 170HX) | `GGML_CUDA_MMVQ_MAX=N`, `GGML_CUDA_NO_MMVQ=1` |
+| **K-cache mean centering** — per-(head,channel) bias subtracted before Q4_0 K quantization; softmax-invariant, better fidelity | `--kv-mean-center FILE`, `tools/kv-mean-center` |
+| **Agent serving flags** — RAM prompt cache, idle-slot caching, LCP slot selection, slot save/restore, `--reasoning-effort`, MTP draft with sampling guards; one launch builder emits them | `tenselerate boot`, `scripts/hercules_serve.sh`, `scripts/hercules_slots.sh` |
 
 ```bash
 # 70B Q4_K_M on a 20 GB budget:
@@ -60,6 +101,14 @@ Lineage: supersedes the `fable5/prefetch-experts` patches from
 [thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp) (pinning + MoE expert
 prefetch, +64% prefill on an RTX 3060), rebased on current upstream master and
 generalized to dense-model streaming with multi-queue uploads.
+
+## Upstream llama.cpp
+
+The rest of this file is the upstream `ggml-org/llama.cpp` README, kept for reference.
+
+![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
+
+<div align="center">
 
 ## Recent API changes
 
@@ -229,7 +278,6 @@ is what streams. Also in this tree: `Q2_0` (2.25 bpw) and `Q1_0` (1.125 bpw). Se
 
     </details>
 
-
 ## [`llama-server`](tools/server)
 
 #### A lightweight, [OpenAI API](https://github.com/openai/openai-openapi) compatible, HTTP server for serving LLMs.
@@ -298,7 +346,6 @@ is what streams. Also in this tree: `Q2_0` (2.25 bpw) and `Q1_0` (1.125 bpw). Se
     ```
 
     </details>
-
 
 ## [`llama-perplexity`](tools/perplexity)
 
