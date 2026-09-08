@@ -1,1 +1,66 @@
-# TENSELERATE
+# TENSELERATE - working notes for contributors and coding agents
+
+This is a maintained fork of `ggml-org/llama.cpp`. Read this before changing
+anything; `CONTRIBUTING.md` points here for the AI-usage policy.
+
+## What this repository is
+
+- `src/`, `ggml/`, `common/`, `tools/`, `examples/`: llama.cpp, kept close to
+  upstream. Fork-owned changes are listed in `docs/upstream-sync.md` and are
+  the only places to expect divergence.
+- `tenselerate/`: the Python CLI (`tenselerate boot|serve|doctor|plan|...`),
+  the llama.cpp launch builder (`backends/llamacpp.py`), the reference oracle
+  (`reference/`) and its numerics tests.
+- `scripts/`: SVMI planners (`svmi-*.py`), Hercules serving scripts
+  (`hercules_*.sh`), the update client (`tenselerate-update.sh`), MTP tooling.
+- `benches/cmp170hx-3060/`: the measured record for the reference box and the
+  runner for the open experiments. Predictions are written before runs and
+  graded after; keep that order.
+- `docs/`: `status-*.md` (current state), `kernel-work.md` (open CUDA items),
+  `ROADMAP.md`, `upstream-sync.md`, `dev-workflow.md`, `HERCULES.md` at root.
+
+## Build and test
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON -DGGML_NATIVE=OFF
+cmake --build build -j
+ctest -L main --test-dir build --output-on-failure
+python3 -m pytest tests/tenselerate -q          # 153 tests, ~5 s
+flake8 tenselerate tests/tenselerate            # CI enforces flake8 and ty
+```
+
+CUDA: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80;86"`. CI compiles the
+CUDA backend for sm_80 on every PR; there is no GPU in CI, so kernel changes
+are proven on the box with the release binary.
+
+Tests that matter for the fork's own code: `test-recurrent-state-rollback*`
+(GDN rollback, the MTP verify crop), `test-kv-mean-center`,
+`test-save-load-state`, `test-backend-ops`, and the tenselerate suite.
+
+## Rules
+
+1. **Upstream first.** If upstream has the feature, take upstream's version
+   and delete the fork's. Fork-only code needs a test and an entry in
+   `docs/upstream-sync.md`.
+2. **Measure on the release binary.** Performance claims go in
+   `benches/cmp170hx-3060/README.md` as measured rows, with the prediction
+   they grade. A dev-build number is a note, not a result.
+3. **Every flag the launch emits must exist in `common/arg.cpp`.** Run the
+   dry run (`tenselerate boot --dry-run` or the tenselerate tests) after
+   touching the launch builder or syncing upstream.
+4. **PRs, not direct pushes.** Branch from `main`, fill the PR template's
+   verification checklist, CI green, then merge. The `main` push publishes
+   the release.
+5. **Do not skip or quarantine tests to get green.** Fix or revert.
+6. **AI-assisted changes are allowed and must be disclosed** in the commit or
+   PR. The author is responsible for every line.
+
+## Conventions
+
+- Commit subjects: `area: what changed` (`cuda:`, `llamacpp:`, `benches:`,
+  `docs:`, `release:`). Body says why and how it was verified.
+- Python: type-annotated, `flake8` and `ty` clean, no new dependencies
+  without a note in `pyproject.toml`.
+- C++/CUDA: match upstream style (`.clang-format`), env knobs documented in
+  the README feature table, defaults off unless measured.
+- Docs: numbers carry a date and the binary they were measured on.
