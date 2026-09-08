@@ -129,6 +129,57 @@ conflicts small"; `scripts/fork-hunks.sh` lists them).
   logits are bit-identical to the unbounded model; with W=32 a sequence
   3x the training context decodes with finite logits.
 
+## Fork, don't fetch: zero-transport agents
+
+Every existing way to give a new agent its context moves bytes across the
+170HX's fused PCIe Gen2 x4 link at ~2 GB/s: re-prefill (40 s for the 35K
+prompt), the RAM prompt cache (1.2 GB, ~0.6 s), an NVMe restore (same 0.6 s,
+the drive is not the bottleneck). The hybrid makes a different move possible:
+**fork the sequence on the card and move nothing.**
+
+A sequence on this model is two things: KV cells for the window (shared by
+reference between sequences in a unified cache: `llama_memory_seq_cp` adds a
+sequence bit to the cells, no copy) and one 150 MiB GDN state cell (shared by
+reference too, copied on the first write: the recurrent memory's `src`
+copy-on-write). llama-server already forks this way for `n > 1` completions
+(`copy_state_to`). Exposed across requests it becomes:
+
+1. **Live fork for delegation.** Hermes delegates a subtask; the child is a
+   fork of the parent's sequence at its current position. Cost: cell metadata
+   plus a 150 MiB in-VRAM copy on the child's first token, ~0.2 ms at HBM
+   speed. The child starts with the parent's whole context, including the
+   associative memory of everything past the window, and pays only for its
+   own new tokens. Today the same child costs 0.6 s over PCIe or 40 s of
+   prefill, and inherits nothing but the system prompt.
+2. **Prefix checkpoint.** The 35K system prompt is processed once into a
+   template sequence: its window cells plus its GDN state at the prefix
+   boundary, held in one reserved recurrent cell. Every new conversation
+   forks from the template by reference. VRAM for the shared prefix is paid
+   once instead of per slot (1.2 GB, not 9 x 1.2 GB), and the RAM prompt
+   cache is never consulted for the prefix. With the sink region pinned to
+   the prefix, the shared cells are also never evicted from any fork.
+
+Per-slot VRAM then becomes window KV plus one state: at a 32K window and
+q8_0, ~1.25 GiB, so **16 slots** each carrying the full pinned system prompt
+on the 40 GiB card, against 9 with per-slot prefix copies.
+
+What is genuinely new here is the combination on this hardware: a bounded
+window with a pinned prefix, forked by reference, on a card whose link makes
+every fetch expensive. The parts have cousins (vLLM's prefix caching shares
+blocks by hash; SGLang caches recurrent states at prefix boundaries for
+hybrid models); llama.cpp's server has neither across requests. The work is
+in `tools/server`: a `fork_from` field or `/slots/<id>?action=fork&target=j`
+endpoint, a template slot for the prefix checkpoint, and one more recurrent
+cell (`recurrent_rs_size = n_seq_max + 1`). Issue #67.
+
+Two honest limits. A live fork inherits the parent's GDN state at the fork
+point, so a child can only fork from a slot that is at the position it wants;
+forking "from 40K tokens ago" needs a state checkpoint there, which is what
+the prefix checkpoint provides for the one boundary that matters. And a fork
+shares the parent's window cells by reference, so the parent's later
+eviction of those cells is per-sequence (a cell frees only when its last
+sequence bit drops), which is how the KV cache already accounts them.
+
 ## How to run it
 
 ```bash
