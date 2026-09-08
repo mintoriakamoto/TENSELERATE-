@@ -29,6 +29,17 @@ What the measurements decided, and where each one lands in the argv:
     thinking tokens outranks any decode lever on an agent loop
   * prefill is 855 tok/s, so a prompt-cache miss on a 60K agent context costs
     ~70 s; `-cb --cache-reuse 256` keep slots sticky and prefixes reusable
+  * the ~35K-token Hermes system prompt is shared by the main loop and every
+    delegation child. Three server features keep it prefilled once:
+    `--cache-ram N` (host-RAM prompt cache; idle slots are saved into it and,
+    with `--kv-unified`, cleared), `--cache-idle-slots` (explicit), and
+    `--slot-prompt-similarity` (a request lands on the idle slot whose cached
+    prompt shares the longest prefix; below the threshold it takes the LRU slot
+    and loads the best prefix from the RAM cache). A child that arrives while
+    the parent's slot is busy therefore gets the 35K prefix from RAM instead
+    of re-prefilling it (~40 s). `--slot-save-path DIR` adds the
+    /slots/<id>?action=save|restore endpoints so the prefix survives a server
+    restart (scripts/hercules_slots.sh).
   * GGML_CUDA_NO_MMVQ=1 forces the tensor-core MMQ path at every batch width;
     the width sweep says that path is cheaper per sequence on this unit. It is
     an environment variable, exposed as `no_mmvq`, off until the N=1/2/4 runs
@@ -66,6 +77,8 @@ DEFAULT_KV = "q8_0"
 DEFAULT_REASONING = "low"
 DEFAULT_ALIAS = "tenselerate"
 DEFAULT_MTP_DRAFT = None     # None = 1 on an -MTP- GGUF, else 0; 1 = measured +13..38%
+DEFAULT_CACHE_RAM_MIB = 16384  # host-RAM prompt cache: ~7 x the 35K system prefix at q8_0 (2.3 GiB each)
+DEFAULT_SLOT_SIMILARITY = 0.1  # llama.cpp's default; the LCP fraction a slot must share to be chosen
 # Server-default sampling. Draft acceptance is exact match against the sampled
 # token, so anything that moves the argmax costs MTP; the merge loops under pure
 # greedy in <think>, so the loop guard must leave the argmax alone as much as it can.
@@ -109,6 +122,10 @@ def build_llama_server_argv(
     mtp_draft: int | None = DEFAULT_MTP_DRAFT,
     mtp_model: str | None = None,
     sampling: str = DEFAULT_SAMPLING,
+    cache_ram_mib: int = DEFAULT_CACHE_RAM_MIB,
+    cache_idle_slots: bool = True,
+    slot_similarity: float = DEFAULT_SLOT_SIMILARITY,
+    slot_save_path: str | None = None,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -132,6 +149,12 @@ def build_llama_server_argv(
         raise ValueError("alias must be a non-empty model id for the agent to address")
     if sampling not in SAMPLING_MODES:
         raise ValueError(f"sampling must be one of {SAMPLING_MODES}, got {sampling!r}")
+    if cache_ram_mib < -1:
+        raise ValueError("cache_ram_mib must be -1 (unlimited), 0 (off) or a MiB count")
+    if not 0.0 <= slot_similarity <= 1.0:
+        raise ValueError("slot_similarity must be within 0.0 (off) .. 1.0")
+    if cache_idle_slots and cache_ram_mib == 0:
+        raise ValueError("cache_idle_slots needs a prompt cache: cache_ram_mib must not be 0")
     if mtp_model is not None and mtp_draft is None:
         mtp_draft = 3          # a retrained head is served at the healthy-curve optimum
     mtp_draft = resolve_mtp_draft(model, mtp_draft)
@@ -147,8 +170,15 @@ def build_llama_server_argv(
         "-c", str(ctx_pool), "-np", str(slots), "--kv-unified", "-cb",
         "-ctk", kv, "-ctv", kv,
         "-b", "2048", "-ub", "512", "--cache-reuse", "256",
+        "--cache-ram", str(cache_ram_mib),
+        "--cache-idle-slots" if cache_idle_slots else "--no-cache-idle-slots",
+        "--slot-prompt-similarity", f"{slot_similarity:g}",
         "--chat-template-kwargs", json.dumps({"reasoning_effort": reasoning}),
     ]
+    if slot_save_path is not None:
+        if not slot_save_path:
+            raise ValueError("slot_save_path must be a directory path")
+        argv += ["--slot-save-path", slot_save_path]
     # request-level defaults; the acceptance test is exact match against the
     # sampled token, so temperature and repeat penalty fight the draft head
     argv += list(SAMPLING_ARGV[sampling])

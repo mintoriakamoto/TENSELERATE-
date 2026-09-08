@@ -121,6 +121,35 @@ def test_retrained_head_is_a_sidecar_at_depth_three():
     assert rc == 0 and "-md /m/head.gguf" in out and "--spec-draft-n-max 3" in out
 
 
+def test_prompt_cache_keeps_the_system_prefix_across_slots_and_restarts():
+    # The ~35K Hermes system prompt is shared by the main loop and every
+    # delegation child. RAM prompt cache + idle-slot caching + LCP slot
+    # selection let a child inherit it instead of re-prefilling (~40 s);
+    # --slot-save-path exposes save/restore so it survives a restart.
+    a = argv()
+    assert after(a, "--cache-ram") == "16384"
+    assert "--cache-idle-slots" in a and "--no-cache-idle-slots" not in a
+    assert after(a, "--slot-prompt-similarity") == "0.1"
+    assert "--slot-save-path" not in a
+    b = argv(cache_ram_mib=32768, cache_idle_slots=False, slot_similarity=0.5,
+             slot_save_path="/var/lib/tenselerate/slots")
+    assert after(b, "--cache-ram") == "32768" and "--no-cache-idle-slots" in b
+    assert after(b, "--slot-prompt-similarity") == "0.5"
+    assert after(b, "--slot-save-path") == "/var/lib/tenselerate/slots"
+    with pytest.raises(ValueError, match="cache_idle_slots"):
+        argv(cache_ram_mib=0)                       # idle-slot caching needs a cache
+    assert "--cache-ram" in argv(cache_ram_mib=0, cache_idle_slots=False)
+    with pytest.raises(ValueError, match="slot_similarity"):
+        argv(slot_similarity=1.5)
+    with pytest.raises(ValueError, match="slot_save_path"):
+        argv(slot_save_path="")
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--cache-ram", "24576", "--slot-similarity", "0.3",
+                   "--slot-save-path", "/tmp/slots", "--dry-run"])
+    assert rc == 0 and "--cache-ram 24576" in out and "--slot-prompt-similarity 0.3" in out
+    assert "--slot-save-path /tmp/slots" in out
+
+
 def test_pool_must_hold_one_locked_window():
     with pytest.raises(ValueError, match="locked"):
         argv(ctx_pool=MIN_ATTENTION_WINDOW - 1)

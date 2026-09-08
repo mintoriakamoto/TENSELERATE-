@@ -55,6 +55,24 @@ compression:
   threshold: 0.50                 # the one sanctioned prompt-cache break; leave it
 ```
 
+## The system prompt is prefilled once, not once per agent
+
+Hermes sends the same ~35K-token system prompt with the main loop and with
+every delegation child. At 855 tok/s that is ~40 s of prefill each time a
+slot has to build it from scratch. The launch turns on the three server
+features that stop that:
+
+| flag | what it does here |
+| --- | --- |
+| `--cache-ram 16384` | a host-RAM prompt cache (MiB). When a slot goes idle its KV is saved here and, with `--kv-unified`, the slot is cleared. 16 GiB holds ~7 copies of the 35K prefix at q8_0 |
+| `--cache-idle-slots` | the save-on-idle above, made explicit (it is on by default when the cache is) |
+| `--slot-prompt-similarity 0.1` | a request goes to the idle slot whose cached prompt shares the longest common prefix with it; otherwise to the LRU slot, which then loads the best-matching prefix from the RAM cache. A child arriving while the parent's slot is busy gets the 35K prefix from RAM instead of re-prefilling it |
+| `--slot-save-path DIR` (opt-in, `SLOT_SAVE_PATH=`) | exposes `/slots/<id>?action=save\|restore`. After the first turn, `bash scripts/hercules_slots.sh save`; after a restart, `bash scripts/hercules_slots.sh restore` before the first request. The prefix then survives the restart |
+
+Verify in the server log: a child's request should show `selected slot by LCP
+similarity` or a `prompt cache` load with `n_past` near 35K, not a full
+prefill.
+
 ## The Hermes knobs that actually move speed on a local server
 
 From Hermes' configuration reference (v0.21). Defaults in parentheses; the

@@ -533,7 +533,9 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
             args.model, host=args.host, port=args.port, binary=binary,
             slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
             reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft,
-            mtp_model=args.mtp_model, sampling=args.sampling)
+            mtp_model=args.mtp_model, sampling=args.sampling,
+            cache_ram_mib=args.cache_ram, cache_idle_slots=not args.no_cache_idle_slots,
+            slot_similarity=args.slot_similarity, slot_save_path=args.slot_save_path)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -622,8 +624,9 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     """The backend selector and per-backend options shared by serve and boot."""
     from tenselerate.backends.llamacpp import (
         DEFAULT_ALIAS, DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_MTP_DRAFT,
-        DEFAULT_REASONING, DEFAULT_SAMPLING, DEFAULT_SLOTS, KV_TYPES,
-        REASONING_LEVELS, SAMPLING_MODES,
+        DEFAULT_CACHE_RAM_MIB, DEFAULT_REASONING, DEFAULT_SAMPLING,
+        DEFAULT_SLOT_SIMILARITY, DEFAULT_SLOTS, KV_TYPES, REASONING_LEVELS,
+        SAMPLING_MODES,
     )
     p.add_argument("--backend", default="reference",
                    choices=("reference", "llamacpp", "vllm"),
@@ -657,6 +660,20 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: MTP draft depth (default: 1 when the GGUF "
                         "name carries -MTP-, else 0; 1 measured +13..38%% on this "
                         "merge, deeper loses until the head is retrained)")
+    p.add_argument("--cache-ram", type=int, default=DEFAULT_CACHE_RAM_MIB,
+                   help="llamacpp backend: host-RAM prompt cache in MiB "
+                        f"({DEFAULT_CACHE_RAM_MIB}; -1 unlimited, 0 off). Idle slots are "
+                        "saved here so a delegation child inherits the 35K system prefix "
+                        "instead of re-prefilling it")
+    p.add_argument("--no-cache-idle-slots", action="store_true",
+                   help="llamacpp backend: do not save idle slots into the prompt cache")
+    p.add_argument("--slot-similarity", type=float, default=DEFAULT_SLOT_SIMILARITY,
+                   help="llamacpp backend: --slot-prompt-similarity, the longest-common-"
+                        f"prefix fraction a slot must share to be reused ({DEFAULT_SLOT_SIMILARITY})")
+    p.add_argument("--slot-save-path", default=None,
+                   help="llamacpp backend: directory for /slots save|restore, so the "
+                        "prefilled system prompt survives a restart "
+                        "(scripts/hercules_slots.sh)")
     p.add_argument("--mtp-model", default=None,
                    help="llamacpp backend: a retrained MTP head GGUF served as a sidecar "
                         "(-md; scripts/mtp-head-train.py -> convert_hf_to_gguf.py --mtp); "
