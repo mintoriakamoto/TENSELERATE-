@@ -8,6 +8,48 @@ commit, `git merge upstream/master` refuses ("unrelated histories") and a
 forced merge with an empty base conflicts on every file. The right merge is a
 three-way merge with that snapshot as the explicit base.
 
+## Syncing now: `git merge upstream/master`, and how to keep conflicts small
+
+Since the 2026-09-07 merge the fork has real ancestry (the merge commit has
+upstream `67672dc5` as its second parent), so a sync is a plain merge:
+
+```bash
+git remote add upstream https://github.com/ggml-org/llama.cpp.git 2>/dev/null
+git fetch upstream master
+git config rerere.enabled true          # remembers how each conflict was resolved
+git checkout -b sync/upstream-$(date +%F) main
+scripts/fork-hunks.sh                   # the checklist: every file that can conflict
+git merge upstream/master
+```
+
+Conflicts happen only where the fork touches upstream-owned files. Three rules
+keep that set small and every conflict mechanical:
+
+1. **Fork code lives in fork-owned files.** Upstream sources carry one call or
+   one `#include` into a file that upstream does not have (`src/tenselerate-*.cpp`,
+   `common/kv-mean-center.*`, `ggml/src/ggml-cuda/mmq-hopper-q1.cu`). A conflict
+   on a one-line hook is resolved by taking upstream's side and re-adding the line.
+2. **Every fork hunk in an upstream file is marked `TENSELERATE`** (a comment on
+   the line or the block). `scripts/fork-hunks.sh` lists them all. If a conflict is
+   resolved by taking upstream wholesale, the marked hunks are what to re-apply.
+3. **Whole-file fork changes are the exception and are listed below** (the CUDA
+   kernels: `fattn-vec.cuh`, `fattn-common.cuh`, `mmvq.cu`, `set-rows.cu`; the
+   kv-mean-center hooks in `llama-kv-cache.*` and `llama-context.cpp`). These are
+   resolved by hand and are the only places a sync should take real time.
+
+Resolving a conflict, in order: take upstream's version of the file
+(`git checkout --theirs -- FILE`), re-apply the `TENSELERATE` hunks from the
+`fork-hunks.sh` output (or `git diff main -- FILE` before the merge), build,
+run the tests that cover the hunk (`test-attn-window`, `test-kv-mean-center`,
+`test-recurrent-state-rollback`, the tenselerate suite), then `git add`.
+`rerere` replays the same resolution next time the hunk conflicts.
+
+After the merge: `ninja -C build-cpu`, `ctest --test-dir build-cpu -L main`,
+`python3 -m pytest tests/tenselerate -q` (the launch builder tests fail if a flag
+the launch emits disappeared from `common/arg.cpp`), then a draft PR linking #59.
+The weekly maintenance routine does exactly this and stops on a conflict inside
+a whole-file fork change rather than guessing.
+
 ## What upstream carries since the snapshot (915 commits as of 2026-09-07)
 
 The ones that move this box, from `docs/research-week-2026-09-07.md`:

@@ -67,6 +67,7 @@ What's in this branch (all opt-in, off by default):
 | **GQA-packed vector attention** — quantized-KV decode reads each K/V byte once per KV head instead of once per Q head; auto above 32K KV | `GGML_CUDA_FATTN_VEC_GQA=-1\|0\|1` |
 | **MMVQ width cap** — keep multi-slot decode on dp4a MMVQ up to N streams, hand wider batches to MMQ (crossover measured at 3-4 on the 170HX) | `GGML_CUDA_MMVQ_MAX=N`, `GGML_CUDA_NO_MMVQ=1` |
 | **K-cache mean centering** — per-(head,channel) bias subtracted before Q4_0 K quantization; softmax-invariant, better fidelity | `--kv-mean-center FILE`, `tools/kv-mean-center` |
+| **Bounded attention window** — the 16 attention layers of the GDN hybrid see a sliding window + pinned sinks; the 48 GDN layers carry the rest, so KV per slot is O(window) and sequences are unbounded: 16 slots at 32K or 9 at 64K on the 40 GiB card ([design](docs/bounded-window-serving.md)) | `--attn-window N --attn-sinks S`, `LLAMA_ATTN_WINDOW`, `LLAMA_ATTN_SINKS` |
 | **Agent serving flags** — RAM prompt cache, idle-slot caching, LCP slot selection, slot save/restore, `--reasoning-effort`, MTP draft with sampling guards; one launch builder emits them | `tenselerate boot`, `scripts/hercules_serve.sh`, `scripts/hercules_slots.sh` |
 
 ```bash
