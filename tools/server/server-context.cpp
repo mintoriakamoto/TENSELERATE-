@@ -1566,6 +1566,63 @@ private:
             }
         }
 
+        // TENSELERATE: on-card sequence fork. "fork_from": <slot id> starts this
+        // request from that slot's live state - llama_memory_seq_cp adds a
+        // sequence bit to its KV cells and points the destination's recurrent
+        // tail at its state cell, which is copied on the fork's first write, in
+        // VRAM. Nothing crosses PCIe, so a delegated agent inherits the parent's
+        // whole context (including the GDN memory of everything that has fallen
+        // out of the attention window) in one decode step instead of a prompt
+        // cache load or a full prefill. Falls back to normal selection whenever
+        // the fork is not applicable. See docs/bounded-window-serving.md.
+        if (task.id_fork_src >= 0) {
+            server_slot * src = get_slot_by_id(task.id_fork_src);
+
+            const char * why = nullptr;
+            if (src == nullptr) {
+                why = "no slot with that id";
+            } else if (src->id == task.id_slot) {
+                why = "source and destination are the same slot";
+            } else if (src->is_processing()) {
+                why = "source slot is busy";
+            } else if (src->prompt.tokens.empty()) {
+                why = "source slot has no cached context";
+            } else if (src->prompt.tokens.get_common_prefix(task.tokens) < src->prompt.tokens.size()) {
+                why = "source context is not a prefix of this request";
+            }
+
+            server_slot * dst = nullptr;
+            if (why == nullptr) {
+                for (server_slot & slot : slots) {
+                    if (&slot == src || slot.is_processing()) {
+                        continue;
+                    }
+                    if (task.id_slot != -1 && slot.id != task.id_slot) {
+                        continue;
+                    }
+                    if (dst == nullptr || slot.t_last_used <= dst->t_last_used) {
+                        dst = &slot;
+                    }
+                }
+                if (dst == nullptr) {
+                    why = "no free slot to fork into";
+                }
+            }
+
+            if (why != nullptr) {
+                SRV_WRN("fork_from %d: %s - falling back to normal slot selection\n", task.id_fork_src, why);
+            } else {
+                dst->mem.seq_rm(dst->id, -1, -1);
+                dst->mem.seq_cp(src->id, dst->id, -1, -1);
+                dst->prompt = src->prompt.clone();
+
+                SLT_INF(*dst, "forked from slot %d: %d tokens shared on-card, 0 bytes moved\n",
+                        src->id, dst->prompt.n_tokens());
+
+                return dst;
+            }
+        }
+
         // find the slot that has at least n% prompt similarity
         if (slot_prompt_similarity != 0.0f) {
             float f_sim_best = 0;
@@ -4392,6 +4449,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params.message_spans = task.tokens.find_message_spans(delimiters);
 
             task.id_slot = json_value(data, "id_slot", -1);
+            task.id_fork_src = json_value(data, "fork_from", -1); // TENSELERATE
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat

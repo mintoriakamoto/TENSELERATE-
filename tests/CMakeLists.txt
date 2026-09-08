@@ -237,6 +237,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     set_tests_properties(test-seq-fork PROPERTIES
         FIXTURES_REQUIRED generate-models
     )
+    # TENSELERATE: on-card sequence fork (delegation without transport)
     set_tests_properties(test-recurrent-state-rollback PROPERTIES
         FIXTURES_REQUIRED generate-models
     )

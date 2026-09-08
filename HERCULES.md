@@ -94,6 +94,36 @@ verbatim); measure the needle test before making it the default. Off by
 default. Arithmetic, predictions and the grading plan:
 [docs/bounded-window-serving.md](docs/bounded-window-serving.md).
 
+## Delegation without transport: `fork_from`
+
+A delegated sub-agent normally starts by rebuilding the parent's context: a
+prompt-cache load (~0.6 s for the 35K prefix over this card's Gen2 x4 link) or
+a full prefill (~40 s). Neither is necessary. A sequence on this model is KV
+cells for the attention layers plus one recurrent state cell for the 48 GDN
+layers, and both can be shared on the card by reference.
+
+Pass the parent's slot id in the completion request:
+
+```json
+{ "prompt": "...", "fork_from": 0 }
+```
+
+The server points a free slot at the parent's cells and state, clones the token
+list, and prefills only the delta. The child inherits the parent's **whole**
+context, including the associative memory of everything that has already fallen
+out of the attention window - which a prompt-cache load cannot give it, because
+the cache only carries the prefix the child was sent.
+
+Requirements and fallbacks: the source slot must be idle and its cached context
+must be a prefix of the new request. Anything else (busy source, unknown id, no
+free slot, divergent prefix) logs one line and falls back to normal slot
+selection, so it is safe to always send. Slot ids come from `GET /slots`.
+
+Verified bit-exact by `tests/test-seq-fork.cpp`: a forked sequence's logits
+equal an independently decoded one, and the parent is unaffected by the child's
+decoding. Design and arithmetic:
+[docs/bounded-window-serving.md](docs/bounded-window-serving.md).
+
 ## The Hermes knobs that actually move speed on a local server
 
 From Hermes' configuration reference (v0.21). Defaults in parentheses; the
