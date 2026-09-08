@@ -13,8 +13,8 @@ dequantized once per block; `launch_fattn<D, 1, ncols2>` supplies the
 (sequence, K/V head, gqa tile) grid the MMA kernel already uses. The host gate
 `ggml_cuda_fattn_vec_gqa_cols` (fattn-common.cuh) turns it on for quantized
 K/V, one query token, a mask, no sinks, no ALiBi, D >= 128, GQA ratio even,
-and KV length >= 4096 (`GGML_CUDA_FATTN_VEC_GQA=1` forces it at any depth, `=0`
-disables). Before trusting a number:
+and KV length >= 32768 (`GGML_CUDA_FATTN_VEC_GQA=1` forces it at any depth, `=0`
+disables; the auto threshold was raised from 4096 until the A/B is measured). Before trusting a number:
 
 ```
 GGML_CUDA_FATTN_VEC_GQA=1 build/bin/test-backend-ops -o FLASH_ATTN_EXT -b CUDA0   # correctness vs CPU

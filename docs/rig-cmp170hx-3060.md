@@ -168,7 +168,7 @@ tenselerate boot --backend llamacpp --model qwen3.8-27b-UD-Q4_K_M.gguf
 # = llama-server --alias tenselerate --jinja --reasoning-format deepseek --no-context-shift \
 #     -ngl 999 --main-gpu 0 -fa on -c 524288 -np 4 --kv-unified -cb \
 #     -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --cache-reuse 256 \
-#     --chat-template-kwargs '{"reasoning_effort":"low"}'
+#     --cache-ram 16384 --cache-idle-slots --slot-prompt-similarity 0.1 --reasoning-effort low
 #   --jinja is not optional: without it llama-server ignores Hermes' `tools` and
 #   the reasoning_effort kwarg. Hermes-side config: HERCULES.md.
 # --slots / --ctx-pool / --kv / --reasoning / --no-mmvq / --dry-run adjust it;
