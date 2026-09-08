@@ -84,24 +84,44 @@ Resolution actually taken, by area:
   upstream's. The fork's own dspark drafter (multi-layer capture staging,
   `common_speculative_need_embd_capture`, two manual test harnesses) is gone;
   upstream's `draft-dspark` (DFlash + Markov head) and `draft-dflash` take
-  its place and work in server mode. The fork's `LLM_ARCH_DSPARK` model,
-  capture-layer API (`llama_set_capture_layers`), `test-dspark-forward`,
-  and `llama-ext.h` extensions stay. The server keeps one fork fix: the
+  its place and work in server mode. The server keeps one fork fix: the
   `slot_batched->is_processing()` guard before `llama_set_embeddings`.
-- **Fork-only features kept as ours:** `ggml_gated_delta_net_rows` (ggml.h +
-  CPU op), the recurrent-state snapshot ring (`rs_ring`, all three
-  `llama-memory-recurrent.cpp` hunks), the mmap host-pin unregister in
+- **Recurrent state and drafter model: upstream (follow-up, 2026-09-08).**
+  The first merge kept the fork's recurrent snapshot ring (`rs_ring`, the
+  rows-indexed `ggml_gated_delta_net_rows` op, `split_seq` batching) next
+  to upstream's rewritten rollback (`rs_idx`, `n_rs_seq + 1` split). The
+  mixed tree passed the old `-L main` run but failed the tests that
+  actually exercise rollback: upstream's `test-recurrent-state-rollback`
+  (and its nemotron-h variant, which aborted) and the fork's own
+  `test-rs-ring-rotation`. All recurrent memory, hybrid, delta-net, qwen35,
+  graph, context, model, arch and hparams sources are now upstream's, as is
+  the Metal backend (a duplicate `case GGML_TYPE_Q2_0` had slipped through).
+  Removed with that: the fork's `LLM_ARCH_DSPARK` model and its gguf-py /
+  conversion entries, the capture-layer API in `llama-ext.h`,
+  `test-dspark-forward`, `test-rs-ring-rotation` with its tiny-qwen35
+  fixture, the CUDA `src[6]` reject, and the `dspark-markov` BLAS/CUDA
+  resampler. Upstream's dflash-based `draft-dspark` is unaffected.
+  The kv-mean-center context hooks were re-applied on top of upstream's
+  `llama-context.cpp`.
+- **Fork-only features kept as ours:** the mmap host-pin unregister in
   `~llama_mmap` (combined with upstream's lazy-range constructor),
-  kv-mean-center (tool, common, tests), `test-rs-ring-rotation`, README,
-  AGENTS.md, this repository's two workflows and `release.yml`.
+  kv-mean-center (tool, common, context hooks, tests), `Q4_K_M_INT8`,
+  SVMI stream flags, `GGML_CUDA_MMVQ_MAX`, the GQA-packed vector flash
+  attention path, `mmq-hopper-q1`, README, AGENTS.md, this repository's
+  two workflows and `release.yml`.
 - **Deleted:** the 29 upstream workflow files the fork had already removed,
   `ggml-metal.metal` (upstream split it), `tests/test-dspark-loop.cpp`,
-  `tests/test-dspark-real-eval.cpp`.
+  `tests/test-dspark-real-eval.cpp`, and (follow-up) `src/models/dspark.cpp`,
+  `tests/test-dspark-forward.cpp`, `tests/test-rs-ring-rotation.cpp`,
+  `tests/gen-tiny-qwen35.py`, `conversion/dspark.py`, `common/dspark-markov.*`.
 
-Verification: CPU build (`-DGGML_CUDA=OFF`, tools + server + tests) - see the
-commit message for the result; CI compiles `ggml-cuda` for sm_80; the
-tenselerate suite (152) and the launch dry run pass on the merged tree.
-Every flag the launch emits exists in upstream's `common/arg.cpp`.
+Verification (follow-up tree): CPU build (`-DGGML_CUDA=OFF`, tools + server +
+tests) clean; `test-recurrent-state-rollback` (plain, nemotron-h, dsv4),
+`test-llama-archs`, `test-kv-mean-center`, `test-save-load-state` and the
+rest of `-L main` pass (only the network-bound `test-download-model` fails in
+the sandbox); CI compiles `ggml-cuda` for sm_80; the tenselerate suite (153)
+and the launch dry run pass. Every flag the launch emits exists in upstream's
+`common/arg.cpp`.
 
 What the box should see first: `llama-bench -p 4096 -n 64` (upstream's MMVQ
 work: tg64 33.5 -> ~38 predicted), then the greedy MTP depth-1 run, then

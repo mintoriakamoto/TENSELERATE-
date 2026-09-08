@@ -37,26 +37,14 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
     const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
     int mtp_flags = !ml.load_mtp ? TENSOR_SKIP : 0;
 
-    // a compact MTP sidecar can carry a trimmed draft vocabulary plus a d2t map back
-    // to the target's token ids, so its LM head is n_vocab_out wide, not n_vocab
-    int64_t n_vocab_out = n_vocab;
-    const ggml_tensor * d2t_meta = ml.get_tensor_meta("d2t");
-    if (mtp_only && d2t_meta) {
-        n_vocab_out = d2t_meta->ne[0];
-        d2t = create_tensor(tn(LLM_TENSOR_D2T), { n_vocab_out }, 0);
-        LLAMA_LOG_INFO("%s: QWEN35 MTP using d2t draft-vocab trim (n_vocab_out = %lld)\n",
-                __func__, (long long) n_vocab_out);
-    }
-
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 
     // output
     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
-    output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab_out }, TENSOR_NOT_REQUIRED);
+    output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
 
     // if output is NULL, init from the input tok embed
     if (output == NULL) {
-        GGML_ASSERT(!d2t && "d2t draft-vocab trim requires output.weight");
         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_DUPLICATED);
     }
 
@@ -163,47 +151,6 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
-    // multi-layer hidden-state tap: collect the captured layer outputs here in
-    // capture order, then concatenate them along dim0 after the layer loop.
-    std::vector<ggml_tensor *> h_capture(cparams.n_capture_layers, nullptr);
-
-    // The last-layer residual stream and the final norm+lm_head can only be
-    // narrowed to output rows (inp_out_ids) *before* the last layer runs if every
-    // active consumer of the un-narrowed rows agrees to that -- i.e. embeddings_nextn
-    // wants the masked (narrow-early) layout, AND capture is either inactive or
-    // also wants it narrowed at the tap point. Capture only cares about this at all
-    // if the LAST layer itself is one of the requested capture layers -- taps at any
-    // earlier layer have already branched off `cur` before this point in the loop
-    // (see the per-layer tap below), so narrowing the last layer's own compute doesn't
-    // touch them. If a dense (embeddings_capture_masked == false) tap of the last
-    // layer specifically is requested while embeddings_nextn_masked is on, narrowing
-    // early would clip that dense row too (they share inp_out_ids at the same point),
-    // so defer to the post-loop narrowing instead -- capture then sees the full,
-    // unnarrowed last-layer output and only the final projection (result_norm +
-    // lm_head) is limited to inp_out_ids.
-    bool capture_taps_last_layer = false;
-    for (uint32_t c = 0; c < cparams.n_capture_layers; ++c) {
-        if (cparams.capture_layer_idx[c] == n_layer - 1) {
-            capture_taps_last_layer = true;
-            break;
-        }
-    }
-    const bool capture_wants_dense = capture_taps_last_layer && !cparams.embeddings_capture_masked;
-
-    // t_h_nextn's readback (llama-context.cpp) trusts embeddings_nextn_masked to know
-    // whether t_h_nextn is narrow (n_outputs rows) or full-width (ubatch.n_tokens rows);
-    // t_h_nextn is assigned from `cur` right after this loop, so it inherits whatever
-    // narrow_before_last_layer decided. If nextn is simultaneously active and asked for
-    // the narrow layout, letting capture's dense request silently widen `cur` here would
-    // widen t_h_nextn too without nextn's own readback knowing -- wrong offsets, not just
-    // wrong rows. DSpark capture and MTP nextn are never engaged together in practice; fail
-    // loudly instead of silently corrupting nextn's output if that assumption is ever broken.
-    GGML_ASSERT(!(capture_wants_dense && cparams.embeddings_nextn && cparams.embeddings_nextn_masked) &&
-                "dspark dense capture (embeddings_capture_masked=false) is incompatible with simultaneous "
-                "masked MTP nextn extraction -- they share the same narrow-timing decision");
-
-    const bool narrow_before_last_layer = cparams.embeddings_nextn_masked && !capture_wants_dense;
-
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
     for (int il = 0; il < n_layer; ++il) {
         res->t_layer_inp[il] = inpL;
@@ -224,7 +171,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
             cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
         }
 
-        if (il == n_layer - 1 && inp_out_ids && narrow_before_last_layer) {
+        if (il == n_layer - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
             cur   = ggml_get_rows(ctx0, cur,   inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -253,22 +200,6 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
 
         // Input for next layer
         inpL = cur;
-
-        // multi-layer hidden-state tap: if this layer index is registered for
-        // capture, slice it to the requested output rows (masked layout) and
-        // stash it in the matching capture slot. Slot order == capture order, so
-        // the post-loop concat width is [n_capture * n_embd] in the order the
-        // caller requested, independent of the order layers are visited.
-        for (uint32_t c = 0; c < cparams.n_capture_layers; ++c) {
-            if (cparams.capture_layer_idx[c] == il) {
-                ggml_tensor * cap = cur;
-                if (cparams.embeddings_capture_masked && inp_out_ids) {
-                    cap = ggml_get_rows(ctx0, cap, inp_out_ids);
-                }
-                cb(cap, "h_capture", il);
-                h_capture[c] = cap;
-            }
-        }
     }
     cur = inpL;
 
@@ -277,27 +208,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "h_nextn", -1);
     res->t_h_nextn = cur;
 
-    // multi-layer hidden-state tap: concatenate captured layers along dim0 into a
-    // single [n_capture * n_embd, n_outputs] tensor for one bulk host copy.
-    if (cparams.n_capture_layers > 0) {
-        ggml_tensor * cap = h_capture[0];
-        GGML_ASSERT(cap && "capture layer 0 was not produced (index out of executed range?)");
-        for (uint32_t c = 1; c < cparams.n_capture_layers; ++c) {
-            GGML_ASSERT(h_capture[c] && "a requested capture layer was not produced");
-            cap = ggml_concat(ctx0, cap, h_capture[c], 0);
-        }
-        cb(cap, "h_capture_cat", -1);
-        res->t_h_capture = cap;
-
-        // The capture concat chain is a side-branch off the per-layer outputs,
-        // not reachable by traversing backward from the logits tensor expanded
-        // below -- without this it's built but never added to gf, so the
-        // scheduler never visits or backend-assigns it (ggml_set_output() alone
-        // marks intent, it doesn't add the node to the graph).
-        ggml_build_forward_expand(gf, cap);
-    }
-
-    if (!narrow_before_last_layer && inp_out_ids) {
+    if (!cparams.embeddings_nextn_masked && inp_out_ids) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
 
@@ -473,41 +384,9 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
 
     ggml_tensor * conv_input = build_conv_state(inp, conv_states_all, qkv_mixed, conv_kernel_size, conv_channels, il);
 
-    // ring path: read per-seq live state directly from the cache inside the
-    // fused GDN op (rows mode) instead of gather + slot-0 cpy per layer.
-    // GGML_GDN_STATE_GATHER=1 restores the legacy gathered path (A/B).
-    // rows mode (the src[6] variant) is implemented on CPU and Metal only;
-    // other GPU backends reject it in supports_op, which would silently move
-    // the whole recurrent op to CPU -- keep the gathered form unless every
-    // GPU device in the model is Metal.
-    static const bool gdn_state_rows_env = getenv("GGML_GDN_STATE_GATHER") == nullptr;
-
-    bool gdn_state_rows_dev_ok = true;
-    for (const auto & ldev : model.devices) {
-        // integrated GPUs (e.g. unified-memory CUDA devices) report IGPU, not GPU
-        if (ldev.dev == nullptr || (ggml_backend_dev_type(ldev.dev) != GGML_BACKEND_DEVICE_TYPE_GPU &&
-                                    ggml_backend_dev_type(ldev.dev) != GGML_BACKEND_DEVICE_TYPE_IGPU)) {
-            continue;
-        }
-        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ldev.dev);
-        const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
-        if (reg_name == nullptr || strcmp(reg_name, "Metal") != 0) {
-            gdn_state_rows_dev_ok = false;
-            break;
-        }
-    }
-
-    const bool gdn_state_rows = gdn_state_rows_env && gdn_state_rows_dev_ok && cparams.n_rs_seq > 0;
-
-    ggml_tensor * state;
-    if (gdn_state_rows) {
-        state = build_rs_cache_view(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
-        cb(state, "state_cache_view", il);
-    } else {
-        state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
-        state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
-        cb(state, "state_predelta", il);
-    }
+    ggml_tensor * state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
+    state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
+    cb(state, "state_predelta", il);
 
     ggml_tensor * conv_output_proper = ggml_ssm_conv(ctx0, conv_input, conv_kernel);
     cb(conv_output_proper, "conv_output_raw", il);
@@ -566,8 +445,7 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     cb(k_conv, "k_conv_predelta", il);
     cb(v_conv, "v_conv_predelta", il);
 
-    ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il,
-            gdn_state_rows ? inp->s_copy_main : nullptr);
+    ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il);
 
     // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
     ggml_tensor * z_2d = ggml_reshape_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs);
@@ -760,24 +638,6 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     GGML_ASSERT(head_w && "QWEN35 MTP: missing LM head (nextn.shared_head_head or model.output)");
     cur = build_lora_mm(head_w, cur, head_s);
     cb(cur, "result_output", -1);
-
-    if (model.d2t) {
-        // the draft head scores its own trimmed vocabulary; scatter those logits to the
-        // target token ids so the sampler sees full-vocab space, -inf everywhere else
-        const int64_t n_draft_vocab = cur->ne[0];
-        const int64_t n_outputs     = cur->ne[1];
-        const int64_t n_vocab_full  = (int64_t) model.vocab.n_tokens();
-
-        GGML_ASSERT(model.d2t->ne[0] == n_draft_vocab);
-
-        ggml_tensor * logits = ggml_fill(ctx0,
-                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, n_vocab_full, n_outputs), -INFINITY);
-        cur = ggml_set_rows(ctx0, logits,
-                ggml_reshape_3d(ctx0, cur,       1,             n_draft_vocab, n_outputs),
-                ggml_reshape_3d(ctx0, model.d2t, n_draft_vocab, 1,             1));
-        cur = ggml_reshape_2d(ctx0, cur, n_vocab_full, n_outputs);
-        cb(cur, "result_output_d2t", -1);
-    }
 
     res->t_logits = cur;
     ggml_build_forward_expand(gf, cur);
