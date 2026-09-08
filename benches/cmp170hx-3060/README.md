@@ -37,6 +37,11 @@ modeled constants in `tenselerate/cli.py` and the estimates in
 | 2026-09-07 | single-GPU width test, N=16 streams, `-np 24 -c 393216`, q8_0 KV | **122.4 tok/s aggregate** | llama-server, 170HX only | consistent with the 130-141 MMQ-regime ceiling at 16K ctx; the extra KV depth costs the rest |
 | 2026-09-07 | dual-GPU layer split of the 27B, 170HX + 3060 | OOM on first try; conservative retry (split 78/22, `-np 16 -c 262144`) running | llama-server `CUDA_VISIBLE_DEVICES=0,1` | **prediction, written before the result:** slower per token than the 170HX alone - see "Splitting the 27B across both cards" |
 | 2026-09-07 | greedy MTP depth 1, no reasoning-budget injection, JSON task | valid JSON at ~46 tok/s; **the merge still loops inside `<think>` under pure greedy** | production server | the loop is the merge under greedy, not the budget cap. Temp 0.15 / 0.3 / 0.5 sweep running for the escape point that keeps acceptance |
+| 2026-09-08 | **N=32 streams** (`launch_np32.sh`) | **134 tok/s aggregate** | llama-server, 170HX only | grades the two predictions on record: the box session's 130-180 holds, the 170-220 above was too high. Aggregate is flat from N=16 (122) to N=32 (134): the per-sequence cost (GDN block + KV) stopped shrinking at N=16, as the width sweep said. Tensor-core utilisation is not the lever; bytes are |
+| 2026-09-08 | prefill through the server, before / after `-b`/`-ub` raised | 40 -> **316 tok/s** | llama-server, Hermes prompt | the 40 was a misconfiguration (small micro-batch, re-prefilling the 35K prompt on every request). 316 is still 2.7x below llama-bench pp4096 = 856 on the same card: the rest is `-ub 2048 -b 4096` and the prompt cache actually hitting (`--cache-ram`, LCP slot selection); see HERCULES.md |
+| 2026-09-08 | Hermes production: draft depth 8 -> 4, KV q8_0 -> q4_0 | server-reported draft acceptance 27-42% -> 46-65%, first-token latency 1800 -> 500-800 ms, prompt-cache thrash (3.8 GB re-prefill per request) gone | llama-server + Hermes, "9.0/10" self-scores | the acceptance figure is the server's accepted/drafted ratio, not the per-position 0.88 (greedy) / 0.22 (temp 0.7) measured here; depth 4 -> more accepted per drafted, not more tokens per second - the tok/s was not reported and must be. q4_0 KV halves KV but measured -8%/token at depth vs q8_0 |
+| 2026-09-08 | Hermes delegation: 6 parallel sub-agents against the local server | all 6 dispatched in 170 ms, ran in parallel, returned | Hermes `delegate_task` x6, provider :8082 | the delegation path works end to end. This is the workload the bounded window (PR #62) is for: 6-16 slots, each with the 35K prompt pinned |
+| 2026-09-08 | box GDN change (unconditional `ggml_repeat` head broadcast) | no single-stream gain | llama-server | as predicted: the fused kernel already broadcasts in-kernel; the guarded repeat on main is the correct code |
 
 ## First reading of 33.3 tok/s (superseded)
 
@@ -445,7 +450,9 @@ fork being six weeks behind, MTP acceptance disputed by the model author's own
 numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
 
 
-- N=9 and N=12 (locates the MMVQ->MMQ knee; running)
+- N=9 and N=12 (locates the MMVQ->MMQ knee; running). N=32 landed at 134 (row above); the knee is the only open width
+- **server prefill vs llama-bench prefill**: 316 vs 856 tok/s on the same card. `-ub 2048 -b 4096` and a prompt-cache hit rate from the server log; the gap is configuration until proven otherwise
+- **Hermes production tok/s** at draft depth 4 / q4_0 KV: the box reported acceptance and latency but not tokens per second; the `timings` object of one long completion decides whether depth 4 beats depth 1 greedy (46.2)
 - `GGML_CUDA_MMVQ_MAX=3` (the fork's threshold): 4 slots x 256K with MTP depth 1 - predicted to match NO_MMVQ's 70.5 on the step while keeping single-slot turns on the dp4a path
 - production server, greedy MTP depth 1 with **Hermes as the client** (not curl): confirms Hermes sends no `temperature`/`repeat_penalty`; the server log's `draft acceptance` line should stay ~0.88
 - loop guard: `--sampling dry` vs `--sampling low` at temp 0.15 / 0.3 / 0.5 - tok/s, `draft acceptance`, and whether `<think>` still loops; the winner becomes the default
