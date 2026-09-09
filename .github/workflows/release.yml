@@ -179,3 +179,37 @@ jobs:
             --target "$SHA" --title "$TAG" --notes-file notes.md --latest \
             assets/*.tar.gz
           echo "published $TAG"
+
+      # Every publish adds ~1.15 GB of assets and nothing ever removed them: on
+      # 2026-09-09 this repo held 58.1 GB across 31 releases. The updater
+      # resolves /releases/latest, so only the newest is ever installed; the
+      # rest are kept for bisecting a regression against an older binary, which
+      # a handful covers. Keep KEEP_RELEASES of this fork's own releases and
+      # delete the older ones, assets and all.
+      #
+      # Deliberately narrow: this only ever deletes releases that carry this
+      # fork's CUDA asset AND are older than the newest KEEP_RELEASES of them.
+      # Anything else - an upstream-matrix release, a hand-made tag, an empty
+      # shell - is left alone here and handled by scripts/prune-releases.sh,
+      # which a human runs. An automatic step should not be the thing that
+      # decides an unfamiliar release is disposable.
+      - name: Prune superseded releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: "8"
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq '.[] | select([.assets[].name] | any(contains("bin-ubuntu-cuda-12.8-sm80-86")))
+                      | "\(.id)\t\(.tag_name)"' > fork-releases.txt || true
+          total=$(wc -l < fork-releases.txt)
+          echo "$total release(s) carry this fork's CUDA asset; keeping the newest $KEEP_RELEASES"
+          if [ "$total" -le "$KEEP_RELEASES" ]; then
+            echo "nothing to prune"; exit 0
+          fi
+          tail -n +$((KEEP_RELEASES + 1)) fork-releases.txt | while IFS=$'\t' read -r id tag; do
+            if gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id" >/dev/null 2>&1; then
+              echo "  pruned $tag"
+            else
+              echo "  could not prune $tag (continuing)"
+            fi
+          done
