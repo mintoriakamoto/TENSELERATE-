@@ -7,6 +7,19 @@ arrive through the sync PRs and are not repeated here.
 
 ## Unreleased
 
+- **On-card sequence fork** (`"fork_from": <slot id>` on a completion request).
+  A delegated agent starts from a live slot's state by sharing its KV cells and
+  its recurrent state cell - `llama_memory_seq_cp` plus copy-on-write in VRAM -
+  instead of a prompt-cache load (~0.6 s over this card's Gen2 x4 link) or a
+  full prefill (~40 s for the 35K Hermes prefix). The child inherits the
+  parent's whole context including the GDN memory past the attention window.
+  Falls back to normal slot selection whenever the fork does not apply. Pinned
+  bit-exact by `tests/test-seq-fork.cpp`.
+- Checked the parallel "fork GDN is corrupted" diagnosis against main: all four
+  claimed divergences are stale or misread (`benches/cmp170hx-3060/README.md`),
+  and added `fork-vs-upstream-ab.sh` to settle the reported numbers by
+  measurement.
+
 - **Bounded attention window for the GDN hybrid** (`LLAMA_ATTN_WINDOW`,
   `LLAMA_ATTN_SINKS`; `tenselerate serve --attn-window --attn-sinks`). The
   16 full-attention layers of Qwen3.5/3.8 become sliding-window layers over

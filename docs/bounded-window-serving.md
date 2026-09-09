@@ -144,8 +144,9 @@ reference too, copied on the first write: the recurrent memory's `src`
 copy-on-write). llama-server already forks this way for `n > 1` completions
 (`copy_state_to`). Exposed across requests it becomes:
 
-1. **Live fork for delegation.** Hermes delegates a subtask; the child is a
-   fork of the parent's sequence at its current position. Cost: cell metadata
+1. **Live fork for delegation (implemented: `"fork_from": <slot id>`).**
+   Hermes delegates a subtask; the child is a fork of the parent's sequence at
+   its current position. Cost: cell metadata
    plus a 150 MiB in-VRAM copy on the child's first token, ~0.2 ms at HBM
    speed. The child starts with the parent's whole context, including the
    associative memory of everything past the window, and pays only for its
@@ -171,6 +172,14 @@ hybrid models); llama.cpp's server has neither across requests. The work is
 in `tools/server`: a `fork_from` field or `/slots/<id>?action=fork&target=j`
 endpoint, a template slot for the prefix checkpoint, and one more recurrent
 cell (`recurrent_rs_size = n_seq_max + 1`). Issue #67.
+
+**Status.** The live fork is in: `"fork_from": <slot id>` on a completion
+request (`tools/server/server-context.cpp`, one hook in `get_available_slot`
+marked `TENSELERATE`; `HERCULES.md` for usage). The primitive it rests on is
+pinned bit-exact by `tests/test-seq-fork.cpp` - a forked sequence's logits
+equal an independently decoded one (max |d| = 0) and the parent is unaffected
+by the child's decoding. The prefix checkpoint (a template slot every new
+conversation forks from) is the remaining half of #67.
 
 Two honest limits. A live fork inherits the parent's GDN state at the fork
 point, so a child can only fork from a slot that is at the position it wants;
