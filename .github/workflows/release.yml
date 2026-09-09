@@ -12,11 +12,26 @@ on:
   push:
     branches: [main]
     paths-ignore:
+      # A release exists to publish llama-server, llama-cli and the int8 kernel
+      # bridge. Ignore only paths that cannot change those binaries: the build
+      # is cmake over the repo root plus tenselerate/csrc, so anything under
+      # src/, ggml/, common/, tools/, cmake/ or tenselerate/csrc must NOT be
+      # listed here. Over-ignoring is the dangerous direction - it means a real
+      # code change publishes nothing and the box keeps running a stale binary,
+      # which is far worse than a wasted build. Add a path only when you can
+      # point at why the compiler never sees it.
       - '**.md'
       - 'docs/**'
       - 'benches/**'
       - '.github/ISSUE_TEMPLATE/**'
       - 'LICENSE*'
+      # Python-only: the reference oracle's tests and the doc guard are never
+      # compiled into anything the release ships.
+      - 'tests/tenselerate/**'
+      - 'scripts/check-doc-facts.py'
+      # CI definitions for checks that run beside the release, not inside it.
+      - '.github/workflows/doc-facts.yml'
+      - '.github/workflows/tenselerate-engine.yml'
   workflow_dispatch:
 
 concurrency:
