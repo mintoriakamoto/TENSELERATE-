@@ -104,3 +104,11 @@ Both flags change *which correct kernel runs*, not the math, so a win is free.
 Record the rows in `benches/cmp170hx-3060/README.md` next to these predictions:
 the Ada gate is the one with a named mechanism behind it (the verify pass is
 width 2 and currently leaves the vector kernel), so it is the one to run first.
+
+## A CI gap this work uncovered
+
+The engine workflow's path filter listed only `ggml/src/ggml-cuda/mmvq.*` and
+`ggml/src/ggml-cuda/ggml-cuda.cu`, so a change confined to any other CUDA file
+skipped the sm_80/sm_86 compile entirely. Seven fork-touched files were in that
+blind spot, including `fattn-vec.cuh` and `fattn-common.cuh` - the GQA-packed
+vector attention. The filter is now `ggml/src/ggml-cuda/**`.

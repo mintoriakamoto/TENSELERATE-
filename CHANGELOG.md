@@ -7,6 +7,19 @@ arrive through the sync PRs and are not repeated here.
 
 ## Unreleased
 
+- **Ampere back-ports of Ada+ scheduling**, opt-in and off by default:
+  `GGML_CUDA_FATTN_ADA_GATE=1` takes the Ada+ flash-attention kernel choice on
+  Ampere (with quantized KV, Ada and newer keep batch width 2 - an MTP depth-1
+  verify pass - on the vector kernel, where Ampere drops to MMA), and
+  `GGML_CUDA_FATTN_STREAM_K=1|0` overrides the "Ada+ or tile efficiency < 75%"
+  stream-k heuristic. Both are scheduling, not instructions, and run on sm_80.
+  Survey of what is and is not portable from sm_90/sm_120 in
+  `docs/ampere-backports.md`.
+- **CI: the CUDA compile now runs on any `ggml/src/ggml-cuda/**` change.** The
+  path filter had listed only `mmvq.*` and `ggml-cuda.cu`, so seven fork-touched
+  CUDA files - the GQA-packed attention among them - were skipping the
+  sm_80/sm_86 compile.
+
 - **On-card sequence fork** (`"fork_from": <slot id>` on a completion request).
   A delegated agent starts from a live slot's state by sharing its KV cells and
   its recurrent state cell - `llama_memory_seq_cp` plus copy-on-write in VRAM -
