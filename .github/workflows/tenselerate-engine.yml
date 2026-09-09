@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/**', 'src/**', 'common/**', 'tools/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/**', 'src/**', 'common/**', 'tools/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -51,6 +51,36 @@ jobs:
           cmake -S tenselerate/csrc -B build-kernels -DCMAKE_BUILD_TYPE=Release
           cmake --build build-kernels --target tenselerate_gemm_test
           ctest --test-dir build-kernels --output-on-failure
+
+  cpp:
+    name: cpp (cpu) — build llama-server and run the fork's C++ tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build libcurl4-openssl-dev
+      - name: Configure
+        run: cmake -S . -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON -DGGML_NATIVE=OFF
+      - name: Build
+        run: cmake --build build-ci -j"$(nproc)"
+      # Serially: two overlapping -j suites on one runner produced three
+      # spurious failures on 2026-09-09 (save-load-state at 679 s contended vs
+      # 6.5 s alone), and a flaky suite gets ignored.
+      # test-download-model pulls a GGUF from HuggingFace and two tests hang off
+      # it as a fixture. Making every PR download a model buys nothing here -
+      # none of the three covers fork code - and buys a dependency on HF being
+      # up, which is how a check starts crying wolf and stops being read. The
+      # box runs the unfiltered suite.
+      - name: ctest -L main (excluding the model-download fixture)
+        run: |
+          ctest --test-dir build-ci -L main --output-on-failure \
+                -E 'test-download-model|test-thread-safety|test-state-restore-fragmented'
+      - name: fork-owned C++ tests are present and ran
+        run: |
+          for t in test-attn-window test-seq-fork test-slot-pin test-kv-mean-center; do
+            test -x "build-ci/bin/$t" || { echo "missing fork test binary: $t"; exit 1; }
+          done
+          ctest --test-dir build-ci -R 'test-attn-window|test-seq-fork|test-slot-pin|test-kv-mean-center' --output-on-failure
 
   cuda-compile:
     name: cuda kernels compile (sm_80/sm_86, CMP 170HX + RTX 3060)
