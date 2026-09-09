@@ -53,6 +53,27 @@ def test_the_repo_is_clean():
     assert "no contradicted constants" in rc.stdout
 
 
+def test_a_new_untracked_doc_is_still_checked(tmp_path):
+    """A doc just written must be checked, not silently skipped until committed.
+
+    git ls-files lists tracked files only. Checking just those means a
+    contributor writes a doc, runs this, sees it pass, commits, and CI fails on
+    the very file they were adding - the same tracked/untracked blind spot that
+    made the guard pass its own counterexamples.
+    """
+    doc = ROOT / "_doc_facts_untracked_probe.md"
+    doc.write_text("# 170HX\n\nThe CMP 170HX runs HBM2e at 1935 GB/s.\n")
+    try:
+        listed = mod._git_files(("*.md",))
+        assert doc.name in listed, "an untracked markdown file was not listed"
+        rc = subprocess.run([sys.executable, str(SCRIPT)], cwd=ROOT,
+                            capture_output=True, text=True)
+        assert rc.returncode == 1, "the untracked doc's false constant was missed"
+        assert "bandwidth" in rc.stdout
+    finally:
+        doc.unlink()
+
+
 def test_a_doc_that_never_mentions_the_box_is_out_of_scope(tmp_path):
     # this is what keeps upstream's docs/build.md from ever failing this check
     body = "# Build\n\n```bash\ncmake -B build -DGGML_INVENTED=ON\n```\n"

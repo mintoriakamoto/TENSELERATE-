@@ -44,6 +44,7 @@ jobs:
           python3 scripts/mtp-realign-gen.py --self-test
           python3 scripts/mtp-head-train.py --self-test
           bash benches/cmp170hx-3060/run-open-items.sh --self-test
+          bash benches/cmp170hx-3060/width-bytes.sh --self-test
           PYTHONPATH=. python -m tenselerate serve --backend llamacpp --model /nonexistent.gguf --dry-run
       - name: host int8 GEMM reference test
         run: |

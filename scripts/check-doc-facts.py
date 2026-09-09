@@ -124,12 +124,26 @@ def code_block_lines(text: str) -> list[tuple[int, str]]:
 SELF_REFERENCE = ("tests/tenselerate/test_doc_facts.py",)
 
 
+def _git_files(patterns: tuple[str, ...]) -> list[str]:
+    """Tracked files matching the globs, plus untracked ones git would add.
+
+    Tracked-only would make the checks blind to a file that has just been
+    written: a contributor runs this, sees it pass, commits, and CI fails on the
+    doc they were in the middle of adding. Untracked-but-not-ignored files are
+    exactly the ones about to become part of the tree, so they count.
+    """
+    out: list[str] = []
+    for extra in (["-z"], ["-z", "--others", "--exclude-standard"]):
+        out += subprocess.run(
+            ["git", "ls-files", *extra, *patterns],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout.split("\0")
+    return [f for f in dict.fromkeys(out) if f]
+
+
 def _tree_text(patterns: tuple[str, ...]) -> str:
     """Concatenate every tracked file matching the globs. Cached per call site."""
-    files = subprocess.run(
-        ["git", "ls-files", "-z", *patterns],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.split("\0")
+    files = _git_files(patterns)
     chunks = []
     for f in files:
         if not f or f in SELF_REFERENCE:
@@ -233,9 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.paths:
         paths = [p if p.is_absolute() else ROOT / p for p in args.paths]
     else:
-        listed = subprocess.run(["git", "ls-files", "-z", "*.md"], cwd=ROOT,
-                                capture_output=True, text=True, check=True)
-        paths = [ROOT / f for f in listed.stdout.split("\0") if f]
+        paths = [ROOT / f for f in _git_files(("*.md",))]
 
     tree = Tree()
     problems: list[str] = []
