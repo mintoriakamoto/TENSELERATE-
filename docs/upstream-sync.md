@@ -108,6 +108,12 @@ Result: **73 conflicted paths.**
    Upstream's MMVQ change should show up directly in tg64 (33.5 -> ~38).
 4. `python3 -m tenselerate serve --backend llamacpp --dry-run` still passes
    the flag set (`--spec-type draft-mtp`, `--kv-unified`, `--cache-reuse`).
+5. `python3 scripts/check-doc-facts.py`. It has a second job on a sync: the
+   fork's docs name build flags, `GGML_*`/`LLAMA_*` env vars and `build/bin/`
+   binaries, and an upstream rename silently leaves those docs pointing at
+   something that no longer exists. The check fails on exactly that. It only
+   reads markdown mentioning the 170HX or TENSELERATE, so upstream's own docs
+   never trip it and never conflict.
 
 ## Status: landed 2026-09-07 (three-way merge, upstream 67672dc5)
 

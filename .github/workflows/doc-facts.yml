@@ -1,0 +1,32 @@
+name: Doc facts
+# The docs that describe this box must not invent hardware or invent knobs.
+# Its own workflow because it is triggered by markdown: routing docs through
+# the engine workflow would fire that workflow's 16-minute CUDA compile every
+# time someone fixes a typo. The engine workflow runs the same check on code
+# changes, where the risk is the opposite direction - a renamed build flag or
+# binary leaving the docs pointing at something that no longer exists.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['**.md', 'scripts/check-doc-facts.py', '.github/workflows/doc-facts.yml']
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ['**.md', 'scripts/check-doc-facts.py', '.github/workflows/doc-facts.yml']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  doc-facts:
+    name: no invented hardware, no invented knobs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Check the docs that describe this box
+        run: python3 scripts/check-doc-facts.py

@@ -25,7 +25,7 @@ anything; `CONTRIBUTING.md` points here for the AI-usage policy.
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON -DGGML_NATIVE=OFF
 cmake --build build -j
 ctest -L main --test-dir build --output-on-failure
-python3 -m pytest tests/tenselerate -q          # 153 tests, ~5 s
+python3 -m pytest tests/tenselerate -q          # 172 tests, ~5 s
 flake8 tenselerate tests/tenselerate            # CI enforces flake8 and ty
 ```
 
@@ -56,7 +56,16 @@ Tests that matter for the fork's own code: `test-recurrent-state-rollback*`
    verification checklist, CI green, then merge. The `main` push publishes
    the release.
 5. **Do not skip or quarantine tests to get green.** Fix or revert.
-6. **AI-assisted changes are allowed and must be disclosed** in the commit or
+6. **Docs about this box state measured values and working instructions.**
+   The card is 40 GiB unlocked at ~1493 GB/s on PCIe Gen2 x4 (~2 GB/s), with
+   no NVLink; those are the numbers every design here works around, so a doc
+   that contradicts them sends the reader down a path that cannot pay off. A
+   build flag, `GGML_*`/`LLAMA_*` env var or `build/bin/` binary shown in a
+   fenced block must exist in the tree. `scripts/check-doc-facts.py` enforces
+   both on any markdown that mentions the 170HX or TENSELERATE (upstream docs
+   are out of scope, so syncs stay clean). To quote a wrong number on purpose,
+   end the line with `<!-- doc-facts:allow why -->`.
+7. **AI-assisted changes are allowed and must be disclosed** in the commit or
    PR. The author is responsible for every line.
 
 ## Conventions
