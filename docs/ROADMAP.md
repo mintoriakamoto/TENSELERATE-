@@ -31,6 +31,14 @@ measured against those on the release binary, not a dev build.
 | [#56](https://github.com/mintoriakamoto/TENSELERATE-/issues/56) | MTP head that survives sampling | Greedy gives 46.2 tok/s at 0.88 acceptance but loops; sampled acceptance is 0.22 | Acceptance > 0.5 at the serving temperature, tok/s above 33.5 |
 | [#58](https://github.com/mintoriakamoto/TENSELERATE-/issues/58) | RTX 3060 side model for delegation | Splitting the 27B across cards cannot win (PCIe); a second model can | `HERCULES.md` side-model section with numbers |
 
+## From other engines
+
+What is worth taking from ExLlama, vLLM, SGLang and TensorRT-LLM, ranked
+against this box's measured bottlenecks rather than by reputation:
+**[docs/engine-borrowings.md](docs/engine-borrowings.md)**. The top item is
+graph-stable decode inputs (vLLM's persistent-buffer technique), which #53's
+30-second A/B decides the value of.
+
 ## Not planned
 
 - Splitting the 27B across the 170HX and the 3060: PCIe-bound, predicted
