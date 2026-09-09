@@ -508,6 +508,47 @@ wholesale, which is exactly the surface the diagnosis names.
 
 `git diff upstream/master -- src/models/delta-net-base.cpp src/llama-graph.* ggml/src/ggml-cuda/gated_delta_net.cu common/speculative.cpp` is empty. There is no fork-side GDN or drafter code left to corrupt: the whole fork footprint in upstream-owned directories is the CUDA perf work, kv-mean-center, the mmap host-pin, `Q4_K_M_INT8`, the SVMI flags, the bounded-window hook and the server guards.
 
+### Follow-up: "snapshot data layout mismatch, fix set_input_s_write_rows"
+
+A later round of the same investigation reported 6.8% acceptance here against
+45% on upstream, named the cause as a GDN snapshot data-layout mismatch, and
+queued a fix to `set_input_s_write_rows`.
+
+**That symbol does not exist.** `set_input_s_write_rows` and `s_write_rows`
+return zero hits anywhere in the tree. The snapshot machinery that does exist
+is upstream's rollback (`state_snapshot_src_idxs` / `_dst_idxs` in
+`llama-graph.h`, `n_rs_seq` in `llama-cparams.h`), and every file carrying it is
+byte-identical to upstream: `llama-graph.{cpp,h}`, `llama-memory-recurrent.{cpp,h}`,
+`llama-cparams.h`, `llama-kv-cache-dsv4.cpp`, `delta-net-base.cpp`,
+`gated_delta_net.cu`. There is no fork-side snapshot code whose layout could
+mismatch. This is the same stale tree as the four-differences report above:
+PR #52 removed the fork's rows-mode and ring machinery, and that is where a
+symbol of roughly that shape used to live.
+
+**The acceptance gap has a simpler explanation, and it is in this ledger.**
+Acceptance on this fork spans an order of magnitude depending on two launch
+choices, with nothing else changed:
+
+| draft depth | sampling | acceptance | tok/s |
+| --- | --- | --- | --- |
+| 5 | server default | **7-11%** | 14.9-17.4 |
+| 1 | temp 0.7, rp 1.15 (model card) | **22%** | 29.9 |
+| 2 | (2026-09-08 run) | **49%** | see the aggregate section |
+| 1 | greedy (temp 0, rp 1.0) | **88%** | **46.2** |
+
+6.8% is the depth-5 corner of that table; 45% is the middle of it. Comparing a
+number from one corner against a number from another measures the flags, not
+the fork. llama.cpp accepts a draft token only when the sampled token equals it
+(`common_sampler_sample_and_accept_n`), so acceptance falls with temperature and
+with depth by construction.
+
+Before any code is edited: run both sides with **identical** depth, sampling and
+model. That is what `fork-vs-upstream-ab.sh` does - it passes
+`--temp 0 --repeat-penalty 1.0` and the same `--spec-draft-n-max` to each
+binary and prints the server's own acceptance line for both. If a gap survives
+that, it is real and worth bisecting; the fork's whole diff against upstream in
+`src/` and `ggml/` is small enough to enumerate (`scripts/fork-hunks.sh`).
+
 The *numbers* in that report are still worth settling, because they do not match
 this ledger: 23.5 tok/s single stream is our **wrong-build** row (card at 74 W),
 and 110 tok/s aggregate at np=8 would beat our measured 70.5 at 4x256K. Both
