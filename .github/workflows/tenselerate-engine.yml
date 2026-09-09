@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/**', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/**', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/src/ggml-cuda/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -33,6 +33,8 @@ jobs:
         run: flake8 tenselerate/ tests/tenselerate/
       - name: ty type-check
         run: ty check tenselerate/ tests/tenselerate/
+      - name: doc facts (no invented hardware, no invented knobs)
+        run: python3 scripts/check-doc-facts.py
       - name: pytest (reference numerics + engine wiring)
         run: PYTHONPATH=. pytest tests/tenselerate/ -q
       - name: lifecycle scripts (syntax + self-tests + the Hercules launch, dry run)
