@@ -116,6 +116,14 @@ def code_block_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
+# This file's whole purpose is to name flags, binaries and env vars that do NOT
+# exist, so its contents must never count as evidence that one does. Without
+# this the guard passes its own counterexamples: git ls-files lists tracked
+# files, so the tests went green while unstaged and failed the moment they were
+# committed. Any future fixture holding deliberate non-identifiers belongs here.
+SELF_REFERENCE = ("tests/tenselerate/test_doc_facts.py",)
+
+
 def _tree_text(patterns: tuple[str, ...]) -> str:
     """Concatenate every tracked file matching the globs. Cached per call site."""
     files = subprocess.run(
@@ -124,7 +132,7 @@ def _tree_text(patterns: tuple[str, ...]) -> str:
     ).stdout.split("\0")
     chunks = []
     for f in files:
-        if not f:
+        if not f or f in SELF_REFERENCE:
             continue
         try:
             chunks.append((ROOT / f).read_text(errors="replace"))

@@ -121,6 +121,23 @@ def test_nonexistent_env_var_is_caught(tmp_path):
     assert len(found) == 1 and "GGML_CUDA_MAKE_IT_FAST" in found[0]
 
 
+def test_this_file_is_not_evidence_that_anything_exists(tmp_path):
+    """The guard must not read its own counterexamples as real identifiers.
+
+    git ls-files lists tracked files only, so before this file was committed
+    the invented names above were invisible and every test passed; committing
+    them made GGML_CUDA_MAKE_IT_FAST "exist" and turned CI red. The exclusion
+    is what makes the result the same either way.
+    """
+    assert "tests/tenselerate/test_doc_facts.py" in mod.SELF_REFERENCE
+    tree = mod.Tree()
+    for invented in ("GGML_CUDA_MAKE_IT_FAST", "ENABLE_NVLINK_OPTIMIZATION",
+                     "benchmark-gqa-attention"):
+        assert invented in Path(__file__).read_text(), invented
+        assert invented not in tree.source, invented
+        assert invented not in tree.cmake, invented
+
+
 def test_real_env_var_passes(tmp_path):
     # the fork's own knobs, which must keep working after every upstream sync
     body = ("# 170HX\n\n```bash\nexport GGML_CUDA_MMVQ_MAX=3\n"
