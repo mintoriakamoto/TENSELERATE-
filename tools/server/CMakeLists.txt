@@ -15,6 +15,8 @@ add_library(${TARGET} STATIC
     server-common.h
     server-context.cpp
     server-context.h
+    tenselerate-slot-pin.cpp # TENSELERATE
+    tenselerate-slot-pin.h   # TENSELERATE
     server-stream.cpp
     server-stream.h
     server-tools.cpp

@@ -124,6 +124,31 @@ equal an independently decoded one, and the parent is unaffected by the child's
 decoding. Design and arithmetic:
 [docs/bounded-window-serving.md](docs/bounded-window-serving.md).
 
+### Keeping a system-prompt template: pin its slot
+
+The same mechanism gives every agent a warm system prompt: dedicate one slot to
+the shared prefix and have new conversations fork from it, instead of each one
+prefilling or loading it from the cache. With
+`--slot-prompt-similarity > 0` and `LLAMA_SERVER_SLOT_FORK=1` the server even
+finds that donor on its own, so clients need not pass `fork_from` at all.
+
+**Pin that slot, or it will be the first one destroyed.** Slot selection - both
+the LRU fallback and the fork-target search - picks the idle slot with the
+oldest `t_last_used`, and a template that only ever donates never updates its
+timestamp. It is the oldest slot in the server by construction. It survives
+until the first request that does not share its prefix, and then every agent
+quietly goes back to paying the full prefill.
+
+```sh
+LLAMA_SERVER_PIN_SLOTS=0 LLAMA_SERVER_SLOT_FORK=1 \
+  tenselerate boot --backend llamacpp --model MODEL.gguf
+```
+
+Pinned slots donate context and are never scheduled, so slot 0 keeps the prompt
+for the life of the server. Warm it once after start with a request carrying
+`"id_slot": 0`. Pinning every slot is refused at startup rather than accepting a
+request that can never be served.
+
 ## The Hermes knobs that actually move speed on a local server
 
 From Hermes' configuration reference (v0.21). Defaults in parentheses; the

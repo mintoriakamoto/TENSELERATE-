@@ -151,6 +151,17 @@ endif ()
 llama_build(test-recurrent-state-rollback.cpp)
 llama_build(test-attn-window.cpp) # TENSELERATE
 llama_build(test-seq-fork.cpp) # TENSELERATE
+
+# TENSELERATE: the pinned-slot spec parser lives in tools/server, so this test is
+# registered by hand to put that directory on the include path. The parser has no
+# llama dependencies; the selection guards that consume its output need a live
+# server and are exercised on the box, not here.
+add_executable(test-slot-pin test-slot-pin.cpp
+               ${PROJECT_SOURCE_DIR}/tools/server/tenselerate-slot-pin.cpp)
+target_include_directories(test-slot-pin PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
+add_test(NAME test-slot-pin COMMAND $<TARGET_FILE:test-slot-pin>)
+set_property(TEST test-slot-pin PROPERTY LABELS main)
+
 llama_build(test-save-load-state.cpp)
 
 if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)

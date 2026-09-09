@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "tenselerate-slot-pin.h" // TENSELERATE
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-http.h"
@@ -929,6 +930,7 @@ private:
 
     // TENSELERATE: fork-instead-of-fetch (LLAMA_SERVER_SLOT_FORK=1), see get_available_slot()
     bool tenselerate_slot_fork = false;
+    std::vector<int> tenselerate_pinned_slots; // TENSELERATE: never selected to serve; donors only
 
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
@@ -1213,6 +1215,26 @@ private:
         if (const char * env = getenv("LLAMA_SERVER_SLOT_FORK"); env != nullptr && env[0] == '1') {
             tenselerate_slot_fork = slot_prompt_similarity > 0.0f;
             SRV_INF("slot fork (fork-instead-of-fetch): %s\n", tenselerate_slot_fork ? "enabled" : "disabled (needs --slot-prompt-similarity > 0)");
+        }
+
+        // TENSELERATE: pinned slots donate context but are never selected to serve.
+        // Without this a prefix template is the FIRST slot both selectors evict:
+        // each picks the oldest t_last_used, and a template that only ever donates
+        // is the oldest by construction. tools/server/tenselerate-slot-pin.h.
+        {
+            std::string err;
+            tenselerate_pinned_slots = tenselerate_pinned_slots_from_env((int) params_base.n_parallel, err);
+            if (!err.empty()) {
+                SRV_ERR("LLAMA_SERVER_PIN_SLOTS: %s\n", err.c_str());
+                return false;
+            }
+            if (!tenselerate_pinned_slots.empty()) {
+                std::string ids;
+                for (int id : tenselerate_pinned_slots) {
+                    ids += (ids.empty() ? "" : ",") + std::to_string(id);
+                }
+                SRV_INF("pinned slots (donors only, never scheduled): %s\n", ids.c_str());
+            }
         }
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
@@ -1713,6 +1735,9 @@ private:
                     if (&slot == donor || slot.is_processing()) {
                         continue;
                     }
+                    if (tenselerate_slot_is_pinned(tenselerate_pinned_slots, slot.id)) {
+                        continue; // TENSELERATE: pinned slots donate, never receive
+                    }
                     if (!target || slot.t_last_used <= t_last) {
                         t_last = slot.t_last_used;
                         target = &slot;
@@ -1747,6 +1772,10 @@ private:
                 // skip the slot if it is not available
                 if (slot.is_processing()) {
                     continue;
+                }
+
+                if (tenselerate_slot_is_pinned(tenselerate_pinned_slots, slot.id)) {
+                    continue; // TENSELERATE: a pinned template is the oldest slot, so LRU would take it first
                 }
 
                 // select the current slot if the criteria match
