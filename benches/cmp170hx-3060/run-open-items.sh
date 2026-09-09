@@ -19,7 +19,9 @@
 #
 # Env: MODEL (required) LLAMA_SERVER (binary; default tenselerate's) PORT (8089)
 #      LLAMA_BENCH (llama-bench binary; default next to LLAMA_SERVER or build/bin)
-#      LLAMA_BENCH_OLD (an older llama-bench, e.g. from the main-b138 tarball, for the regression A/B)
+#      LLAMA_BENCH_OLD (an older llama-bench for the regression A/B: take the
+#                       oldest release still on the Releases page - do not name a
+#                       tag here, the release workflow prunes old ones)
 #      MODEL_ALT (a second GGUF of the same model, e.g. Q4_0 or IQ4_XS, for the quant A/B)
 #      N (requests per shape, 3) MAX_TOKENS (400) HEALTH_TIMEOUT (600 s)
 #      VRAM_FREE_MB (GPU 0 must be below this before a launch, 2000) VRAM_TIMEOUT (180 s)
@@ -380,7 +382,7 @@ exp_bench_ab() {
         add_row "llama-bench pp512/tg64, OLD binary ($LLAMA_BENCH_OLD)" "$r" "same flags" \
             "if OLD > new-OFF the regression is in upstream's kernels: nsys both and diff the top kernels"
     else
-        log "LLAMA_BENCH_OLD not set: skipping the old-binary row (point it at the main-b138 tarball's llama-bench)"
+        log "LLAMA_BENCH_OLD not set: skipping the old-binary row (point it at the llama-bench from the oldest release still on the Releases page)"
     fi
 }
 

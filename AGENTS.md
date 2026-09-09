@@ -77,3 +77,8 @@ Tests that matter for the fork's own code: `test-recurrent-state-rollback*`
 - C++/CUDA: match upstream style (`.clang-format`), env knobs documented in
   the README feature table, defaults off unless measured.
 - Docs: numbers carry a date and the binary they were measured on.
+- Releases: every native-code push to `main` publishes ~1.15 GB of assets and
+  the updater only ever resolves `/releases/latest`, so `release.yml` prunes to
+  the newest 8 of this fork's own releases. It never touches anything else;
+  `scripts/prune-releases.sh` (dry run by default) is the human-run tool for
+  the rest. Do not name a release tag in a doc or script - it will be pruned.
