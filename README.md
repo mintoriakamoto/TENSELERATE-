@@ -40,7 +40,8 @@ cmake --build build -j && ctest -L main --test-dir build
 Serving guide: **[HERCULES.md](HERCULES.md)**. Current work and numbers:
 **[docs/status-2026-09-07.md](docs/status-2026-09-07.md)**. Open CUDA kernel work:
 **[docs/kernel-work.md](docs/kernel-work.md)**; the physics budget behind its order:
-**[docs/physics.md](docs/physics.md)**. Development loop: **[docs/dev-workflow.md](docs/dev-workflow.md)**.
+**[docs/physics.md](docs/physics.md)**. What newer NVIDIA architectures
+have that this card can also have: **[docs/ampere-backports.md](docs/ampere-backports.md)**. Development loop: **[docs/dev-workflow.md](docs/dev-workflow.md)**.
 
 ## What this fork adds (SVMI and friends)
 

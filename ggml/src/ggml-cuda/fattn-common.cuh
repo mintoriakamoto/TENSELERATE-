@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.cuh"
+#include "tenselerate-ampere.cuh" // TENSELERATE
 #include "convert.cuh"
 #include "vecdotq.cuh"
 
@@ -1196,7 +1197,13 @@ void launch_fattn(
         const int tiles_nwaves = (ntiles_dst + max_blocks - 1) / max_blocks;
         const int tiles_efficiency_percent = 100 * ntiles_dst / (max_blocks*tiles_nwaves);
 
-        const bool use_stream_k = cc >= GGML_CUDA_CC_ADA_LOVELACE || amd_wmma_available(cc) || tiles_efficiency_percent < 75;
+        // TENSELERATE: stream-k is a work decomposition, not an instruction; it
+        // runs on sm_80. GGML_CUDA_FATTN_STREAM_K forces it on or off so the
+        // Ada+ heuristic can be re-measured on this card.
+        const int stream_k_override = tenselerate_fattn_stream_k_override();
+        const bool use_stream_k = stream_k_override >= 0
+            ? stream_k_override == 1
+            : (cc >= GGML_CUDA_CC_ADA_LOVELACE || amd_wmma_available(cc) || tiles_efficiency_percent < 75);
 
         blocks_num.x = ntiles_dst;
         blocks_num.y = 1;
