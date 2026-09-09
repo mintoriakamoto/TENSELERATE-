@@ -178,8 +178,35 @@ request (`tools/server/server-context.cpp`, one hook in `get_available_slot`
 marked `TENSELERATE`; `HERCULES.md` for usage). The primitive it rests on is
 pinned bit-exact by `tests/test-seq-fork.cpp` - a forked sequence's logits
 equal an independently decoded one (max |d| = 0) and the parent is unaffected
-by the child's decoding. The prefix checkpoint (a template slot every new
-conversation forks from) is the remaining half of #67.
+by the child's decoding.
+
+### The prefix template needs pinning, or it is the first thing evicted
+
+The remaining half of #67 is the prefix checkpoint: a template slot holding the
+system prompt that every new conversation forks from. Most of it already works,
+because `fork_from` requires the donor's whole context to be a prefix of the
+request and leaves the donor intact, and the automatic donor search behind
+`LLAMA_SERVER_SLOT_FORK=1` finds such a slot without the client naming it. Warm
+one slot with the prompt and new agents fork from it today.
+
+What breaks it is slot selection. Both the LRU fallback and the fork-target
+search choose the idle slot with the **oldest** `t_last_used`, and a template
+that only ever donates is the oldest by construction - so it is the *first*
+slot either path takes. The template survives until one request arrives that
+does not share its prefix, and after that every agent silently pays the full
+prefill again, with nothing in the log to say what changed.
+
+`LLAMA_SERVER_PIN_SLOTS=0` (a comma-separated list) marks slots as donors only:
+skipped by both selectors, never scheduled. Pinning every slot is refused at
+startup rather than accepting a request that can never be served.
+`tools/server/tenselerate-slot-pin.{h,cpp}` holds the logic;
+`tests/test-slot-pin.cpp` covers the spec parsing and both refusals. The two
+selection guards need a live server and are graded on the box.
+
+Still unbuilt from #67: the extra reserved recurrent cell
+(`recurrent_rs_size = n_seq_max + 1`) so a template does not consume one of the
+serving slots, and `--prefix-template FILE` to warm one at startup instead of
+by hand.
 
 Two honest limits. A live fork inherits the parent's GDN state at the fork
 point, so a child can only fork from a slot that is at the position it wants;
