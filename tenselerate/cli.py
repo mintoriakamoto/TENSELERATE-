@@ -535,6 +535,8 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
             slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
             reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft,
             mtp_model=args.mtp_model, sampling=args.sampling,
+            ngram_draft=args.ngram_draft, ngram_min=args.ngram_min,
+            ngram_match=args.ngram_match,
             cache_ram_mib=args.cache_ram, cache_idle_slots=not args.no_cache_idle_slots,
             slot_similarity=args.slot_similarity, slot_save_path=args.slot_save_path,
             attn_window=args.attn_window)
@@ -629,8 +631,8 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     from tenselerate.backends.llamacpp import (
         DEFAULT_ALIAS, DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_MTP_DRAFT,
         DEFAULT_CACHE_RAM_MIB, DEFAULT_REASONING, DEFAULT_SAMPLING,
-        DEFAULT_SLOT_SIMILARITY, DEFAULT_SLOTS, KV_TYPES, REASONING_LEVELS,
-        SAMPLING_MODES,
+        DEFAULT_SLOT_SIMILARITY, DEFAULT_SLOTS, DEFAULT_NGRAM_MATCH,
+        KV_TYPES, MAX_NGRAM_DRAFT, REASONING_LEVELS, SAMPLING_MODES,
     )
     p.add_argument("--backend", default="reference",
                    choices=("reference", "llamacpp", "vllm"),
@@ -682,6 +684,20 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: a retrained MTP head GGUF served as a sidecar "
                         "(-md; scripts/mtp-head-train.py -> convert_hf_to_gguf.py --mtp); "
                         "defaults --mtp-draft to 3")
+    p.add_argument("--ngram-draft", type=int, default=None,
+                   help="llamacpp backend: n-gram draft depth (--spec-ngram-mod-n-max; "
+                        f"1..{MAX_NGRAM_DRAFT}, default off). Replays a run that already "
+                        "appeared in this context, so a hit is free tokens on re-emitted "
+                        "code and a miss is a hash lookup, not a forward pass. Tried "
+                        "before the MTP head; a miss falls through to it unchanged")
+    p.add_argument("--ngram-min", type=int, default=None,
+                   help="llamacpp backend: --spec-ngram-mod-n-min, the shortest replay "
+                        "worth drafting (default: min(4, --ngram-draft)). llama.cpp's own "
+                        "default of 48 exceeds any short draft depth and would discard "
+                        "every draft silently, so it is not inherited here")
+    p.add_argument("--ngram-match", type=int, default=DEFAULT_NGRAM_MATCH,
+                   help="llamacpp backend: --spec-ngram-mod-n-match, the context-suffix "
+                        f"length hashed to find the replay ({DEFAULT_NGRAM_MATCH})")
     p.add_argument("--sampling", default=DEFAULT_SAMPLING, choices=SAMPLING_MODES,
                    help="llamacpp backend: server-default sampling. greedy (default): "
                         "--temp 0 --repeat-penalty 1.0, the only sampling under which the "

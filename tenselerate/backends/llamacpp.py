@@ -101,6 +101,33 @@ DEFAULT_SAMPLING = "greedy"  # measured: the draft head only pays under greedy (
 MAX_MTP_DRAFT = 8
 MMVQ_MAX_BATCH = 8           # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
 
+# n-gram drafting (`ngram-mod`), off by default.
+#
+# Why this is not the same bet as a deeper MTP draft. The depth sweep measured
+# the head as shallow, not broken: position 1 accepts at 0.88, positions 2+ do
+# not, so n-max 1 is +35% and n-max 5 is -22%. Raising the MTP depth buys
+# columns that are very unlikely to be accepted, and a rejected draft column is
+# paid in full.
+#
+# `ngram-mod` drafts from a different source entirely: it hashes the last
+# `n_match` tokens of the live context and replays whatever followed that same
+# run earlier in the same context. It runs no model, so a miss costs a hash
+# lookup rather than a forward pass. On an agent loop - a file re-emitted with
+# one line changed, a diff quoted back, a tool result repeated - a hit is often
+# a long verbatim run, which is where the width sweep's flat MMQ region (55 ms
+# from N=2 to N=16) turns into free tokens.
+#
+# Ordering is load-bearing. common_speculative tries the implementations in the
+# order given and takes the FIRST one that returns a non-empty draft for that
+# sequence; drafts are never concatenated (common/speculative.cpp, the
+# `for (auto & impl : spec->impls)` loop that sets `impl_last`). So `ngram-mod`
+# must come before `draft-mtp`: the free drafter gets first refusal, and every
+# sequence it declines falls through to the measured depth-1 MTP path
+# unchanged. Reversing the order would silence ngram-mod entirely, because the
+# MTP head always produces a draft.
+DEFAULT_NGRAM_MATCH = 24     # llama.cpp's default context-suffix hash length
+MAX_NGRAM_DRAFT = 15         # keeps 1 + n_max inside the flat MMQ region (N<=16)
+
 
 def resolve_mtp_draft(model: str, mtp_draft: int | None) -> int:
     """None -> 1 when the GGUF file name carries the MTP head ("-MTP-"), else 0."""
@@ -122,6 +149,9 @@ def build_llama_server_argv(
     alias: str = DEFAULT_ALIAS,
     mtp_draft: int | None = DEFAULT_MTP_DRAFT,
     mtp_model: str | None = None,
+    ngram_draft: int | None = None,
+    ngram_min: int | None = None,
+    ngram_match: int = DEFAULT_NGRAM_MATCH,
     sampling: str = DEFAULT_SAMPLING,
     cache_ram_mib: int = DEFAULT_CACHE_RAM_MIB,
     cache_idle_slots: bool = True,
@@ -171,6 +201,29 @@ def build_llama_server_argv(
         raise ValueError("mtp_model given but mtp_draft is 0; a sidecar head needs a draft depth")
     if not 0 <= mtp_draft <= MAX_MTP_DRAFT:
         raise ValueError(f"mtp_draft must be 0 (off) .. {MAX_MTP_DRAFT}, got {mtp_draft}")
+    if ngram_draft is not None:
+        if not 1 <= ngram_draft <= MAX_NGRAM_DRAFT:
+            raise ValueError(
+                f"ngram_draft must be 1 .. {MAX_NGRAM_DRAFT} (or None for off), got "
+                f"{ngram_draft}; past {MAX_NGRAM_DRAFT} the verify batch leaves the "
+                "flat MMQ region and every extra column is paid in full")
+        # llama.cpp's own default is n_min 48 against n_max 64. Carried into a
+        # short draft it is a trap: ngram-mod discards the WHOLE draft when the
+        # replayed run ends before n_min (common/speculative.cpp clears the
+        # result and returns), so n_min > n_max can never draft. It fails
+        # silently - every request falls through to the MTP path and the only
+        # symptom is that the speedup never arrives - so default it and refuse
+        # the impossible combination rather than emit it.
+        if ngram_min is None:
+            ngram_min = min(4, ngram_draft)
+        if not 1 <= ngram_min <= ngram_draft:
+            raise ValueError(
+                f"ngram_min must be 1 .. ngram_draft ({ngram_draft}), got {ngram_min}; "
+                "a minimum above the maximum discards every draft silently")
+        if ngram_match < 1:
+            raise ValueError("ngram_match must be a positive token count")
+    elif ngram_min is not None:
+        raise ValueError("ngram_min given but ngram_draft is None (n-gram drafting is off)")
     argv = [
         binary, "-m", model, "--alias", alias,
         "--host", host, "--port", str(port),
@@ -191,10 +244,21 @@ def build_llama_server_argv(
     # request-level defaults; the acceptance test is exact match against the
     # sampled token, so temperature and repeat penalty fight the draft head
     argv += list(SAMPLING_ARGV[sampling])
+    # ngram-mod first: it is tried first and only falls through to the MTP head
+    # when it has no run to replay, so the free drafter gets first refusal and
+    # the measured depth-1 path is untouched on a miss. See MAX_NGRAM_DRAFT.
+    spec_types = (["ngram-mod"] if ngram_draft is not None else []) + \
+                 (["draft-mtp"] if mtp_draft else [])
+    if spec_types:
+        argv += ["--spec-type", ",".join(spec_types)]
+    if ngram_draft is not None:
+        argv += ["--spec-ngram-mod-n-max", str(ngram_draft),
+                 "--spec-ngram-mod-n-min", str(ngram_min),
+                 "--spec-ngram-mod-n-match", str(ngram_match)]
     if mtp_draft:
         # the MTP head lives inside the -MTP- GGUF; -md only for a retrained
         # sidecar head exported by convert_hf_to_gguf.py --mtp (scripts/mtp-head-train.py)
-        argv += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft)]
+        argv += ["--spec-draft-n-max", str(mtp_draft)]
         if mtp_model is not None:
             argv += ["-md", mtp_model]
     argv += list(extra)

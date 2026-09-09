@@ -10,6 +10,10 @@
 # Env overrides: NP (slots, 4) CTX (pool tokens, 524288) KV (q8_0) PORT (8080) ALIAS (tenselerate)
 #                REASONING (low) NO_MMVQ (1 = force the tensor-core MMQ path)
 #                MTP (draft depth; default 1 on an -MTP- GGUF, deeper loses today)
+#                NGRAM (n-gram draft depth 1..15, default off; replays a run already
+#                seen in this context - free tokens on re-emitted code, a hash lookup
+#                on a miss. Tried before the MTP head, so a miss costs nothing)
+#                NGRAM_MIN (shortest replay worth drafting; default min(4, NGRAM))
 #                MTP_MODEL (retrained head GGUF from scripts/mtp-head-train.py, served with -md at depth 3)
 #                CACHE_RAM (host-RAM prompt cache MiB, 16384) SLOT_SIMILARITY (LCP fraction, 0.1)
 #                SLOT_SAVE_PATH (dir for /slots save|restore; scripts/hercules_slots.sh)
@@ -31,6 +35,8 @@ args=(serve --backend llamacpp --model "$MODEL" --alias "${ALIAS:-tenselerate}"
 if [[ "${NO_MMVQ:-}" == "1" ]]; then args+=(--no-mmvq); fi
 if [[ -n "${MTP:-}" ]]; then args+=(--mtp-draft "$MTP"); fi       # default: 1 on an -MTP- GGUF (+13..38%)
 if [[ -n "${MTP_MODEL:-}" ]]; then args+=(--mtp-model "$MTP_MODEL"); fi  # retrained sidecar head (-md), depth 3 default
+if [[ -n "${NGRAM:-}" ]]; then args+=(--ngram-draft "$NGRAM"); fi        # n-gram replay drafter, tried before the MTP head
+if [[ -n "${NGRAM_MIN:-}" ]]; then args+=(--ngram-min "$NGRAM_MIN"); fi  # default min(4, NGRAM); llama.cpp's own 48 would draft nothing
 if [[ -n "${CACHE_RAM:-}" ]]; then args+=(--cache-ram "$CACHE_RAM"); fi          # host-RAM prompt cache MiB (16384)
 if [[ -n "${SLOT_SIMILARITY:-}" ]]; then args+=(--slot-similarity "$SLOT_SIMILARITY"); fi
 if [[ -n "${SLOT_SAVE_PATH:-}" ]]; then mkdir -p "$SLOT_SAVE_PATH"; args+=(--slot-save-path "$SLOT_SAVE_PATH"); fi  # /slots save|restore

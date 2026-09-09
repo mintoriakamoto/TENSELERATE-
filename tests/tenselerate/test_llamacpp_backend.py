@@ -287,3 +287,68 @@ def test_cli_attn_window_flags():
     rc, _ = run(["serve", "--backend", "llamacpp", "--model", MODEL,
                  "--attn-window", "0", "--dry-run"])
     assert rc == 2
+
+
+def test_ngram_drafting_is_off_by_default_and_ordered_before_the_mtp_head():
+    # The MTP depth sweep measured the head as shallow, not broken: n-max 1 is
+    # +35%, n-max 3 is -15%, n-max 5 is -22%. So width cannot come from a deeper
+    # MTP draft. ngram-mod is a different source - it replays a run already in
+    # the context and runs no model - so it can be deep without paying for
+    # columns that will not be accepted.
+    assert not any(x.startswith("--spec-ngram") for x in argv())
+
+    mtp = "/models/Qwen3.8-27B-TurboFCFusion-MTP-Q4_K_M.gguf"
+    a = build_llama_server_argv(mtp, ngram_draft=8)
+    # order is load-bearing: common_speculative takes the FIRST implementation
+    # that returns a non-empty draft and never concatenates, so ngram-mod must
+    # precede draft-mtp or the always-drafting MTP head silences it entirely
+    assert after(a, "--spec-type") == "ngram-mod,draft-mtp"
+    assert after(a, "--spec-ngram-mod-n-max") == "8"
+    assert after(a, "--spec-draft-n-max") == "1"     # the measured optimum, untouched
+
+    # ngram-mod alone, on a GGUF with no MTP head
+    b = argv(ngram_draft=4)
+    assert after(b, "--spec-type") == "ngram-mod"
+    assert not any(x.startswith("--spec-draft") for x in b)
+
+
+def test_ngram_min_defaults_below_the_depth_because_llama_cpps_own_default_drafts_nothing():
+    # llama.cpp defaults n_min 48 against n_max 64. ngram-mod discards the whole
+    # draft when the replay ends before n_min, so inheriting 48 under a depth-8
+    # draft would silently never draft: every request falls through to the MTP
+    # path and the only symptom is a speedup that never arrives.
+    assert after(argv(ngram_draft=8), "--spec-ngram-mod-n-min") == "4"
+    assert after(argv(ngram_draft=2), "--spec-ngram-mod-n-min") == "2"   # clamped to the depth
+    assert after(argv(ngram_draft=8, ngram_min=1), "--spec-ngram-mod-n-min") == "1"
+    with pytest.raises(ValueError, match="ngram_min"):
+        argv(ngram_draft=8, ngram_min=48)
+    with pytest.raises(ValueError, match="ngram_min"):
+        argv(ngram_draft=8, ngram_min=0)
+    with pytest.raises(ValueError, match="ngram_draft is None"):
+        argv(ngram_min=4)
+
+
+def test_ngram_depth_is_bounded_by_the_flat_mmq_region():
+    # The width sweep measured MMQ flat at ~55 ms from N=2 to N=16, which is why
+    # draft columns inside that region are close to free. Past it each column is
+    # paid, so a depth that pushes 1 + n_max over 16 is refused rather than
+    # quietly turning a speed knob into a slowdown.
+    assert after(argv(ngram_draft=15), "--spec-ngram-mod-n-max") == "15"
+    with pytest.raises(ValueError, match="ngram_draft"):
+        argv(ngram_draft=16)
+    with pytest.raises(ValueError, match="ngram_draft"):
+        argv(ngram_draft=0)
+    with pytest.raises(ValueError, match="ngram_match"):
+        argv(ngram_draft=8, ngram_match=0)
+    assert after(argv(ngram_draft=8), "--spec-ngram-mod-n-match") == "24"
+
+
+def test_cli_ngram_flags_reach_the_launch():
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--ngram-draft", "8", "--ngram-min", "2", "--dry-run"])
+    out = buf.getvalue()
+    assert rc == 0
+    assert "--spec-type ngram-mod" in out
+    assert "--spec-ngram-mod-n-max 8 --spec-ngram-mod-n-min 2" in out

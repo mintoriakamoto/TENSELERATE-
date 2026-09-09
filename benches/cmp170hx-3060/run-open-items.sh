@@ -16,6 +16,9 @@
 #   deep_kv          1 slot x 262144, kv q8_0 vs f16, ~250K-token prefill, decode at depth
 #   slot4_width      4 slots x 524288, MTP depth 1, default routing vs --mmvq-max 3 vs --no-mmvq
 #   mtp_control      MTP off vs on under the winning sampling
+#   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
+#                    (predicted to lose) vs the ngram-mod replay drafter at depth
+#                    8 and 15, on a rewrite workload and on a code control
 #
 # Env: MODEL (required) LLAMA_SERVER (binary; default tenselerate's) PORT (8089)
 #      LLAMA_BENCH (llama-bench binary; default next to LLAMA_SERVER or build/bin)
@@ -50,7 +53,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -308,6 +311,70 @@ exp_slot4_width() {
     measure_config "slot4_width-nommvq" "4 slots active, MTP depth 1, --no-mmvq" "$how" \
         "GGML_CUDA_NO_MMVQ=1: every width on MMQ" \
         -- "${PROD_ARGS[@]}" --sampling greedy --no-mmvq -- --concurrency 4 --loop-check || true
+}
+
+exp_spec_depth() {
+    # Where draft width can come from, at temp 0.
+    #
+    # The MTP depth sweep already answered one half: the head is shallow, not
+    # broken. n-max 1 is +35%, n-max 3 is -15%, n-max 5 is -22%, because
+    # position 1 accepts at 0.88 and positions 2+ do not, and a rejected draft
+    # column is paid in full. So depth cannot come from the MTP head, and
+    # `spec_depth-mtp8` is here as the falsifier for exactly that claim.
+    #
+    # ngram-mod is the other half. It drafts by replaying a run already present
+    # in this context, so it runs no model: a miss is a hash lookup, not a
+    # forward pass. It is ordered BEFORE draft-mtp (common_speculative takes the
+    # first implementation that returns a draft and never concatenates), so a
+    # miss falls straight through to the measured depth-1 path.
+    #
+    # Two shapes, because the two directions falsify different things:
+    #   rewrite - the answer is mostly verbatim replay. This is where a hit
+    #             pays, and where the flat MMQ region (55 ms from N=2 to N=16)
+    #             turns 9 verify columns into ~9 tokens for one weight read.
+    #   code    - the answer never appeared in the prompt, so ngram-mod MUST
+    #             miss. This is the control: the fall-through is only free if
+    #             this row lands within noise of the baseline.
+    #
+    # Predictions, written before the run (baseline is 46.2 tok/s greedy MTP-1):
+    #   rewrite baseline   ~46      (MTP depth 1, one accepted token per read)
+    #   rewrite ngram 8     90-160  (a hit drafts up to 8 free columns; the
+    #                                range is wide because per-round hit rate,
+    #                                not per-token acceptance, is what decides)
+    #   rewrite ngram 15   >= ngram 8, and the gap between them says whether the
+    #                      MMQ region is still flat at width 16
+    #   code ngram 8       42-48    (a miss must be free). BELOW 42 REFUTES the
+    #                      ordering claim: it would mean the ngram attempt costs
+    #                      a real pass, not a lookup, and ngram must then be
+    #                      turned on per-workload rather than by default
+    #   code mtp 8         25-30    (below the 34.4 no-MTP baseline, per -22% at
+    #                      n-max 5). ABOVE 46.2 REFUTES the shallow-head reading
+    #                      and the whole depth argument is wrong
+    local how base
+    base="4 slots x 524288 q8_0, greedy (temp 0), measure.py N=$N"
+    how="$base, shape rewrite (verbatim replay) and code (control, must miss)"
+    for shape in rewrite code; do
+        measure_config "spec_depth-$shape-baseline" \
+            "$shape: MTP depth 1, no n-gram draft (production today)" "$how" \
+            "prediction: ~46 tok/s, the greedy MTP-1 baseline" \
+            -- "${PROD_ARGS[@]}" --sampling greedy \
+            -- --shapes "$shape" --n "$N" --loop-check || true
+        measure_config "spec_depth-$shape-ngram8" \
+            "$shape: ngram-mod depth 8 ahead of MTP depth 1" "$how" \
+            "prediction: rewrite 90-160, code 42-48; code below 42 refutes the free-miss claim" \
+            -- "${PROD_ARGS[@]}" --sampling greedy --ngram-draft 8 \
+            -- --shapes "$shape" --n "$N" --loop-check || true
+    done
+    measure_config "spec_depth-rewrite-ngram15" \
+        "rewrite: ngram-mod depth 15 (the edge of the flat MMQ region)" "$how" \
+        "prediction: >= depth 8; the gap grades whether MMQ is still flat at width 16" \
+        -- "${PROD_ARGS[@]}" --sampling greedy --ngram-draft 15 \
+        -- --shapes rewrite --n "$N" --loop-check || true
+    measure_config "spec_depth-code-mtp8" \
+        "code: MTP draft depth 8, the falsifier for the shallow-head reading" "$how" \
+        "prediction: 25-30, below the 34.4 no-MTP baseline; above 46.2 refutes the depth argument" \
+        -- --slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 8 --sampling greedy \
+        -- --shapes code --n "$N" --loop-check || true
 }
 
 exp_mtp_control() {

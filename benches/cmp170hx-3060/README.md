@@ -579,6 +579,18 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
   read-once N-column kernel is worth ~3x on aggregate - `docs/kernel-readonce.md`)
   or 1x (it is latency-bound and that kernel wins nothing). Predictions are
   pre-registered in the script header; grade all four.
+- **draft width at temp 0** (`EXPERIMENTS=spec_depth MODEL=... bash benches/cmp170hx-3060/run-open-items.sh`,
+  ~20 min): the depth sweep says width cannot come from the MTP head (n-max 1
+  +35%, n-max 3 -15%, n-max 5 -22%: position 1 accepts at 0.88, positions 2+ do
+  not, and a rejected column is paid in full). `ngram-mod` is the other source -
+  it drafts by replaying a run already in the context, so it runs no model and a
+  miss is a hash lookup. Ordered ahead of `draft-mtp`, a miss falls through to
+  the measured depth-1 path unchanged. Two shapes: `rewrite` (verbatim replay,
+  where a hit turns the flat MMQ region into ~9 tokens per weight read) and
+  `code` (the control, where it must miss). Predictions are pre-registered in
+  the experiment; the two that can refute it are **code + ngram 8 below 42
+  tok/s** (the miss is not free, so ngram cannot be a default) and **code + MTP
+  8 above 46.2** (the shallow-head reading is wrong).
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running). N=32 landed at 134 (row above); the knee is the only open width
 - **server prefill vs llama-bench prefill**: 316 vs 856 tok/s on the same card. `-ub 2048 -b 4096` and a prompt-cache hit rate from the server log; the gap is configuration until proven otherwise
 - **Hermes production tok/s** at draft depth 4 / q4_0 KV: the box reported acceptance and latency but not tokens per second; the `timings` object of one long completion decides whether depth 4 beats depth 1 greedy (46.2)
