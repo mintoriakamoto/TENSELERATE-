@@ -25,7 +25,7 @@ anything; `CONTRIBUTING.md` points here for the AI-usage policy.
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON -DGGML_NATIVE=OFF
 cmake --build build -j
 ctest -L main --test-dir build --output-on-failure
-python3 -m pytest tests/tenselerate -q          # 172 tests, ~5 s
+python3 -m pytest tests/tenselerate -q          # ~5 s
 flake8 tenselerate tests/tenselerate            # CI enforces flake8 and ty
 ```
 
