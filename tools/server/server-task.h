@@ -145,7 +145,7 @@ struct server_task {
 
     // TENSELERATE: "fork_from" - start this request from a live slot's state by
     // sharing its KV cells and its recurrent state instead of transporting or
-    // recomputing them (docs/bounded-window-serving.md, "Fork, don't fetch").
+    // recomputing them ("Fork, don't fetch", issue #67).
     int id_fork_src = -1;
 
     // used by parallel sampling (multiple completions from same prompt)

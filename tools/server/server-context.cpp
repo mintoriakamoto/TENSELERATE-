@@ -1260,7 +1260,7 @@ private:
             const int n_ctx_capped = params_base.kv_unified_per_slot > 0 ?
                 std::min(n_ctx_seq, params_base.kv_unified_per_slot) : n_ctx_seq;
 
-            if (n_ctx_capped > n_ctx_train && getenv("LLAMA_ATTN_WINDOW") == nullptr) {
+            if (n_ctx_capped > n_ctx_train) {
                 SRV_WRN("the slot context (%d) exceeds the training context of the model (%d) - capping\n",
                         n_ctx_capped, n_ctx_train);
             }
@@ -1596,7 +1596,7 @@ private:
         // whole context (including the GDN memory of everything that has fallen
         // out of the attention window) in one decode step instead of a prompt
         // cache load or a full prefill. Falls back to normal selection whenever
-        // the fork is not applicable. See docs/bounded-window-serving.md.
+        // the fork is not applicable.
         if (task.id_fork_src >= 0) {
             server_slot * src = get_slot_by_id(task.id_fork_src);
 
@@ -4195,13 +4195,6 @@ private:
 
         if (params_base.kv_unified_per_slot > 0) {
             res = std::min(res, params_base.kv_unified_per_slot);
-        }
-
-        // TENSELERATE: with LLAMA_ATTN_WINDOW the attention layers see at most
-        // n_swa tokens and the recurrent layers have no positions, so a sequence
-        // may run past the training context without extrapolating anything
-        if (getenv("LLAMA_ATTN_WINDOW") != nullptr) {
-            return res;
         }
 
         return std::min(res, llama_model_n_ctx_train(model_tgt));

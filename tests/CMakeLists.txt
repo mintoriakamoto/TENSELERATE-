@@ -149,7 +149,6 @@ if (LLAMA_LLGUIDANCE)
 endif ()
 
 llama_build(test-recurrent-state-rollback.cpp)
-llama_build(test-attn-window.cpp) # TENSELERATE
 llama_build(test-seq-fork.cpp) # TENSELERATE
 
 # TENSELERATE: the pinned-slot spec parser lives in tools/server, so this test is
@@ -229,15 +228,6 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
         test-recurrent-state-rollback
         LABEL main
         ARGS -m "${MODEL_DIR}/qwen35-dense.gguf"
-    )
-    # TENSELERATE: bounded attention window on the hybrid GDN model (LLAMA_ATTN_WINDOW)
-    llama_test(
-        test-attn-window
-        LABEL main
-        ARGS -m "${MODEL_DIR}/qwen35-dense.gguf"
-    )
-    set_tests_properties(test-attn-window PROPERTIES
-        FIXTURES_REQUIRED generate-models
     )
     # TENSELERATE: sequence fork by reference (KV cells shared, recurrent state COW)
     llama_test(

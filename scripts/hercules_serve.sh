@@ -19,8 +19,6 @@
 #                SLOT_SAVE_PATH (dir for /slots save|restore; scripts/hercules_slots.sh)
 #                MMVQ_MAX (0..8; 1 keeps batch-1 decode on dp4a, routes draft
 #                verification to MMQ tensor cores - the fork's GGML_CUDA_MMVQ_MAX)
-#                ATTN_WINDOW (tokens; bounds the attention layers, e.g. 65536 -> NP=9 CTX=589824)
-#                ATTN_SINKS (pinned leading positions, default 4; 36000 pins the Hermes system prompt)
 #                SAMPLING (greedy, default: server-default temp 0 / repeat-penalty 1.0,
 #                the only sampling under which the MTP draft pays - 46.2 vs 29.9 tok/s,
 #                but the merge loops in <think>; dry = greedy + DRY loop guard;
@@ -42,6 +40,4 @@ if [[ -n "${SLOT_SIMILARITY:-}" ]]; then args+=(--slot-similarity "$SLOT_SIMILAR
 if [[ -n "${SLOT_SAVE_PATH:-}" ]]; then mkdir -p "$SLOT_SAVE_PATH"; args+=(--slot-save-path "$SLOT_SAVE_PATH"); fi  # /slots save|restore
 if [[ -n "${MMVQ_MAX:-}" ]]; then args+=(--mmvq-max "$MMVQ_MAX"); fi  # 1 = verification on MMQ, decode on MMVQ
 if [[ -n "${SAMPLING:-}" ]]; then args+=(--sampling "$SAMPLING"); fi   # default greedy (draft acceptance is exact-match)
-if [[ -n "${ATTN_WINDOW:-}" ]]; then args+=(--attn-window "$ATTN_WINDOW"); fi  # bounded attention window: many slots, unbounded sequences
-if [[ -n "${ATTN_SINKS:-}" ]]; then args+=(--attn-sinks "$ATTN_SINKS"); fi      # pinned leading positions (default 4; = system prompt length to pin it)
 exec python3 -m tenselerate "${args[@]}" "${@:2}"

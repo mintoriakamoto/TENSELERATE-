@@ -1,4 +1,4 @@
-// On-card sequence fork on a hybrid GDN model (TENSELERATE, docs/bounded-window-serving.md).
+// On-card sequence fork on a hybrid GDN model (TENSELERATE).
 //
 // A sequence on this architecture is KV cells for the attention layers plus one
 // recurrent state cell for the GDN layers. Both are shareable by reference:

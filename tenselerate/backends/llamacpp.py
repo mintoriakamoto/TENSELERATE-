@@ -157,7 +157,6 @@ def build_llama_server_argv(
     cache_idle_slots: bool = True,
     slot_similarity: float = DEFAULT_SLOT_SIMILARITY,
     slot_save_path: str | None = None,
-    attn_window: int | None = None,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -173,17 +172,10 @@ def build_llama_server_argv(
         raise ValueError(f"reasoning must be one of {REASONING_LEVELS}, got {reasoning!r}")
     if slots < 1:
         raise ValueError("slots must be >= 1")
-    if attn_window is not None and attn_window < 1:
-        raise ValueError("attn_window must be a positive token count")
-    if attn_window is None and ctx_pool < MIN_ATTENTION_WINDOW:
+    if ctx_pool < MIN_ATTENTION_WINDOW:
         raise ValueError(
             f"ctx_pool {ctx_pool:,} cannot hold one locked {MIN_ATTENTION_WINDOW:,}-token "
             "window; the pool is shared by all slots but the main session must fit")
-    if attn_window is not None and ctx_pool < attn_window * slots:
-        raise ValueError(
-            f"ctx_pool {ctx_pool:,} is smaller than {slots} slots x the {attn_window:,}-token "
-            "attention window; with a bounded window the pool is the sequence capacity, "
-            "so make it at least slots x window (larger is free: only the window is KV)")
     if not alias:
         raise ValueError("alias must be a non-empty model id for the agent to address")
     if sampling not in SAMPLING_MODES:
@@ -266,16 +258,8 @@ def build_llama_server_argv(
 
 
 def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
-               device: int | None = None, attn_window: int | None = None,
-               attn_sinks: int | None = None) -> dict[str, str]:
+               device: int | None = None) -> dict[str, str]:
     """
-    `attn_window=N` bounds the 16 full-attention layers to a sliding window of N
-    tokens (+ `attn_sinks` pinned leading positions, default 4) through this fork's
-    LLAMA_ATTN_WINDOW / LLAMA_ATTN_SINKS. The 48 Gated-DeltaNet layers carry the
-    long range with a fixed state, so the sequence is unbounded while KV per slot
-    is O(window): the lever for many slots at unbounded context
-    (docs/bounded-window-serving.md).
-
     The launch environment. `device=N` pins the server to one CUDA device
     (CUDA_VISIBLE_DEVICES=N, so `--main-gpu 0` inside the process is that card):
     the RTX 3060 side server for Hermes delegation children and the compaction
@@ -291,17 +275,7 @@ def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
         raise ValueError(f"mmvq_max must be 0..{MMVQ_MAX_BATCH}, got {mmvq_max}")
     if device is not None and device < 0:
         raise ValueError(f"device must be a CUDA device index >= 0, got {device}")
-    if attn_window is not None and attn_window < 1:
-        raise ValueError(f"attn_window must be a positive token count, got {attn_window}")
-    if attn_sinks is not None and attn_window is None:
-        raise ValueError("attn_sinks needs attn_window")
-    if attn_sinks is not None and attn_sinks < 0:
-        raise ValueError(f"attn_sinks must be >= 0, got {attn_sinks}")
     out: dict[str, str] = {}
-    if attn_window is not None:
-        out["LLAMA_ATTN_WINDOW"] = str(attn_window)
-        if attn_sinks is not None:
-            out["LLAMA_ATTN_SINKS"] = str(attn_sinks)
     if device is not None:
         out["CUDA_VISIBLE_DEVICES"] = str(device)
     if no_mmvq:
@@ -313,21 +287,17 @@ def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
 
 def llama_server_env(
     *, no_mmvq: bool = False, mmvq_max: int | None = None, device: int | None = None,
-    attn_window: int | None = None, attn_sinks: int | None = None,
     base: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """The environment for the launch: the caller's, plus device pin and routing flags."""
     env = dict(os.environ if base is None else base)
-    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device,
-                          attn_window=attn_window, attn_sinks=attn_sinks))
+    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device))
     return env
 
 
 def llama_server_command(model: str, *, no_mmvq: bool = False, mmvq_max: int | None = None,
-                         device: int | None = None, attn_window: int | None = None,
-                         attn_sinks: int | None = None, **kw) -> str:
+                         device: int | None = None, **kw) -> str:
     """The launch as one copy-pasteable shell line, env prefix included."""
     prefix = "".join(f"{k}={v} " for k, v in env_prefix(
-        no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device,
-        attn_window=attn_window, attn_sinks=attn_sinks).items())
-    return prefix + " ".join(build_llama_server_argv(model, attn_window=attn_window, **kw))
+        no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device).items())
+    return prefix + " ".join(build_llama_server_argv(model, **kw))

@@ -40,7 +40,7 @@ keep that set small and every conflict mechanical:
 Resolving a conflict, in order: take upstream's version of the file
 (`git checkout --theirs -- FILE`), re-apply the `TENSELERATE` hunks from the
 `fork-hunks.sh` output (or `git diff main -- FILE` before the merge), build,
-run the tests that cover the hunk (`test-attn-window`, `test-kv-mean-center`,
+run the tests that cover the hunk (`test-seq-fork`, `test-kv-mean-center`,
 `test-recurrent-state-rollback`, the tenselerate suite), then `git add`.
 `rerere` replays the same resolution next time the hunk conflicts.
 

@@ -77,7 +77,7 @@ def publishes(changed: list[str]) -> bool:
 # publishing, the updater serves a binary that does not contain it.
 @pytest.mark.parametrize("path", [
     "src/llama-model.cpp",
-    "src/tenselerate-attn-window.cpp",
+    "src/tenselerate-kv-mean-center.cpp",
     "ggml/src/ggml-cuda/mmvq.cu",
     "ggml/src/ggml-cuda/fattn-vec.cuh",
     "common/arg.cpp",
@@ -86,7 +86,7 @@ def publishes(changed: list[str]) -> bool:
     "tenselerate/csrc/int8_gemm.cu",
     "CMakeLists.txt",
     "cmake/build-info.cmake",
-    "tests/test-attn-window.cpp",
+    "tests/test-seq-fork.cpp",
     ".github/workflows/release.yml",
     ".github/actions/package-release.sh",
     "scripts/build-info.sh",

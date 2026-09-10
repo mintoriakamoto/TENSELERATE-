@@ -78,10 +78,10 @@ jobs:
                 -E 'test-download-model|test-thread-safety|test-state-restore-fragmented'
       - name: fork-owned C++ tests are present and ran
         run: |
-          for t in test-attn-window test-seq-fork test-slot-pin test-kv-mean-center; do
+          for t in test-seq-fork test-slot-pin test-kv-mean-center; do
             test -x "build-ci/bin/$t" || { echo "missing fork test binary: $t"; exit 1; }
           done
-          ctest --test-dir build-ci -R 'test-attn-window|test-seq-fork|test-slot-pin|test-kv-mean-center' --output-on-failure
+          ctest --test-dir build-ci -R 'test-seq-fork|test-slot-pin|test-kv-mean-center' --output-on-failure
 
   cuda-compile:
     name: cuda kernels compile (sm_80/sm_86, CMP 170HX + RTX 3060)

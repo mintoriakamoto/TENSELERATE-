@@ -33,14 +33,6 @@ arrive through the sync PRs and are not repeated here.
   and added `fork-vs-upstream-ab.sh` to settle the reported numbers by
   measurement.
 
-- **Bounded attention window for the GDN hybrid** (`LLAMA_ATTN_WINDOW`,
-  `LLAMA_ATTN_SINKS`; `tenselerate serve --attn-window --attn-sinks`). The
-  16 full-attention layers of Qwen3.5/3.8 become sliding-window layers over
-  hybrid-iswa memory with pinned leading positions; the 48 GDN layers carry
-  the long range. KV per slot is O(window), sequences run past the training
-  context, decode cost is flat in depth. Off by default; identity below the
-  window is tested bit-exact (`test-attn-window`). Design and predictions in
-  `docs/bounded-window-serving.md`.
 
 ## main-b11044-073223f - 2026-09-08
 
