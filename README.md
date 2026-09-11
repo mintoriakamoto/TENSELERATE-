@@ -39,9 +39,14 @@ export CUDAToolkit_ROOT=/usr/local/cuda-12.8
 cmake --preset deploy-cmp170hx
 cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server
 
-MODEL=/path/to/Qwen3.8-27B-*.gguf bash scripts/boot-cmp170hx.sh
-# → http://127.0.0.1:8083/v1
+# exact model this fork is measured with (~18G Q4_K_M + MTP head)
+bash scripts/fetch-model.sh
+bash scripts/boot-cmp170hx.sh
+# → http://127.0.0.1:8083/v1  alias hermes38-tenselerate
 ```
+
+Default GGUF: `Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf`  
+([DavidAU TURBO Fable Cold Fusion MTP](https://huggingface.co/DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF)). Boot also looks in `./models/`, `~/models/`, and `/home/ai/models/`.
 
 Preset: `FORCE_MMQ=ON`, `FORCE_CUBLAS=OFF`, `DISABLE_DP4A=ON`, `sm_80-real`, nvcc **12.8**, rpath **12.8**.
 

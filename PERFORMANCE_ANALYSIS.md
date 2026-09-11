@@ -20,7 +20,8 @@ export PATH=/usr/local/cuda-12.8/bin:$PATH
 export CUDAToolkit_ROOT=/usr/local/cuda-12.8
 cmake --preset deploy-cmp170hx
 cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server
-MODEL=/path/to/model.gguf bash scripts/boot-cmp170hx.sh
+bash scripts/fetch-model.sh   # DavidAU TurboFCFusion Q4_K_M MTP
+bash scripts/boot-cmp170hx.sh
 ```
 
 `deploy-cmp170hx` inherits `cuda-int8` + `cmp-dp4a`:

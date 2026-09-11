@@ -1,10 +1,27 @@
 #!/bin/bash
 # Production boot: CMP 170HX / Ampere sm_80. Port 8083.
-# Requires a GGUF in MODEL (or TENSELERATE_MODEL). CUDA 12.8 runtime is required.
+# Default GGUF: Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf
+# CUDA 12.8 required.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${TENSELERATE_BIN:-$ROOT/build-deploy-cmp170hx/bin/llama-server}"
-MODEL="${MODEL:-${TENSELERATE_MODEL:-}}"
+# Exact GGUF this fork is measured and served with (DavidAU TURBO + MTP, Q4_K_M).
+GGUF_NAME="Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf"
+GGUF_HF_REPO="DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF"
+_find_model() {
+  local c
+  for c in \
+    "${MODEL:-}" \
+    "${TENSELERATE_MODEL:-}" \
+    "$ROOT/models/$GGUF_NAME" \
+    "$HOME/models/$GGUF_NAME" \
+    "/home/ai/models/$GGUF_NAME"
+  do
+    [ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+MODEL="$(_find_model || true)"
 PORT="${PORT:-8083}"
 ALIAS="${ALIAS:-hermes38-tenselerate}"
 LOGDIR="${TENSELERATE_LOGDIR:-$HOME/.hermes/logs}"
@@ -33,7 +50,9 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 if [ -z "$MODEL" ] || [ ! -f "$MODEL" ]; then
-  echo "FATAL: set MODEL=/path/to/model.gguf (or TENSELERATE_MODEL)."
+  echo "FATAL: missing $GGUF_NAME"
+  echo "  huggingface-cli download $GGUF_HF_REPO $GGUF_NAME --local-dir $ROOT/models"
+  echo "  or: bash scripts/fetch-model.sh"
   exit 1
 fi
 
