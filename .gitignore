@@ -156,3 +156,6 @@ AGENTS.local.md
 
 # tenselerate-update.sh download target
 /dist/
+
+# Stale local notes
+MMVQ_RETEST_PROTOCOL.md

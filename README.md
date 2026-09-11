@@ -21,29 +21,50 @@ measured performance record for the hardware it targets.
 | Upstream | Merged with `ggml-org/llama.cpp` master `67672dc5` (2026-09-07); weekly sync tracked in [#59](https://github.com/mintoriakamoto/TENSELERATE-/issues/59) |
 | Roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) and the [open issues](https://github.com/mintoriakamoto/TENSELERATE-/issues) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
-| Reference box | CMP 170HX 40 GiB (unlocked) + RTX 3060 12 GiB, Qwen3.8-27B Q4_K_M: **pp4096 856 tok/s, tg 33.5 tok/s single stream, 70.5 tok/s aggregate at 4 x 256K** ([measured](benches/cmp170hx-3060/README.md)) |
+| Reference box | CMP 170HX 40 GiB: Qwen3.8-27B Q4_K_M **pp4096 856 tok/s**; live Hermes serve **~737 t/s prefill, ~60 t/s decode** (MTP n-max 4, `MMVQ_MAX=3`, 8×256K unified). See [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md). |
 
-## Install
+## Install and serve (this box)
+
+TENSELERATE is **not** stock llama.cpp. Keep `/home/ai/llama-upstream` as a second engine on **:8082**. This fork is **:8083**.
+
+**1. CUDA 12.8 toolkit** (driver 13.x is fine; compiling *with* CUDA 13 is the trap). `nvcc` on PATH is often 12.4 — the preset pins 12.8.
+
+**2. Build**
 
 ```bash
-# prebuilt (needs only the NVIDIA driver; CUDA runtime is linked statically)
-FLAVOR=cuda scripts/tenselerate-update.sh --binary
-
-# serve a model for Hercules (doctor, then llama-server with the tuned flags)
-tenselerate boot --backend llamacpp --model MODEL.gguf
-
-# from source
-cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80;86" -DLLAMA_BUILD_TESTS=ON
-cmake --build build -j && ctest -L main --test-dir build
+export PATH=/usr/local/cuda-12.8/bin:$PATH
+export CUDAToolkit_ROOT=/usr/local/cuda-12.8
+cmake --preset deploy-cmp170hx
+cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server
 ```
 
-Serving guide: **[HERCULES.md](HERCULES.md)**. Current work and numbers:
-**[docs/status-2026-09-07.md](docs/status-2026-09-07.md)**. Open CUDA kernel work:
-**[docs/kernel-work.md](docs/kernel-work.md)**; the physics budget behind its order:
-**[docs/physics.md](docs/physics.md)**. What newer NVIDIA architectures
-have that this card can also have: **[docs/ampere-backports.md](docs/ampere-backports.md)**.
-What other inference engines have that is worth taking:
-**[docs/engine-borrowings.md](docs/engine-borrowings.md)**. Development loop: **[docs/dev-workflow.md](docs/dev-workflow.md)**.
+That preset is `FORCE_MMQ=ON`, `FORCE_CUBLAS=OFF`, `DISABLE_DP4A=ON`, `sm_80-real`, nvcc 12.8, rpath 12.8.
+
+**3. Boot for Hermes** (production flags; do not `NO_MMVQ=1` for one operator):
+
+```bash
+bash scripts/boot-cmp170hx.sh
+# → http://127.0.0.1:8083/v1   alias hermes38-tenselerate
+```
+
+`GGML_CUDA_MMVQ_MAX=3`, `-c 262144 -np 8 -kvu`, MTP `--spec-draft-n-max 4`, q8_0 KV, `-b 8192 -ub 2048`.
+
+**4. Hermes** — provider `tenselerate`, `base_url: http://127.0.0.1:8083/v1`. Full wiring: **[docs/hermes.md](docs/hermes.md)**.
+
+**5. Hercules** (optional, same binary, OpenAI-compat): **[HERCULES.md](HERCULES.md)**.
+
+```bash
+NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 \
+  bash scripts/hercules_serve.sh MODEL.gguf
+```
+
+Prebuilt channel (CI tarballs, no source tree):
+
+```bash
+FLAVOR=cuda scripts/tenselerate-update.sh --binary
+```
+
+More: [docs/dev-workflow.md](docs/dev-workflow.md), [docs/physics.md](docs/physics.md), [docs/svmi.md](docs/svmi.md).
 
 ## What this fork adds (SVMI and friends)
 

@@ -10,34 +10,29 @@ tenselerate boot --backend llamacpp --model MODEL.gguf   # doctor, then llama-se
 #   or: bash scripts/hercules_serve.sh MODEL.gguf         (same launch, env overrides)
 # then on the agent box:
 hercules config set model.provider custom
-hercules config set model.base_url http://127.0.0.1:8080/v1
+hercules config set model.base_url http://127.0.0.1:8083/v1
 ```
 
-The launch is built by `tenselerate/backends/llamacpp.py` from what the box
-measured (`benches/cmp170hx-3060/`): 4 slots on a unified KV pool, MTP at
-draft depth 1 (`--mtp-draft 1`, +35% measured on this merge; deeper loses),
-**greedy sampling** (`--temp 0 --repeat-penalty 1.0` as server defaults: the
-draft head pays only under greedy - 46.2 tok/s at 88% acceptance vs 29.9 at
-22% with the model card's temp 0.7 / repeat-penalty 1.15, which is slower than
-no MTP at all; pure greedy loops in `<think>` on this merge, so `--sampling dry`
-or `--sampling low` is the loop guard - measurement pending), `reasoning_effort=low`, chunked prefill with cache reuse, and the flags Hermes
-needs from an OpenAI-compatible server - `--jinja` (without it llama-server
-ignores `tools` and the reasoning_effort template kwarg), `--reasoning-format
-deepseek`, `--no-context-shift`, `--alias tenselerate`. `--dry-run` prints the
-command; `--mmvq-max 3` sets the fork's
-`GGML_CUDA_MMVQ_MAX=3`: single-slot turns and depth-1 verification stay on the
-dp4a path (which wins below width ~4), four-slot steps go to the tensor cores
-(+19% measured). `--no-mmvq` (all widths to MMQ) measured -34% on single-slot
-MTP - do not use it for one operator.
-Sizing and the slot table: `docs/rig-cmp170hx-3060.md`, "Serving Hercules".
+Production on this 170HX is `scripts/boot-cmp170hx.sh` (** :8083 **, 8 slots,
+256K unified, MTP n-max 4, `GGML_CUDA_MMVQ_MAX=3`). Hercules can use the same
+server, or `scripts/hercules_serve.sh` with:
+
+```bash
+NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 ALIAS=hermes38-tenselerate \
+  bash scripts/hercules_serve.sh MODEL.gguf
+```
+
+`--no-mmvq` is **not** for a single operator (−34% vs `MMVQ_MAX=3`). Greedy
+(`--temp 0`) is required for MTP to pay. `--jinja` is required for Hermes tools.
+Sizing: `docs/rig-cmp170hx-3060.md`. Hermes wiring: `docs/hermes.md`.
 
 ## Hermes side (`~/.hermes/config.yaml`)
 
 ```yaml
 model:
   provider: custom
-  base_url: http://127.0.0.1:8080/v1
-  default: tenselerate            # == --alias on the server
+  base_url: http://127.0.0.1:8083/v1
+  default: hermes38-tenselerate            # == --alias on the server
   context_length: 262144          # the locked window; Hermes compresses at 50% of this
   max_tokens: 8192
   streaming: true
