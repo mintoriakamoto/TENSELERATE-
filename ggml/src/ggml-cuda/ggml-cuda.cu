@@ -5643,6 +5643,10 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
         features.push_back({ "FORCE_MMQ", "1" });
     #endif
 
+    #ifdef GGML_CUDA_DISABLE_DP4A
+        features.push_back({ "DISABLE_DP4A", "1" }); // TENSELERATE: dp2a emulation, CMP cards
+    #endif
+
     #ifdef GGML_CUDA_FORCE_CUBLAS
         features.push_back({ "FORCE_CUBLAS", "1" });
     #endif

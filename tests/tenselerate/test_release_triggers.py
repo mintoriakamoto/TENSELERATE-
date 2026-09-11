@@ -161,15 +161,19 @@ def test_release_builds_cuda_12_8_1_with_forced_mmq():
     body = RELEASE.read_text()
     assert f"container: {CUDA_IMAGE}" in body, "release.yml must pin the CUDA patch level"
     assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "the published binary must force the MMQ path"
-    # the flag is worthless if it never reaches the artifact, so the build asserts
+    assert "-DGGML_CUDA_DISABLE_DP4A=ON" in body, \
+        "the 170HX dispatches dp4a ~16x slow; the dp2a emulation must be compiled in"
+    # the flags are worthless if they never reach the artifact, so the build asserts
     # on llama-cli's own feature line
-    assert 'grep -q "FORCE_MMQ"' in body, "release.yml must verify FORCE_MMQ in the built binary"
+    assert "for feat in FORCE_MMQ DISABLE_DP4A" in body, \
+        "release.yml must verify both flags in the built binary"
 
 
 def test_ci_compiles_against_the_same_toolkit_as_the_release():
     body = ENGINE.read_text()
     assert f"container: {CUDA_IMAGE}" in body, "CI must compile against the release toolkit"
     assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "CI must compile the same MMQ routing as the release"
+    assert "-DGGML_CUDA_DISABLE_DP4A=ON" in body, "CI must compile the same dp4a emulation"
 
 
 def test_no_workflow_uses_the_env_context_in_container():
@@ -193,3 +197,10 @@ def test_the_option_the_workflows_pass_actually_exists():
     cuda_cmake = (ROOT / "ggml" / "src" / "ggml-cuda" / "CMakeLists.txt").read_text()
     assert "add_compile_definitions(GGML_CUDA_FORCE_MMQ)" in cuda_cmake, \
         "the option no longer turns into a compile definition"
+    # the fork's own dp4a option, and the one line that makes it observable
+    assert re.search(r"^option\(GGML_CUDA_DISABLE_DP4A\b", opts, re.M), \
+        "the fork's GGML_CUDA_DISABLE_DP4A option is gone"
+    assert "add_compile_definitions(GGML_CUDA_DISABLE_DP4A)" in cuda_cmake
+    ggml_cuda = (ROOT / "ggml" / "src" / "ggml-cuda" / "ggml-cuda.cu").read_text()
+    assert 'features.push_back({ "DISABLE_DP4A", "1" })' in ggml_cuda, \
+        "DISABLE_DP4A must stay in the reported features or the build cannot verify it"

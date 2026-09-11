@@ -591,8 +591,13 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
   the experiment; the two that can refute it are **code + ngram 8 below 42
   tok/s** (the miss is not free, so ngram cannot be a default) and **code + MTP
   8 above 46.2** (the shallow-head reading is wrong).
-- **`GGML_CUDA_FORCE_MMQ` at prefill and at width** (the release binary now
-  carries it; nothing has been measured with it). Without the flag
+- **`GGML_CUDA_FORCE_MMQ` + `GGML_CUDA_DISABLE_DP4A`, which now ship together
+  and must be graded together.** MMQ's inner loop IS `__dp4a`, and this card
+  dispatches dp4a ~16x slower than regular silicon, so forcing more work onto
+  the MMQ path without the dp2a emulation is plausibly a net loss - and with it,
+  plausibly the largest single win on the box (the kernel comment records ~2x
+  end-to-end decode from the emulation alone). Grade the pair, not each flag:
+  neither number means much without the other. Without the flag
   `ggml_cuda_should_use_mmq()` returns `!fp16_mma_hardware_available(cc) ||
   ne11 < MMQ_DP4A_MAX_BATCH_SIZE` on NVIDIA, and sm_80 has fp16 mma - so every
   batch wider than that threshold was leaving the int8 MMQ path for cuBLAS and

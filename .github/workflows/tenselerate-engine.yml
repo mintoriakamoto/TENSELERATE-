@@ -117,7 +117,7 @@ jobs:
         run: |
           cmake -S . -B build-ggml-cuda -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80-real" \
-            -DGGML_CUDA_FORCE_MMQ=ON \
+            -DGGML_CUDA_FORCE_MMQ=ON -DGGML_CUDA_DISABLE_DP4A=ON \
             -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
           cmake --build build-ggml-cuda --target ggml-cuda
