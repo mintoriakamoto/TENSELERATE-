@@ -23,48 +23,38 @@ measured performance record for the hardware it targets.
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
 | Reference box | CMP 170HX 40 GiB: Qwen3.8-27B Q4_K_M **pp4096 856 tok/s**; live Hermes serve **~737 t/s prefill, ~60 t/s decode** (MTP n-max 4, `MMVQ_MAX=3`, 8×256K unified). See [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md). |
 
-## Install and serve (this box)
+## Install from GitHub (CUDA **12.8** required)
 
-TENSELERATE is **not** stock llama.cpp. Keep `/home/ai/llama-upstream` as a second engine on **:8082**. This fork is **:8083**.
-
-**1. CUDA 12.8 toolkit** (driver 13.x is fine; compiling *with* CUDA 13 is the trap). `nvcc` on PATH is often 12.4 — the preset pins 12.8.
-
-**2. Build**
+Driver 13.x is OK. The **toolkit must be 12.8**. PATH `nvcc` 12.4 or a CUDA 13 toolkit will not do — the preset fails closed.
 
 ```bash
+git clone https://github.com/mintoriakamoto/TENSELERATE-.git TENSELERATE
+cd TENSELERATE
+
+# toolkit: https://developer.nvidia.com/cuda-12-8-0-download-archive
+test -x /usr/local/cuda-12.8/bin/nvcc
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export CUDAToolkit_ROOT=/usr/local/cuda-12.8
+
 cmake --preset deploy-cmp170hx
 cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server
+
+MODEL=/path/to/Qwen3.8-27B-*.gguf bash scripts/boot-cmp170hx.sh
+# → http://127.0.0.1:8083/v1
 ```
 
-That preset is `FORCE_MMQ=ON`, `FORCE_CUBLAS=OFF`, `DISABLE_DP4A=ON`, `sm_80-real`, nvcc 12.8, rpath 12.8.
+Preset: `FORCE_MMQ=ON`, `FORCE_CUBLAS=OFF`, `DISABLE_DP4A=ON`, `sm_80-real`, nvcc **12.8**, rpath **12.8**.
 
-**3. Boot for Hermes** (production flags; do not `NO_MMVQ=1` for one operator):
+Boot: `GGML_CUDA_MMVQ_MAX=3`, `-c 262144 -np 8 -kvu`, MTP n-max 4, q8_0, `-b 8192 -ub 2048`. Do not set `NO_MMVQ=1` for one operator.
 
-```bash
-bash scripts/boot-cmp170hx.sh
-# → http://127.0.0.1:8083/v1   alias hermes38-tenselerate
-```
+**Hermes:** `base_url: http://127.0.0.1:8083/v1` — [docs/hermes.md](docs/hermes.md).  
+**Hercules:** `NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 bash scripts/hercules_serve.sh MODEL.gguf` — [HERCULES.md](HERCULES.md).
 
-`GGML_CUDA_MMVQ_MAX=3`, `-c 262144 -np 8 -kvu`, MTP `--spec-draft-n-max 4`, q8_0 KV, `-b 8192 -ub 2048`.
+This fork is **not** stock llama.cpp. If you also run upstream llama.cpp, keep it on another port (we use **:8082**).
 
-**4. Hermes** — provider `tenselerate`, `base_url: http://127.0.0.1:8083/v1`. Full wiring: **[docs/hermes.md](docs/hermes.md)**.
+Prebuilt CI tarballs: `FLAVOR=cuda scripts/tenselerate-update.sh --binary` (also CUDA 12.8 sm_80/86).
 
-**5. Hercules** (optional, same binary, OpenAI-compat): **[HERCULES.md](HERCULES.md)**.
-
-```bash
-NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 \
-  bash scripts/hercules_serve.sh MODEL.gguf
-```
-
-Prebuilt channel (CI tarballs, no source tree):
-
-```bash
-FLAVOR=cuda scripts/tenselerate-update.sh --binary
-```
-
-More: [docs/dev-workflow.md](docs/dev-workflow.md), [docs/physics.md](docs/physics.md), [docs/svmi.md](docs/svmi.md).
+More: [docs/dev-workflow.md](docs/dev-workflow.md), [docs/physics.md](docs/physics.md), [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md).
 
 ## What this fork adds (SVMI and friends)
 

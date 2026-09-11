@@ -1,21 +1,16 @@
 # Hermes + TENSELERATE
 
-Two engines on this PC. Do not mix ports.
+TENSELERATE (this fork) is the model server. Hermes is a separate agent. They talk over OpenAI-compat on **:8083**.
 
-| Engine | Tree | Port | Hermes provider |
-|---|---|---|---|
-| **TENSELERATE** (this fork) | `/home/ai/TENSELERATE` | **8083** | `tenselerate` / `hermes38-tenselerate` |
-| llama-upstream (stock llama.cpp) | `/home/ai/llama-upstream` | **8082** | `llama-upstream` / `hermes38-upstream` |
-
-Only one holds the 170HX at a time.
+If you also run stock `ggml-org/llama.cpp`, use another port (this box uses **:8082**). One GPU: only one server loaded.
 
 ## Order of operations
 
 1. NVIDIA driver (13.x UMD is OK).
-2. CUDA **12.8** toolkit at `/usr/local/cuda-12.8` (not PATH `nvcc` 12.4).
-3. `cmake --preset deploy-cmp170hx && cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server`
-4. `bash scripts/boot-cmp170hx.sh` — waits for `/health`.
-5. Hermes reads `~/.hermes/config.yaml` (symlink to `hermes-agent/config.yaml`):
+2. CUDA **12.8** toolkit at `/usr/local/cuda-12.8`. Not 12.4. Not 13.x toolkit.
+3. Clone, `cmake --preset deploy-cmp170hx`, build `llama-server`.
+4. `MODEL=/path/to/model.gguf bash scripts/boot-cmp170hx.sh` — waits for `/health`.
+5. Hermes `~/.hermes/config.yaml`:
 
 ```yaml
 model:
