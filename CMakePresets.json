@@ -157,9 +157,25 @@
         "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "75-real" }
     },
     {
-        "description": "The Ampere deployment box: CMP 170HX (GA100, sm_80) + RTX 3060 12 GiB (GA106, sm_86). Both have int8 tensor cores (IMMA) and dp4a, so this uses cuda-int8; a two-target fat binary (one -real per card) so each runs its own SASS with no JIT stall. This is the vLLM-runtime box (see docs/vllm-backend.md).",
-        "name": "deploy-cmp170hx-3060", "inherits": [ "base", "release", "cuda-int8" ],
-        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "80-real;86-real" }
+        "description": "This box: CMP 170HX (GA100, sm_80). MMQ prefill is the 6500 t/s path; FORCE_CUBLAS is the 750 t/s regression. Pin CUDA 12.8 toolkit (not PATH nvcc 12.4, not driver 13.3 toolkit). Driver 13.3 is fine; compiling WITH 13.x is the trap.",
+        "name": "deploy-cmp170hx", "inherits": [ "base", "release", "cuda-int8", "cmp-dp4a" ],
+        "environment": {
+            "CUDAToolkit_ROOT": "/usr/local/cuda-12.8",
+            "PATH": "/usr/local/cuda-12.8/bin:$penv{PATH}"
+        },
+        "cacheVariables": {
+            "CMAKE_CUDA_ARCHITECTURES": "80-real",
+            "CMAKE_CUDA_COMPILER": "/usr/local/cuda-12.8/bin/nvcc",
+            "CUDAToolkit_ROOT": "/usr/local/cuda-12.8",
+            "CMAKE_BUILD_RPATH": "/usr/local/cuda-12.8/lib64",
+            "GGML_CUDA_GRAPHS": "ON",
+            "GGML_CUDA_FORCE_CUBLAS": "OFF"
+        }
+    },
+    {
+        "description": "CMP 170HX (GA100, sm_80) + RTX 3060 12 GiB (GA106, sm_86). Fat binary. cmp-dp4a required (170HX native dp4a ~16x slow). Runtime on 170HX: GGML_CUDA_MMVQ_MAX=3 (not NO_MMVQ=1).",
+        "name": "deploy-cmp170hx-3060", "inherits": [ "base", "release", "cuda-int8", "cmp-dp4a" ],
+        "cacheVariables": { "CMAKE_CUDA_ARCHITECTURES": "80-real;86-real", "GGML_CUDA_GRAPHS": "ON", "GGML_CUDA_FORCE_CUBLAS": "OFF" }
     }
   ]
 }
