@@ -197,6 +197,7 @@ def test_ci_compiles_against_the_same_toolkit_as_the_release():
     assert f"container: {CUDA_IMAGE}" in body, "CI must compile against the release toolkit"
     assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "CI must compile the same MMQ routing as the release"
     assert "-DGGML_CUDA_DISABLE_DP4A=ON" in body, "CI must compile the same dp4a emulation"
+    assert "86-real" not in body, "CI must not build for a card this box no longer has"
 
 
 def test_no_workflow_uses_the_env_context_in_container():
