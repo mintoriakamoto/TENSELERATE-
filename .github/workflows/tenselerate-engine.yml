@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/boot-cmp170hx.sh', 'scripts/fetch-model.sh', 'scripts/doctor.sh', 'CMakePresets.json', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/**', 'src/**', 'common/**', 'tools/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/boot-cmp170hx.sh', 'scripts/fetch-model.sh', 'scripts/doctor.sh', 'install.sh', 'requirements-install.txt', 'CMakePresets.json', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/**', 'src/**', 'common/**', 'tools/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/boot-cmp170hx.sh', 'scripts/fetch-model.sh', 'scripts/doctor.sh', 'CMakePresets.json', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/**', 'src/**', 'common/**', 'tools/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
+    paths: ['tenselerate/**', 'tests/tenselerate/**', 'scripts/tenselerate-*.sh', 'scripts/hercules_*.sh', 'scripts/boot-cmp170hx.sh', 'scripts/fetch-model.sh', 'scripts/doctor.sh', 'install.sh', 'requirements-install.txt', 'CMakePresets.json', 'scripts/mtp-*.py', 'benches/cmp170hx-3060/*.sh', 'benches/cmp170hx-3060/*.py', 'ggml/**', 'src/**', 'common/**', 'tools/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', 'scripts/check-doc-facts.py', '.github/workflows/tenselerate-engine.yml', '.github/actions/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -39,7 +39,7 @@ jobs:
         run: PYTHONPATH=. pytest tests/tenselerate/ -q
       - name: lifecycle scripts (syntax + self-tests + the Hercules launch, dry run)
         run: |
-          for f in scripts/*.sh .github/actions/*.sh; do bash -n "$f"; done
+          for f in scripts/*.sh .github/actions/*.sh install.sh; do bash -n "$f"; done
           bash scripts/tenselerate-update.sh --self-test
           python3 scripts/mtp-realign-gen.py --self-test
           python3 scripts/mtp-head-train.py --self-test

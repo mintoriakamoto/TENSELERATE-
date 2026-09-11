@@ -46,20 +46,12 @@ bash scripts/doctor.sh    # 12.8 preferred; 13.3/14.4 OK; 12.4 fail
 ```bash
 git clone https://github.com/mintoriakamoto/TENSELERATE-.git TENSELERATE
 cd TENSELERATE
-
-# measured toolkit (preferred):
-export PATH=/usr/local/cuda-12.8/bin:$PATH
-export CUDAToolkit_ROOT=/usr/local/cuda-12.8
-# also accepted: /usr/local/cuda-13.3 or /usr/local/cuda-14.4
-
-cmake --preset deploy-cmp170hx
-cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server
-
-# exact model this fork is measured with (~18G Q4_K_M + MTP head)
-bash scripts/fetch-model.sh
+bash install.sh              # cmake + ninja + pip + build + fetch GGUF (not Hermes)
 bash scripts/boot-cmp170hx.sh
 # → http://127.0.0.1:8083/v1  alias hermes38-tenselerate
 ```
+
+`install.sh --skip-model` skips the ~18G download. `install.sh --serve` boots when the build finishes. Python: `requirements-install.txt` (`huggingface_hub`). Hermes is a separate install.
 
 Default GGUF: `Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf`  
 ([DavidAU TURBO Fable Cold Fusion MTP](https://huggingface.co/DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF)). Boot also looks in `./models/`, `~/models/`, and `/home/ai/models/`.

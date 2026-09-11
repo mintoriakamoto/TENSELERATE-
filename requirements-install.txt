@@ -1,0 +1,2 @@
+# Python deps for install.sh / fetch-model.sh only (not convert_hf_to_gguf).
+huggingface_hub>=0.24.0
