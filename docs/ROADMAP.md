@@ -3,7 +3,7 @@
 What is being worked on, in order, and how each item is judged done. Every
 item is a GitHub issue; this page is the ordering and the reasoning.
 
-Target: the CMP 170HX (40 GiB) + RTX 3060 box serving a 27B Q4_K_M model to
+Target: the single-card CMP 170HX (40 GiB) box serving a 27B Q4_K_M model to
 Hercules. The speed-of-light budget that orders the kernel work is
 `docs/physics.md`. Numbers to beat: **33.5 tok/s** single stream, **70.5 tok/s**
 aggregate at 4 x 256K, **12.4 tok/s** at 262K depth. Everything below is

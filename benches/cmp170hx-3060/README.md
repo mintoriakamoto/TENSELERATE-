@@ -411,6 +411,11 @@ ending it. `--sampling dry` / `--sampling low` are the two guards under test.
 
 ## Splitting the 27B across both cards - why it cannot be faster
 
+> Historical: the RTX 3060 has since been removed and this is now a single-card
+> box. The arithmetic below is kept because it is the reasoning that settled the
+> question, and because the same argument applies to any second card added later.
+
+
 A layer split runs the two cards *in sequence* for every token: the 170HX
 does its layers, ships one hidden state (10 KB) over PCIe Gen2 x4 (~50 us,
 negligible), then the 3060 does its layers. Per-token time is the sum, and

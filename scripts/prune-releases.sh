@@ -8,7 +8,9 @@
 # cudart zips, per release, sixteen times over. None of it runs on a Linux box
 # with two NVIDIA cards, and none of it is reachable by
 # `scripts/tenselerate-update.sh`, which resolves /releases/latest and fetches
-# only `bin-ubuntu-x64` or `bin-ubuntu-cuda-12.8-sm80-86-x64`.
+# only `bin-ubuntu-x64` or `bin-ubuntu-cuda-12.8-sm80-x64`. The keep rule is a
+# substring, and `sm80` is a prefix of the older `sm80-86`, so releases built
+# back when the box still had a second card are still recognised and kept.
 #
 # The rule here is deliberately not "older than N". It is: **a release is kept
 # if and only if it carries the fork's own CUDA asset.** That keeps every build
@@ -35,7 +37,7 @@
 set -euo pipefail
 
 REPO="${REPO:-mintoriakamoto/TENSELERATE-}"
-FORK_ASSET="${FORK_ASSET:-bin-ubuntu-cuda-12.8-sm80-86}"
+FORK_ASSET="${FORK_ASSET:-bin-ubuntu-cuda-12.8-sm80}"
 KEEP_EXTRA="${KEEP_EXTRA:-}"
 YES=""
 

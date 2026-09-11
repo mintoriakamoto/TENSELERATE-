@@ -1,14 +1,19 @@
-# Rig field guide: CMP 170HX (40 GB) + RTX 3060 on a 9950X
+# Rig field guide: CMP 170HX (40 GB) on a 9950X
+
+> **The RTX 3060 has been removed from this box.** It is a single-card machine:
+> one CMP 170HX, 40 GiB. Everything below that compares the two cards, splits a
+> model across them, or routes traffic to a second server is kept only as the
+> record of a configuration that no longer exists - the sections are marked. The
+> release binary is built sm_80 only, with the CMP dp4a emulation compiled in.
 
 A serving guide for the `raven-9950x` machine (see `scripts/svmi-auto.py` MACHINES):
-Ryzen 9 9950X / B650E / 32 GiB DDR5, an NVIDIA CMP 170HX unlocked to 40 GiB, and an
-RTX 3060 12 GiB - 52 GiB VRAM total. Target model: the RavenX Chaos Agent
-(Qwen3.8-27B, arch `qwen3_5`), served at the 1M context floor.
+Ryzen 9 9950X / B650E / 32 GiB DDR5 and an NVIDIA CMP 170HX unlocked to 40 GiB.
+Target model: Qwen3.8-27B (arch `qwen3_5`), served at the 1M context floor.
 
 Everything below is a starting config backed by the sources cited, not a benchmark of
 this exact box. Measure the three open items in the last section before trusting numbers.
 
-## The two cards have opposite strengths
+## The two cards have opposite strengths (historical - the 3060 is gone)
 
 This box runs the **full compute unlock** (see next section), so the 170HX behaves close
 to an A100, not the throttled mining card the arXiv:2505.03782 case study measured.

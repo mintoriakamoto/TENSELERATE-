@@ -21,7 +21,7 @@ measured performance record for the hardware it targets.
 | Upstream | Merged with `ggml-org/llama.cpp` master `67672dc5` (2026-09-07); weekly sync tracked in [#59](https://github.com/mintoriakamoto/TENSELERATE-/issues/59) |
 | Roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) and the [open issues](https://github.com/mintoriakamoto/TENSELERATE-/issues) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
-| Reference box | CMP 170HX 40 GiB (unlocked) + RTX 3060 12 GiB, Qwen3.8-27B Q4_K_M: **pp4096 856 tok/s, tg 33.5 tok/s single stream, 70.5 tok/s aggregate at 4 x 256K** ([measured](benches/cmp170hx-3060/README.md)) |
+| Reference box | CMP 170HX 40 GiB (unlocked), single card, Qwen3.8-27B Q4_K_M: **pp4096 856 tok/s, tg 33.5 tok/s single stream, 70.5 tok/s aggregate at 4 x 256K** ([measured](benches/cmp170hx-3060/README.md)) |
 
 ## Install
 

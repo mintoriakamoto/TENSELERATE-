@@ -169,6 +169,29 @@ def test_release_builds_cuda_12_8_1_with_forced_mmq():
         "release.yml must verify both flags in the built binary"
 
 
+def test_release_targets_only_the_card_the_box_has():
+    # The 3060 is gone: one CMP 170HX, sm_80. Building 86-real as well costs
+    # build time and binary size for silicon nobody here owns, and - worse - a
+    # fat binary invites the dp4a emulation question back, since that flag is a
+    # global define that is right for a CMP card and wrong for a consumer one.
+    body = RELEASE.read_text()
+    assert 'CUDA_ARCHS: "80-real"' in body, "the release must build sm_80 only"
+    assert "86-real" not in body, "sm_86 is silicon this box no longer has"
+    assert "3060" not in body, "the release workflow should not describe a card that is gone"
+
+
+def test_the_prune_keep_rule_still_matches_the_older_dual_card_assets():
+    # The asset was renamed sm80-86 -> sm80 when the second card left. The keep
+    # rule is a substring and `sm80` is a prefix of `sm80-86`, so the releases
+    # built before the rename are still recognised. If that ever stops being
+    # true the prune would classify eleven good releases as disposable.
+    prune = (ROOT / "scripts" / "prune-releases.sh").read_text()
+    assert 'FORK_ASSET="${FORK_ASSET:-bin-ubuntu-cuda-12.8-sm80}"' in prune
+    legacy = "tenselerate-main-b11094-x-bin-ubuntu-cuda-12.8-sm80-86-x64.tar.gz"
+    assert "bin-ubuntu-cuda-12.8-sm80" in legacy, "sanity: the prefix must match the old name"
+    assert legacy in prune, "the self-test fixture must keep exercising a legacy asset name"
+
+
 def test_ci_compiles_against_the_same_toolkit_as_the_release():
     body = ENGINE.read_text()
     assert f"container: {CUDA_IMAGE}" in body, "CI must compile against the release toolkit"

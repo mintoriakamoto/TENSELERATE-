@@ -3,7 +3,7 @@ name: Release
 # Every native-code push to main publishes a `main-b<N>-<sha>` release with the
 # binaries scripts/tenselerate-update.sh downloads (`--binary`):
 #   tenselerate-<tag>-bin-ubuntu-x64.tar.gz                  CPU build
-#   tenselerate-<tag>-bin-ubuntu-cuda-12.8-sm80-86-x64.tar.gz CMP 170HX + RTX 3060 build
+#   tenselerate-<tag>-bin-ubuntu-cuda-12.8-sm80-x64.tar.gz CMP 170HX build
 # <N> is `git rev-list --count HEAD`, the same number cmake/build-info.cmake
 # stamps into `llama-cli --version`, so the updater can compare a running
 # binary against the newest release. Docs-only pushes publish nothing.
@@ -39,7 +39,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CUDA_ARCHS: "80-real;86-real"
+  CUDA_ARCHS: "80-real"
 
 jobs:
   meta:
@@ -98,7 +98,7 @@ jobs:
           retention-days: 7
 
   build-cuda:
-    name: build bin-ubuntu-cuda-12.8-sm80-86-x64 (CMP 170HX + RTX 3060)
+    name: build bin-ubuntu-cuda-12.8-sm80-x64 (CMP 170HX)
     needs: meta
     if: needs.meta.outputs.exists == 'false'
     runs-on: ubuntu-24.04
@@ -122,7 +122,7 @@ jobs:
           fetch-depth: 0
       - name: Trust the checkout inside the container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Build llama-server + llama-cli (CUDA, sm_80 + sm_86)
+      - name: Build llama-server + llama-cli (CUDA, sm_80)
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -153,10 +153,10 @@ jobs:
           cmake --build build-kernels
           test -f build-kernels/libtenselerate_int8_gemm_c.so
       - name: Package
-        run: bash .github/actions/package-release.sh "${{ needs.meta.outputs.tag }}" cuda-12.8-sm80-86
+        run: bash .github/actions/package-release.sh "${{ needs.meta.outputs.tag }}" cuda-12.8-sm80
       - uses: actions/upload-artifact@v7
         with:
-          name: bin-ubuntu-cuda-12.8-sm80-86-x64
+          name: bin-ubuntu-cuda-12.8-sm80-x64
           path: dist/*.tar.gz
           retention-days: 7
 
@@ -186,8 +186,8 @@ jobs:
             git log -1 --pretty=%B
             echo
             echo '---'
-            echo "Assets: \`bin-ubuntu-x64\` (CPU) and \`bin-ubuntu-cuda-12.8-sm80-86-x64\`"
-            echo "(CMP 170HX + RTX 3060, needs the NVIDIA driver only - CUDA runtime is linked"
+            echo "Assets: \`bin-ubuntu-x64\` (CPU) and \`bin-ubuntu-cuda-12.8-sm80-x64\`"
+            echo "(CMP 170HX, needs the NVIDIA driver only - CUDA runtime is linked"
             echo "statically). Install: \`scripts/tenselerate-update.sh --binary\`"
             echo "(\`FLAVOR=cuda\` for the GPU build). Serve Hercules:"
             echo "\`tenselerate boot --backend llamacpp --model MODEL.gguf\`."
@@ -216,7 +216,7 @@ jobs:
           KEEP_RELEASES: "8"
         run: |
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
-            --jq '.[] | select([.assets[].name] | any(contains("bin-ubuntu-cuda-12.8-sm80-86")))
+            --jq '.[] | select([.assets[].name] | any(contains("bin-ubuntu-cuda-12.8-sm80")))
                       | "\(.id)\t\(.tag_name)"' > fork-releases.txt || true
           total=$(wc -l < fork-releases.txt)
           echo "$total release(s) carry this fork's CUDA asset; keeping the newest $KEEP_RELEASES"
