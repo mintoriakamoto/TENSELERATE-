@@ -159,8 +159,7 @@ CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu24.04"
 
 def test_release_builds_cuda_12_8_1_with_forced_mmq():
     body = RELEASE.read_text()
-    assert f'CUDA_IMAGE: "{CUDA_IMAGE}"' in body, "release.yml must pin the CUDA patch level"
-    assert "container: ${{ env.CUDA_IMAGE }}" in body, "the CUDA job must use the pinned image"
+    assert f"container: {CUDA_IMAGE}" in body, "release.yml must pin the CUDA patch level"
     assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "the published binary must force the MMQ path"
     # the flag is worthless if it never reaches the artifact, so the build asserts
     # on llama-cli's own feature line
@@ -169,9 +168,21 @@ def test_release_builds_cuda_12_8_1_with_forced_mmq():
 
 def test_ci_compiles_against_the_same_toolkit_as_the_release():
     body = ENGINE.read_text()
-    assert f'CUDA_IMAGE: "{CUDA_IMAGE}"' in body, "CI must compile against the release toolkit"
-    assert "container: ${{ env.CUDA_IMAGE }}" in body
+    assert f"container: {CUDA_IMAGE}" in body, "CI must compile against the release toolkit"
     assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "CI must compile the same MMQ routing as the release"
+
+
+def test_no_workflow_uses_the_env_context_in_container():
+    # `jobs.<id>.container` has no access to the env context: a workflow-level
+    # `env:` there does not interpolate, the file fails to parse, and the run
+    # dies with zero jobs and the file path as its name. Caught the hard way.
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        body = wf.read_text()
+        for i, line in enumerate(body.splitlines(), 1):
+            if line.lstrip().startswith("container:") and "env." in line:
+                raise AssertionError(
+                    f"{wf.name}:{i} uses the env context in `container:`, which "
+                    f"does not parse: {line.strip()}")
 
 
 def test_the_option_the_workflows_pass_actually_exists():

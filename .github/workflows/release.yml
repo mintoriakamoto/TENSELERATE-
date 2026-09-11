@@ -40,9 +40,6 @@ concurrency:
 
 env:
   CUDA_ARCHS: "80-real;86-real"
-  # The box's toolkit, pinned to the patch level: the binary ships the CUDA
-  # runtime statically, so this is the version that actually runs on the cards.
-  CUDA_IMAGE: "nvidia/cuda:12.8.1-devel-ubuntu24.04"
 
 jobs:
   meta:
@@ -105,7 +102,13 @@ jobs:
     needs: meta
     if: needs.meta.outputs.exists == 'false'
     runs-on: ubuntu-24.04
-    container: ${{ env.CUDA_IMAGE }}
+    # Pinned to the patch level: the binary links the CUDA runtime statically,
+    # so this toolkit IS what runs on the cards. Held by
+    # tests/tenselerate/test_release_triggers.py, which also holds the engine
+    # workflow to the same image. NB: a workflow-level `env` cannot be used
+    # here - `container:` has no access to the env context - so this is a
+    # literal on purpose.
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     timeout-minutes: 240
     steps:
       - name: Install build deps

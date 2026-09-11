@@ -18,11 +18,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
 
-env:
-  # Must match release.yml: CI is only a pre-merge proxy for the published
-  # binary if it compiles against the same toolkit patch level.
-  CUDA_IMAGE: "nvidia/cuda:12.8.1-devel-ubuntu24.04"
-
 jobs:
   reference:
     name: reference (cpu) — tests, lint, host gemm
@@ -91,7 +86,10 @@ jobs:
   cuda-compile:
     name: cuda kernels compile (sm_80/sm_86, CMP 170HX + RTX 3060)
     runs-on: ubuntu-24.04
-    container: ${{ env.CUDA_IMAGE }}
+    # Must match release.yml's image: CI is only a pre-merge proxy for the
+    # published binary if it compiles against the same toolkit patch level.
+    # A literal, not an env var - `container:` has no env context.
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install build deps
