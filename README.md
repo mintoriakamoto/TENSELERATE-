@@ -23,6 +23,20 @@ measured performance record for the hardware it targets.
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
 | Reference box | CMP 170HX 40 GiB: Qwen3.8-27B Q4_K_M **pp4096 856 tok/s**; live Hermes serve **~737 t/s prefill, ~60 t/s decode** (MTP n-max 4, `MMVQ_MAX=3`, 8×256K unified). See [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md). |
 
+## Requirements
+
+| | |
+|---|---|
+| OS | Linux x86_64 |
+| CMake | 3.14+ (Ninja generator) |
+| CUDA **toolkit** | **12.8 only** (`/usr/local/cuda-12.8/bin/nvcc`) — driver 13.x UMD is OK |
+| Disk | ~2 GB build + **~18 GB** for the default GGUF |
+| GPU | Ampere sm_80 (CMP 170HX / A100-class). 40 GB for 8×256K q8_0 |
+
+```bash
+bash scripts/doctor.sh    # fails closed without CUDA 12.8 + cmake + ninja
+```
+
 ## Install from GitHub (CUDA **12.8** required)
 
 Driver 13.x is OK. The **toolkit must be 12.8**. PATH `nvcc` 12.4 or a CUDA 13 toolkit will not do — the preset fails closed.
