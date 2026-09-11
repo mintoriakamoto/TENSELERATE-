@@ -7,6 +7,11 @@ arrive through the sync PRs and are not repeated here.
 
 ## Unreleased
 
+- **Production 170HX boot** (`scripts/boot-cmp170hx.sh`, `cmake --preset deploy-cmp170hx`):
+  CUDA 12.8, `FORCE_MMQ=ON`, `DISABLE_DP4A=ON`, `GGML_CUDA_MMVQ_MAX=3`,
+  8×256K unified, MTP n-max 4, port 8083. Hermes/Hercules wiring in
+  `docs/hermes.md` and `HERCULES.md`. Live: ~737 t/s prefill, ~60 t/s decode.
+
 - **Ampere back-ports of Ada+ scheduling**, opt-in and off by default:
   `GGML_CUDA_FATTN_ADA_GATE=1` takes the Ada+ flash-attention kernel choice on
   Ampere (with quantized KV, Ada and newer keep batch width 2 - an MTP depth-1

@@ -1,51 +1,58 @@
 # TENSELERATE
 
-**A maintained llama.cpp fork for serving large models on small and unusual NVIDIA cards**
-(CMP 170HX, RTX 3060, Turing) as the model provider for agent frameworks such as Hercules.
-Tracks upstream `ggml-org/llama.cpp` (last sync: upstream `67672dc5`, 2026-09-07) and adds
-streaming virtual memory (SVMI), all-integer CUDA builds, prompt-cache serving flags, and a
-measured performance record for the hardware it targets.
+llama.cpp fork for **CMP 170HX / Ampere sm_80**. Integer MMQ, CUDA **12.8**, Hermes on **:8083**.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE-/tenselerate-engine.yml?branch=main&label=CI)](https://github.com/mintoriakamoto/TENSELERATE-/actions/workflows/tenselerate-engine.yml)
-[![Release](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE-/release.yml?branch=main&label=Release)](https://github.com/mintoriakamoto/TENSELERATE-/actions/workflows/release.yml)
-[![Latest](https://img.shields.io/github/v/release/mintoriakamoto/TENSELERATE-?label=latest&color=brightgreen)](https://github.com/mintoriakamoto/TENSELERATE-/releases/latest)
-[![Issues](https://img.shields.io/github/issues/mintoriakamoto/TENSELERATE-)](https://github.com/mintoriakamoto/TENSELERATE-/issues)
+[![CI](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE/tenselerate-engine.yml?branch=main&label=CI)](https://github.com/mintoriakamoto/TENSELERATE/actions/workflows/tenselerate-engine.yml)
+[![Release](https://img.shields.io/github/v/release/mintoriakamoto/TENSELERATE?label=latest)](https://github.com/mintoriakamoto/TENSELERATE/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Status
+Not stock [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp). If you also run upstream, use another port (** :8082 ** here).
+
+| Measured (170HX, DavidAU Turbo 27B Q4_K_M) | |
+|---|---|
+| llama-bench pp4096 | **856 tok/s** |
+| Live prefill | **~737 tok/s** |
+| Live decode | **~60 tok/s** (`MMVQ_MAX=3`, MTP n-max 4, 8×256K unified) |
+
+## Requirements
 
 | | |
-| --- | --- |
-| Maintained | Yes. Every native push to `main` is CI-built (CPU + CUDA sm_80/86) and auto-published as a `main-b<N>-<sha>` release with CPU and static-CUDA tarballs. |
-| Latest release | [`main-b11044-073223f`](https://github.com/mintoriakamoto/TENSELERATE-/releases/latest) (2026-09-08) |
-| Upstream | Merged with `ggml-org/llama.cpp` master `67672dc5` (2026-09-07); weekly sync tracked in [#59](https://github.com/mintoriakamoto/TENSELERATE-/issues/59) |
-| Roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) and the [open issues](https://github.com/mintoriakamoto/TENSELERATE-/issues) |
-| Changelog | [CHANGELOG.md](CHANGELOG.md) |
-| Reference box | CMP 170HX 40 GiB (unlocked), single card, Qwen3.8-27B Q4_K_M: **pp4096 856 tok/s, tg 33.5 tok/s single stream, 70.5 tok/s aggregate at 4 x 256K** ([measured](benches/cmp170hx-3060/README.md)) |
+|---|---|
+| OS | Linux x86_64 |
+| CMake + Ninja | 3.14+ |
+| CUDA toolkit | **12.8 measured.** 13.3 and 14.4 accepted. **12.4 rejected.** Driver 13.3 / 14.4 UMD is fine. |
+| Disk | ~2 GB build + **~18 GB** GGUF |
+| GPU | Ampere sm_80, **40 GB** for 8×256K q8_0 |
 
-## Install
+## Install (server only — not Hermes)
 
 ```bash
-# prebuilt (needs only the NVIDIA driver; CUDA runtime is linked statically)
-FLAVOR=cuda scripts/tenselerate-update.sh --binary
-
-# serve a model for Hercules (doctor, then llama-server with the tuned flags)
-tenselerate boot --backend llamacpp --model MODEL.gguf
-
-# from source
-cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80;86" -DLLAMA_BUILD_TESTS=ON
-cmake --build build -j && ctest -L main --test-dir build
+git clone https://github.com/mintoriakamoto/TENSELERATE.git
+cd TENSELERATE
+bash scripts/doctor.sh
+bash install.sh                 # cmake, ninja, pip, build, fetch GGUF
+bash scripts/boot-cmp170hx.sh   # :8083  alias hermes38-tenselerate
 ```
 
-Serving guide: **[HERCULES.md](HERCULES.md)**. Current work and numbers:
-**[docs/status-2026-09-07.md](docs/status-2026-09-07.md)**. Open CUDA kernel work:
-**[docs/kernel-work.md](docs/kernel-work.md)**; the physics budget behind its order:
-**[docs/physics.md](docs/physics.md)**. What newer NVIDIA architectures
-have that this card can also have: **[docs/ampere-backports.md](docs/ampere-backports.md)**.
-What other inference engines have that is worth taking:
-**[docs/engine-borrowings.md](docs/engine-borrowings.md)**. Development loop: **[docs/dev-workflow.md](docs/dev-workflow.md)**.
+`install.sh --skip-model` · `install.sh --serve`
+
+Default GGUF: [`Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf`](https://huggingface.co/DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF)
+
+**Build** (`cmake --preset deploy-cmp170hx`): `FORCE_MMQ=ON` · `FORCE_CUBLAS=OFF` · `DISABLE_DP4A=ON` · `sm_80-real` · nvcc 12.8
+
+**Boot:** `GGML_CUDA_MMVQ_MAX=3` · `-c 262144 -np 8 -kvu` · MTP `--spec-draft-n-max 4` · q8_0 · `-b 8192 -ub 2048` · `--temp 0`
+
+Do **not** set `GGML_CUDA_NO_MMVQ=1` for one operator (that is ~34 tok/s). Width ≥4 still goes to MMQ via `MMVQ_MAX=3`.
+
+- Hermes: `http://127.0.0.1:8083/v1` — [docs/hermes.md](docs/hermes.md)
+- Hercules: `NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 bash scripts/hercules_serve.sh "$MODEL"` — [HERCULES.md](HERCULES.md)
+- Numbers: [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md) · [CHANGELOG.md](CHANGELOG.md) · [releases](https://github.com/mintoriakamoto/TENSELERATE/releases/latest)
 
 ## What this fork adds (SVMI and friends)
+
+## What this fork adds (SVMI and friends)
+
+## What this fork adds (SVMI)
 
 This fork implements **SVMI (Streaming Virtual Memory Inference)**: the GPU is treated
 as a cache over a host-RAM weight store. The design goal is 70B-class models in **under
@@ -73,7 +80,7 @@ What's in this branch (all opt-in, off by default):
 | **All-integer CUDA build** — every matmul on MMQ, no cuBLAS FP16 GEMM, dp4a emulated via prmt+dp2a; CI-built for sm_70/80/86 | `cmake --preset cmp170hx-int8` (also `cmp90hx-int8`, `cmp100-210-int8`) |
 | Update channel — `main` auto-publishes `main-b<N>-<sha>` releases; this is the client that checks and applies them, with or without a git clone | `scripts/tenselerate-update.sh` |
 | **GQA-packed vector attention** — quantized-KV decode reads each K/V byte once per KV head instead of once per Q head; auto above 32K KV | `GGML_CUDA_FATTN_VEC_GQA=-1\|0\|1` |
-| **MMVQ width cap** — keep multi-slot decode on dp4a MMVQ up to N streams, hand wider batches to MMQ (crossover measured at 3-4 on the 170HX) | `GGML_CUDA_MMVQ_MAX=N`, `GGML_CUDA_NO_MMVQ=1` |
+| **MMVQ width cap** — production is `GGML_CUDA_MMVQ_MAX=3` (1-stream MMVQ ~60 t/s; 4+ slots MMQ). `NO_MMVQ=1` forces MMQ at all widths and is **not** for a single operator. | `GGML_CUDA_MMVQ_MAX=3` |
 | **K-cache mean centering** — per-(head,channel) bias subtracted before Q4_0 K quantization; softmax-invariant, better fidelity | `--kv-mean-center FILE`, `tools/kv-mean-center` |
 | **Agent serving flags** — RAM prompt cache, idle-slot caching, LCP slot selection, slot save/restore, `--reasoning-effort`, MTP draft with sampling guards; one launch builder emits them | `tenselerate boot`, `scripts/hercules_serve.sh`, `scripts/hercules_slots.sh` |
 
