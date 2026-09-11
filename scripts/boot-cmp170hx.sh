@@ -1,7 +1,8 @@
 #!/bin/bash
 # Production boot: CMP 170HX / Ampere sm_80. Port 8083.
 # Default GGUF: Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf
-# CUDA 12.8 required.
+# CUDA toolkit: 12.8 measured; 13.3 and 14.4 accepted. 12.4 rejected.
+# Runtime: GGML_CUDA_MMVQ_MAX=3  -c 262144 -np 8 -kvu  MTP n-max 4
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${TENSELERATE_BIN:-$ROOT/build-deploy-cmp170hx/bin/llama-server}"
@@ -26,7 +27,9 @@ PORT="${PORT:-8083}"
 ALIAS="${ALIAS:-hermes38-tenselerate}"
 LOGDIR="${TENSELERATE_LOGDIR:-$HOME/.hermes/logs}"
 SLOTDIR="${TENSELERATE_SLOTDIR:-$HOME/.hermes/slotcache}"
-CUDA128="${CUDAToolkit_ROOT:-/usr/local/cuda-12.8}"
+# shellcheck source=cuda-root.sh
+source "$(cd "$(dirname "$0")" && pwd)/cuda-root.sh"
+CUDA_ROOT="${TENSELERATE_CUDA_ROOT:-}"
 
 mkdir -p "$LOGDIR" "$SLOTDIR"
 LOG="$LOGDIR/boot-tenselerate-$(date +%Y%m%d_%H%M%S).log"
@@ -34,14 +37,14 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo "=== TENSELERATE boot $(date) ==="
 
-if [ ! -x "$CUDA128/bin/nvcc" ]; then
-  echo "FATAL: CUDA 12.8 required at $CUDA128 (this fork is not built against 12.4 or 13.x toolkits)."
-  echo "  Install the 12.8 toolkit, then: export CUDAToolkit_ROOT=$CUDA128"
+if [ -z "$CUDA_ROOT" ]; then
+  echo "FATAL: need CUDA toolkit 12.8 (measured), 13.3, or 14.4. 12.4 is rejected."
+  echo "  export CUDAToolkit_ROOT=/usr/local/cuda-12.8"
   exit 1
 fi
-export PATH="$CUDA128/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA128/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export CUDAToolkit_ROOT="$CUDA128"
+export PATH="$CUDA_ROOT/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export CUDAToolkit_ROOT="$CUDA_ROOT"
 export GGML_CUDA_MMVQ_MAX="${GGML_CUDA_MMVQ_MAX:-3}"
 
 if [ ! -x "$BIN" ]; then

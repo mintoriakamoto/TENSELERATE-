@@ -29,26 +29,28 @@ measured performance record for the hardware it targets.
 |---|---|
 | OS | Linux x86_64 |
 | CMake | 3.14+ (Ninja generator) |
-| CUDA **toolkit** | **12.8 only** (`/usr/local/cuda-12.8/bin/nvcc`) — driver 13.x UMD is OK |
+| CUDA **toolkit** | **12.8 measured** (`deploy-cmp170hx`). **13.3 and 14.4 accepted.** 12.4 rejected. Driver 13.3 / 14.4 UMD is fine. |
 | Disk | ~2 GB build + **~18 GB** for the default GGUF |
 | GPU | Ampere sm_80 (CMP 170HX / A100-class). 40 GB for 8×256K q8_0 |
 
 ```bash
-bash scripts/doctor.sh    # fails closed without CUDA 12.8 + cmake + ninja
+bash scripts/doctor.sh    # 12.8 preferred; 13.3/14.4 OK; 12.4 fail
 ```
 
-## Install from GitHub (CUDA **12.8** required)
+## Install from GitHub
 
-Driver 13.x is OK. The **toolkit must be 12.8**. PATH `nvcc` 12.4 or a CUDA 13 toolkit will not do — the preset fails closed.
+**How we built this box:** CUDA **12.8** toolkit + `FORCE_MMQ=ON` + `DISABLE_DP4A=ON` + `GGML_CUDA_MMVQ_MAX=3`. That is still the preset.
+
+**Not rejected:** toolkit **13.3** or **14.4**, or driver UMD 13.3 / 14.4. **Rejected:** toolkit 12.4.
 
 ```bash
 git clone https://github.com/mintoriakamoto/TENSELERATE-.git TENSELERATE
 cd TENSELERATE
 
-# toolkit: https://developer.nvidia.com/cuda-12-8-0-download-archive
-test -x /usr/local/cuda-12.8/bin/nvcc
+# measured toolkit (preferred):
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export CUDAToolkit_ROOT=/usr/local/cuda-12.8
+# also accepted: /usr/local/cuda-13.3 or /usr/local/cuda-14.4
 
 cmake --preset deploy-cmp170hx
 cmake --build build-deploy-cmp170hx -j$(nproc) --target llama-server

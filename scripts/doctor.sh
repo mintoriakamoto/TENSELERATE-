@@ -1,24 +1,21 @@
 #!/bin/bash
-# Clone-health check. CUDA 12.8 is required. Exit 1 if this tree cannot build/serve.
+# Clone-health check. Measured toolkit is 12.8; 13.3 and 14.4 are accepted. 12.4 is not.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GGUF_NAME="Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf"
-CUDA128="${CUDAToolkit_ROOT:-/usr/local/cuda-12.8}"
 fail=0
 say() { printf '  %-8s %s\n' "$1" "$2"; }
 
+# shellcheck source=cuda-root.sh
+source "$(cd "$(dirname "$0")" && pwd)/cuda-root.sh"
+
 echo "TENSELERATE doctor ($ROOT)"
 
-_nvcc=""
-if [ -x "$CUDA128/bin/nvcc" ]; then
-  _nvcc="$CUDA128/bin/nvcc"
-elif [ -x /usr/local/cuda/bin/nvcc ]; then
-  _nvcc=/usr/local/cuda/bin/nvcc
-fi
-if [ -n "$_nvcc" ] && "$_nvcc" --version 2>/dev/null | grep -q 'release 12.8'; then
-  say OK "CUDA 12.8 nvcc: $("$_nvcc" --version | awk '/release/{print $NF}') ($_nvcc)"
+if [ -n "${TENSELERATE_CUDA_ROOT:-}" ]; then
+  _ver=$("$TENSELERATE_CUDA_ROOT/bin/nvcc" --version | awk '/release/{print $NF}')
+  say OK "CUDA toolkit $_ver at $TENSELERATE_CUDA_ROOT (measured path is 12.8; 13.3/14.4 accepted)"
 else
-  say FAIL "CUDA 12.8 toolkit required (got: ${CUDA128} / PATH nvcc). 12.4 and 13.x toolkits are rejected."
+  say FAIL "need CUDA 12.8, 13.3, or 14.4 nvcc (12.4 rejected). Driver 13.3/14.4 is fine."
   fail=1
 fi
 
@@ -61,7 +58,7 @@ fi
 
 echo
 if [ "$fail" -ne 0 ]; then
-  echo "doctor: FAIL (CUDA 12.8 + cmake + ninja required)"
+  echo "doctor: FAIL (need CUDA 12.8/13.3/14.4 + cmake + ninja; flags: MMQ ON, MMVQ_MAX=3)"
   exit 1
 fi
 echo "doctor: OK"
