@@ -133,3 +133,52 @@ def test_scripts_are_not_ignored_wholesale():
     # a blanket 'scripts/**' would be wrong; only named files may be ignored
     assert not any(p in ("scripts/**", "scripts/*", "tests/**")
                    for p in ignore_patterns())
+
+
+# --------------------------------------------------------------------------
+# The published binary's build configuration.
+#
+# Two properties of the CUDA build are load-bearing on this box and neither is
+# visible in the tarball's name, so they are pinned here rather than left to a
+# reviewer to notice:
+#
+#   CUDA 12.8.1  the runtime is linked statically, so the toolkit the release
+#                container carries IS the runtime that executes on the cards.
+#                A bare "12.8" tag would float across patch levels.
+#   FORCE_MMQ    without it ggml_cuda_should_use_mmq() falls through to cuBLAS
+#                once the batch is wide enough (sm_80 has fp16 mma), so prefill
+#                and other wide-batch matmuls leave the int8 MMQ path and pay a
+#                dequant to fp16. This is a routing change, not a measured win:
+#                the number belongs in benches/cmp170hx-3060/README.md.
+#
+# CI must compile against the same toolkit or it is not a pre-merge proxy for
+# what ships, so the engine workflow is held to the same image.
+ENGINE = ROOT / ".github" / "workflows" / "tenselerate-engine.yml"
+CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu24.04"
+
+
+def test_release_builds_cuda_12_8_1_with_forced_mmq():
+    body = RELEASE.read_text()
+    assert f'CUDA_IMAGE: "{CUDA_IMAGE}"' in body, "release.yml must pin the CUDA patch level"
+    assert "container: ${{ env.CUDA_IMAGE }}" in body, "the CUDA job must use the pinned image"
+    assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "the published binary must force the MMQ path"
+    # the flag is worthless if it never reaches the artifact, so the build asserts
+    # on llama-cli's own feature line
+    assert 'grep -q "FORCE_MMQ"' in body, "release.yml must verify FORCE_MMQ in the built binary"
+
+
+def test_ci_compiles_against_the_same_toolkit_as_the_release():
+    body = ENGINE.read_text()
+    assert f'CUDA_IMAGE: "{CUDA_IMAGE}"' in body, "CI must compile against the release toolkit"
+    assert "container: ${{ env.CUDA_IMAGE }}" in body
+    assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "CI must compile the same MMQ routing as the release"
+
+
+def test_the_option_the_workflows_pass_actually_exists():
+    # a renamed upstream option would make both workflows silently no-ops
+    opts = (ROOT / "ggml" / "CMakeLists.txt").read_text()
+    assert re.search(r"^option\(GGML_CUDA_FORCE_MMQ\b", opts, re.M), \
+        "GGML_CUDA_FORCE_MMQ is not an option in ggml/CMakeLists.txt any more"
+    cuda_cmake = (ROOT / "ggml" / "src" / "ggml-cuda" / "CMakeLists.txt").read_text()
+    assert "add_compile_definitions(GGML_CUDA_FORCE_MMQ)" in cuda_cmake, \
+        "the option no longer turns into a compile definition"

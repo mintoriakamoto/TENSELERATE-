@@ -40,6 +40,9 @@ concurrency:
 
 env:
   CUDA_ARCHS: "80-real;86-real"
+  # The box's toolkit, pinned to the patch level: the binary ships the CUDA
+  # runtime statically, so this is the version that actually runs on the cards.
+  CUDA_IMAGE: "nvidia/cuda:12.8.1-devel-ubuntu24.04"
 
 jobs:
   meta:
@@ -102,7 +105,7 @@ jobs:
     needs: meta
     if: needs.meta.outputs.exists == 'false'
     runs-on: ubuntu-24.04
-    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    container: ${{ env.CUDA_IMAGE }}
     timeout-minutes: 240
     steps:
       - name: Install build deps
@@ -121,6 +124,7 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+            -DGGML_CUDA_FORCE_MMQ=ON \
             -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON \
             -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
           cmake --build build --target llama-server llama-cli
@@ -128,7 +132,15 @@ jobs:
           # (no GPU), so run the version stamp check against the toolkit's libcuda stub.
           mkdir -p "$RUNNER_TEMP/cuda-stubs"
           ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-stubs/libcuda.so.1"
-          LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stubs:${LD_LIBRARY_PATH:-}" ./build/bin/llama-cli --version
+          ver=$(LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stubs:${LD_LIBRARY_PATH:-}" ./build/bin/llama-cli --version 2>&1)
+          printf '%s\n' "$ver"
+          # The flag is only useful if it reached the binary. ggml lists it in the
+          # CUDA feature line, so assert on the artifact rather than on the cmake
+          # argument: a renamed or dropped option would otherwise publish silently.
+          printf '%s' "$ver" | grep -q "FORCE_MMQ" || {
+            echo "::error::llama-cli does not report FORCE_MMQ - the MMQ build flag did not reach the binary"
+            exit 1
+          }
       - name: Build the TENSELERATE int8 kernel bridge (.so)
         run: |
           cmake -S tenselerate/csrc -B build-kernels -G Ninja \

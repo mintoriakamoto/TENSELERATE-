@@ -18,6 +18,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  # Must match release.yml: CI is only a pre-merge proxy for the published
+  # binary if it compiles against the same toolkit patch level.
+  CUDA_IMAGE: "nvidia/cuda:12.8.1-devel-ubuntu24.04"
+
 jobs:
   reference:
     name: reference (cpu) — tests, lint, host gemm
@@ -86,7 +91,7 @@ jobs:
   cuda-compile:
     name: cuda kernels compile (sm_80/sm_86, CMP 170HX + RTX 3060)
     runs-on: ubuntu-24.04
-    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    container: ${{ env.CUDA_IMAGE }}
     steps:
       - uses: actions/checkout@v7
       - name: Install build deps
@@ -114,10 +119,11 @@ jobs:
         run: |
           cmake -S . -B build-ggml-cuda -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80-real" \
+            -DGGML_CUDA_FORCE_MMQ=ON \
             -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
           cmake --build build-ggml-cuda --target ggml-cuda
-          echo "ok: ggml-cuda compiled for sm_80 with GGML_CUDA_MMVQ_MAX routing"
+          echo "ok: ggml-cuda compiled for sm_80, FORCE_MMQ on, GGML_CUDA_MMVQ_MAX routing"
       - name: Upload the shared library (for backend bridge smoke testing)
         uses: actions/upload-artifact@v7
         with:

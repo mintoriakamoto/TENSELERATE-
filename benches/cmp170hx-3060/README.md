@@ -591,6 +591,18 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
   the experiment; the two that can refute it are **code + ngram 8 below 42
   tok/s** (the miss is not free, so ngram cannot be a default) and **code + MTP
   8 above 46.2** (the shallow-head reading is wrong).
+- **`GGML_CUDA_FORCE_MMQ` at prefill and at width** (the release binary now
+  carries it; nothing has been measured with it). Without the flag
+  `ggml_cuda_should_use_mmq()` returns `!fp16_mma_hardware_available(cc) ||
+  ne11 < MMQ_DP4A_MAX_BATCH_SIZE` on NVIDIA, and sm_80 has fp16 mma - so every
+  batch wider than that threshold was leaving the int8 MMQ path for cuBLAS and
+  paying a dequant to fp16. The flag pins those matmuls to MMQ. Note this is a
+  different axis from the fork's `GGML_CUDA_MMVQ_MAX`, which chooses MMVQ vs
+  MMQ for *narrow* batches; FORCE_MMQ chooses MMQ vs cuBLAS for *wide* ones.
+  So the rows to take are prefill (`llama-bench -p 4096`, against the measured
+  855.6 tok/s) and the width sweep at N=16/32 (against 122 / 134), on binaries
+  with the flag off and on. It could be a regression: cuBLAS is not a slow path
+  at width, and nobody has shown int8 MMQ beats it here.
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running). N=32 landed at 134 (row above); the knee is the only open width
 - **server prefill vs llama-bench prefill**: 316 vs 856 tok/s on the same card. `-ub 2048 -b 4096` and a prompt-cache hit rate from the server log; the gap is configuration until proven otherwise
 - **Hermes production tok/s** at draft depth 4 / q4_0 KV: the box reported acceptance and latency but not tokens per second; the `timings` object of one long completion decides whether depth 4 beats depth 1 greedy (46.2)
