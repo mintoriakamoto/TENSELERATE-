@@ -1,75 +1,58 @@
 # TENSELERATE
 
-**A maintained llama.cpp fork for serving large models on small and unusual NVIDIA cards**
-(CMP 170HX, RTX 3060, Turing) as the model provider for agent frameworks such as Hercules.
-Tracks upstream `ggml-org/llama.cpp` (last sync: upstream `67672dc5`, 2026-09-07) and adds
-streaming virtual memory (SVMI), all-integer CUDA builds, prompt-cache serving flags, and a
-measured performance record for the hardware it targets.
+llama.cpp fork for **CMP 170HX / Ampere sm_80**. Integer MMQ, CUDA **12.8**, Hermes on **:8083**.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE-/tenselerate-engine.yml?branch=main&label=CI)](https://github.com/mintoriakamoto/TENSELERATE-/actions/workflows/tenselerate-engine.yml)
-[![Release](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE-/release.yml?branch=main&label=Release)](https://github.com/mintoriakamoto/TENSELERATE-/actions/workflows/release.yml)
-[![Latest](https://img.shields.io/github/v/release/mintoriakamoto/TENSELERATE-?label=latest&color=brightgreen)](https://github.com/mintoriakamoto/TENSELERATE-/releases/latest)
-[![Issues](https://img.shields.io/github/issues/mintoriakamoto/TENSELERATE-)](https://github.com/mintoriakamoto/TENSELERATE-/issues)
+[![CI](https://img.shields.io/github/actions/workflow/status/mintoriakamoto/TENSELERATE/tenselerate-engine.yml?branch=main&label=CI)](https://github.com/mintoriakamoto/TENSELERATE/actions/workflows/tenselerate-engine.yml)
+[![Release](https://img.shields.io/github/v/release/mintoriakamoto/TENSELERATE?label=latest)](https://github.com/mintoriakamoto/TENSELERATE/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Status
+Not stock [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp). If you also run upstream, use another port (** :8082 ** here).
 
-| | |
-| --- | --- |
-| Maintained | Yes. Every native push to `main` is CI-built (CPU + CUDA sm_80/86) and auto-published as a `main-b<N>-<sha>` release with CPU and static-CUDA tarballs. |
-| Latest release | [`main-b11044-073223f`](https://github.com/mintoriakamoto/TENSELERATE-/releases/latest) (2026-09-08) |
-| Upstream | Merged with `ggml-org/llama.cpp` master `67672dc5` (2026-09-07); weekly sync tracked in [#59](https://github.com/mintoriakamoto/TENSELERATE-/issues/59) |
-| Roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) and the [open issues](https://github.com/mintoriakamoto/TENSELERATE-/issues) |
-| Changelog | [CHANGELOG.md](CHANGELOG.md) |
-| Reference box | CMP 170HX 40 GiB: Qwen3.8-27B Q4_K_M **pp4096 856 tok/s**; live Hermes serve **~737 t/s prefill, ~60 t/s decode** (MTP n-max 4, `MMVQ_MAX=3`, 8×256K unified). See [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md). |
+| Measured (170HX, DavidAU Turbo 27B Q4_K_M) | |
+|---|---|
+| llama-bench pp4096 | **856 tok/s** |
+| Live prefill | **~737 tok/s** |
+| Live decode | **~60 tok/s** (`MMVQ_MAX=3`, MTP n-max 4, 8×256K unified) |
 
 ## Requirements
 
 | | |
 |---|---|
 | OS | Linux x86_64 |
-| CMake | 3.14+ (Ninja generator) |
-| CUDA **toolkit** | **12.8 measured** (`deploy-cmp170hx`). **13.3 and 14.4 accepted.** 12.4 rejected. Driver 13.3 / 14.4 UMD is fine. |
-| Disk | ~2 GB build + **~18 GB** for the default GGUF |
-| GPU | Ampere sm_80 (CMP 170HX / A100-class). 40 GB for 8×256K q8_0 |
+| CMake + Ninja | 3.14+ |
+| CUDA toolkit | **12.8 measured.** 13.3 and 14.4 accepted. **12.4 rejected.** Driver 13.3 / 14.4 UMD is fine. |
+| Disk | ~2 GB build + **~18 GB** GGUF |
+| GPU | Ampere sm_80, **40 GB** for 8×256K q8_0 |
+
+## Install (server only — not Hermes)
 
 ```bash
-bash scripts/doctor.sh    # 12.8 preferred; 13.3/14.4 OK; 12.4 fail
-```
-
-## Install from GitHub
-
-**How we built this box:** CUDA **12.8** toolkit + `FORCE_MMQ=ON` + `DISABLE_DP4A=ON` + `GGML_CUDA_MMVQ_MAX=3`. That is still the preset.
-
-**Not rejected:** toolkit **13.3** or **14.4**, or driver UMD 13.3 / 14.4. **Rejected:** toolkit 12.4.
-
-```bash
-git clone https://github.com/mintoriakamoto/TENSELERATE-.git TENSELERATE
+git clone https://github.com/mintoriakamoto/TENSELERATE.git
 cd TENSELERATE
-bash install.sh              # cmake + ninja + pip + build + fetch GGUF (not Hermes)
-bash scripts/boot-cmp170hx.sh
-# → http://127.0.0.1:8083/v1  alias hermes38-tenselerate
+bash scripts/doctor.sh
+bash install.sh                 # cmake, ninja, pip, build, fetch GGUF
+bash scripts/boot-cmp170hx.sh   # :8083  alias hermes38-tenselerate
 ```
 
-`install.sh --skip-model` skips the ~18G download. `install.sh --serve` boots when the build finishes. Python: `requirements-install.txt` (`huggingface_hub`). Hermes is a separate install.
+`install.sh --skip-model` · `install.sh --serve`
 
-Default GGUF: `Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf`  
-([DavidAU TURBO Fable Cold Fusion MTP](https://huggingface.co/DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF)). Boot also looks in `./models/`, `~/models/`, and `/home/ai/models/`.
+Default GGUF: [`Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf`](https://huggingface.co/DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF)
 
-Preset: `FORCE_MMQ=ON`, `FORCE_CUBLAS=OFF`, `DISABLE_DP4A=ON`, `sm_80-real`, nvcc **12.8**, rpath **12.8**.
+**Build** (`cmake --preset deploy-cmp170hx`): `FORCE_MMQ=ON` · `FORCE_CUBLAS=OFF` · `DISABLE_DP4A=ON` · `sm_80-real` · nvcc 12.8
 
-Boot: `GGML_CUDA_MMVQ_MAX=3`, `-c 262144 -np 8 -kvu`, MTP n-max 4, q8_0, `-b 8192 -ub 2048`. Do not set `NO_MMVQ=1` for one operator.
+**Boot:** `GGML_CUDA_MMVQ_MAX=3` · `-c 262144 -np 8 -kvu` · MTP `--spec-draft-n-max 4` · q8_0 · `-b 8192 -ub 2048` · `--temp 0`
 
-**Hermes:** `base_url: http://127.0.0.1:8083/v1` — [docs/hermes.md](docs/hermes.md).  
-**Hercules:** `NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 bash scripts/hercules_serve.sh MODEL.gguf` — [HERCULES.md](HERCULES.md).
+Do **not** set `GGML_CUDA_NO_MMVQ=1` for one operator (that is ~34 tok/s). Width ≥4 still goes to MMQ via `MMVQ_MAX=3`.
 
-This fork is **not** stock llama.cpp. If you also run upstream llama.cpp, keep it on another port (we use **:8082**).
-
-Prebuilt CI tarballs: `FLAVOR=cuda scripts/tenselerate-update.sh --binary` (also CUDA 12.8 sm_80/86).
-
-More: [docs/dev-workflow.md](docs/dev-workflow.md), [docs/physics.md](docs/physics.md), [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md).
+- Hermes: `http://127.0.0.1:8083/v1` — [docs/hermes.md](docs/hermes.md)
+- Hercules: `NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 bash scripts/hercules_serve.sh "$MODEL"` — [HERCULES.md](HERCULES.md)
+- Numbers: [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md) · [CHANGELOG.md](CHANGELOG.md) · [releases](https://github.com/mintoriakamoto/TENSELERATE/releases/latest)
 
 ## What this fork adds (SVMI and friends)
+
+## What this fork adds (SVMI and friends)
+
+## What this fork adds (SVMI)
 
 This fork implements **SVMI (Streaming Virtual Memory Inference)**: the GPU is treated
 as a cache over a host-RAM weight store. The design goal is 70B-class models in **under
@@ -97,7 +80,7 @@ What's in this branch (all opt-in, off by default):
 | **All-integer CUDA build** — every matmul on MMQ, no cuBLAS FP16 GEMM, dp4a emulated via prmt+dp2a; CI-built for sm_70/80/86 | `cmake --preset cmp170hx-int8` (also `cmp90hx-int8`, `cmp100-210-int8`) |
 | Update channel — `main` auto-publishes `main-b<N>-<sha>` releases; this is the client that checks and applies them, with or without a git clone | `scripts/tenselerate-update.sh` |
 | **GQA-packed vector attention** — quantized-KV decode reads each K/V byte once per KV head instead of once per Q head; auto above 32K KV | `GGML_CUDA_FATTN_VEC_GQA=-1\|0\|1` |
-| **MMVQ width cap** — keep multi-slot decode on dp4a MMVQ up to N streams, hand wider batches to MMQ (crossover measured at 3-4 on the 170HX) | `GGML_CUDA_MMVQ_MAX=N`, `GGML_CUDA_NO_MMVQ=1` |
+| **MMVQ width cap** — production is `GGML_CUDA_MMVQ_MAX=3` (1-stream MMVQ ~60 t/s; 4+ slots MMQ). `NO_MMVQ=1` forces MMQ at all widths and is **not** for a single operator. | `GGML_CUDA_MMVQ_MAX=3` |
 | **K-cache mean centering** — per-(head,channel) bias subtracted before Q4_0 K quantization; softmax-invariant, better fidelity | `--kv-mean-center FILE`, `tools/kv-mean-center` |
 | **Bounded attention window** — the 16 attention layers of the GDN hybrid see a sliding window + pinned sinks; the 48 GDN layers carry the rest, so KV per slot is O(window) and sequences are unbounded: 16 slots at 32K or 9 at 64K on the 40 GiB card ([design](docs/bounded-window-serving.md)) | `--attn-window N --attn-sinks S`, `LLAMA_ATTN_WINDOW`, `LLAMA_ATTN_SINKS` |
 | **Agent serving flags** — RAM prompt cache, idle-slot caching, LCP slot selection, slot save/restore, `--reasoning-effort`, MTP draft with sampling guards; one launch builder emits them | `tenselerate boot`, `scripts/hercules_serve.sh`, `scripts/hercules_slots.sh` |

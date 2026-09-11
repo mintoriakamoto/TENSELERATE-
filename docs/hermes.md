@@ -8,7 +8,7 @@ If you also run stock `ggml-org/llama.cpp`, use another port (this box uses **:8
 
 1. NVIDIA driver (13.x UMD is OK).
 2. CUDA **12.8** toolkit at `/usr/local/cuda-12.8`. Not 12.4. Not 13.x toolkit.
-3. Clone, `cmake --preset deploy-cmp170hx`, build `llama-server`.
+3. `git clone https://github.com/mintoriakamoto/TENSELERATE.git` then `bash install.sh`.
 4. `bash scripts/fetch-model.sh` then `bash scripts/boot-cmp170hx.sh` — exact GGUF `Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf`.
 5. Hermes `~/.hermes/config.yaml`:
 
