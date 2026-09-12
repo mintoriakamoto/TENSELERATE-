@@ -538,7 +538,7 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
             ngram_match=args.ngram_match,
             cache_ram_mib=args.cache_ram, cache_idle_slots=not args.no_cache_idle_slots,
             slot_similarity=args.slot_similarity, slot_save_path=args.slot_save_path,
-            backend_sampling=args.backend_sampling)
+            backend_sampling=args.backend_sampling, extra=args.extra)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -653,6 +653,10 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    choices=REASONING_LEVELS,
                    help="llamacpp backend: Qwen3.8 reasoning_effort "
                         f"({DEFAULT_REASONING}; fewer thinking tokens)")
+    p.add_argument("--extra", action="append", default=[], metavar="ARG",
+                   help="llamacpp backend: append a raw llama-server argument "
+                        "(repeatable). Diagnostic escape hatch - e.g. --extra -v to "
+                        "turn on the ggml debug log. Not for production launches")
     p.add_argument("--backend-sampling", action="store_true",
                    help="llamacpp backend: sample on the GPU (-bs) instead of copying "
                         "the logit row over PCIe; worth most on a narrow link with a "

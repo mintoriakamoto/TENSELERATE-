@@ -338,3 +338,13 @@ def test_cli_backend_sampling_flag():
     assert rc == 0 and " -bs " in out
     rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--dry-run"])
     assert rc == 0 and " -bs " not in out
+
+
+def test_extra_appends_raw_llama_server_args():
+    # Diagnostic escape hatch: -v turns on ggml's debug log, which is the only way to see
+    # "CUDA graph warmup reset". Absent unless asked for, so production launches are unchanged.
+    assert "-v" not in build_llama_server_argv(MODEL)
+    a = build_llama_server_argv(MODEL, extra=["-v"])
+    assert a[-1] == "-v"
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--extra=-v", "--dry-run"])
+    assert rc == 0 and " -v\n" in out          # last flag on the command line

@@ -19,6 +19,8 @@
 #   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
 #                    (predicted to lose) vs the ngram-mod replay drafter at depth
 #                    8 and 15, on a rewrite workload and on a code control
+#   graph_thrash     are CUDA graphs alive under speculation? ggml keys its graph cache
+#                    on a pointer, and a width change resets the warmup to direct execution
 #   backend_sampling -bs (sample on the GPU) vs the host copy: a 248,320-float logit
 #                    row over PCIe Gen2 x4, twice per verify step at MTP depth 1
 #   tree_gate        is the MTP head shallow, or is a linear draft betting on one branch?
@@ -61,7 +63,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling graph_thrash"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -440,6 +442,54 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Are CUDA graphs alive during speculation, or is every step re-launching ~1000 kernels?
+#
+# ggml keys its CUDA graph cache on `cgraph->nodes[0]` - a POINTER, not a shape
+# (ggml_cuda_graph_get_key). Every batch width therefore lands in the same cache slot.
+# ggml_cuda_graph_update_required then memcmp's every node's ne/nb and source pointers
+# against the previous step, and on any difference ggml_backend_cuda_graph_compute does
+# this:
+#
+#     if (properties_changed) { graph->warmup_complete = false; }   // execute directly
+#
+# so a shape change does not merely update the graph - it drops to direct execution AND
+# resets the warmup, which needs two consecutive stable calls to re-enter. A workload whose
+# batch width alternates never gets two in a row and runs permanently un-graphed.
+#
+# Decode submits draft+1 tokens. MTP depth 1 is always 2, constant. `ngram-mod` with
+# n-min 4 / n-max 8 emits 4..8 tokens on a hit and nothing on a miss, so the width walks
+# 1, 5, 6, 7, 8, 9 - a different shape most steps. The n-gram configuration recommended
+# earlier in this repo may therefore be paying for its free tokens in launch overhead, and
+# nobody has looked.
+#
+# The "CUDA graphs reused = 247, not disabled" row in README.md was taken WITHOUT
+# speculation, where the width is constant at 1. It says nothing about this.
+#
+# ~1000 kernels per token (64 layers, 48 of them GDN) at a few microseconds of dispatch
+# each is the right order of magnitude for the ~11.4 ms of the 29.9 ms step that the
+# two-regime decomposition has never accounted for.
+#
+# Pre-registered, counting log lines per generated token at -v:
+#   CONFIRMS  "CUDA graph warmup reset" appears at a rate near one per step under
+#             ngram+MTP and not under MTP alone. Graph thrash is real; the fix is a
+#             constant-width draft (pad to a fixed column count - free, since MMQ is flat
+#             from N=2 to N=16) rather than a wider one.
+#   REFUTES   resets are rare in every arm. Graphs are alive, the residual is elsewhere,
+#             and kernel-work.md item 3's nsys profile is the next step instead.
+exp_graph_thrash() {
+    local how="production args at -v; count 'CUDA graph warmup reset' and 'CUDA Graph id' lines per generated token in the server log"
+    measure_config "graph_thrash-nospec" "no speculation: constant width 1" "$how" \
+        "baseline: the 247-reused row was taken here" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 0 --sampling greedy --extra=-v -- --loop-check || true
+    measure_config "graph_thrash-mtp1" "MTP depth 1: constant width 2" "$how" \
+        "prediction: as stable as no-spec, because draft+1 does not vary" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 1 --sampling greedy --extra=-v -- --loop-check || true
+    measure_config "graph_thrash-ngram" "ngram-mod 8 ahead of MTP 1: width walks 1,5..9" "$how" \
+        "prediction: warmup resets near one per step; if so the n-gram win is partly cancelled by launch overhead" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 1 --ngram-draft 8 --ngram-min 4 --sampling greedy --extra=-v -- --loop-check || true
+    log "graph_thrash: grep -c 'warmup reset' and 'Graph id' in the server logs and divide by tokens generated. One reset per step means graphs are off."
+}
+
 # Does sampling on the GPU pay on a 2 GB/s link with a 248,320-token vocabulary?
 #
 # llama.cpp samples on the host by default: the logit row is copied device-to-host every
