@@ -40,12 +40,12 @@ Default GGUF: [`Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q
 
 **Build** (`cmake --preset deploy-cmp170hx`): `FORCE_MMQ=ON` · `FORCE_CUBLAS=OFF` · `DISABLE_DP4A=ON` · `sm_80-real` · nvcc 12.8
 
-**Boot:** `GGML_CUDA_MMVQ_MAX=3` · `-c 262144 -np 8 -kvu` · MTP `--spec-draft-n-max 4` · q8_0 · `-b 8192 -ub 2048` · `--temp 0`
+**Boot:** `GGML_CUDA_MMVQ_MAX=32` · `-c 262144 -np 8 -kvu` · MTP `--spec-draft-n-max 4` · q8_0 · `-b 8192 -ub 2048` · `--temp 0`
 
-Do **not** set `GGML_CUDA_NO_MMVQ=1` for one operator (that is ~34 tok/s). Width ≥4 still goes to MMQ via `MMVQ_MAX=3`.
+Do **not** set `GGML_CUDA_NO_MMVQ=1` for one operator (that is ~34 tok/s). At `MMVQ_MAX=32` every width up to 32 stays on the dp4a vector path and only wider batches reach MMQ — the cap is raised from ggml's 8 by this fork (`mmvq.cuh`), and widths past 8 are new kernel instantiations that upstream never tuned. The ~60 tok/s row below was measured at `MMVQ_MAX=3`; 32 is not yet measured.
 
 - Hermes: `http://127.0.0.1:8083/v1` — [docs/hermes.md](docs/hermes.md)
-- Hercules: `NP=8 CTX=262144 PORT=8083 MMVQ_MAX=3 MTP=4 bash scripts/hercules_serve.sh "$MODEL"` — [HERCULES.md](HERCULES.md)
+- Hercules: `NP=8 CTX=262144 PORT=8083 MMVQ_MAX=32 MTP=4 bash scripts/hercules_serve.sh "$MODEL"` — [HERCULES.md](HERCULES.md)
 - Numbers: [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md) · [CHANGELOG.md](CHANGELOG.md) · [releases](https://github.com/mintoriakamoto/TENSELERATE/releases/latest)
 
 ## What this fork adds (SVMI and friends)
@@ -80,7 +80,7 @@ What's in this branch (all opt-in, off by default):
 | **All-integer CUDA build** — every matmul on MMQ, no cuBLAS FP16 GEMM, dp4a emulated via prmt+dp2a; CI-built for sm_70/80/86 | `cmake --preset cmp170hx-int8` (also `cmp90hx-int8`, `cmp100-210-int8`) |
 | Update channel — `main` auto-publishes `main-b<N>-<sha>` releases; this is the client that checks and applies them, with or without a git clone | `scripts/tenselerate-update.sh` |
 | **GQA-packed vector attention** — quantized-KV decode reads each K/V byte once per KV head instead of once per Q head; auto above 32K KV | `GGML_CUDA_FATTN_VEC_GQA=-1\|0\|1` |
-| **MMVQ width cap** — production is `GGML_CUDA_MMVQ_MAX=3` (1-stream MMVQ ~60 t/s; 4+ slots MMQ). `NO_MMVQ=1` forces MMQ at all widths and is **not** for a single operator. | `GGML_CUDA_MMVQ_MAX=3` |
+| **MMVQ width cap** — the vector-path ceiling is raised from ggml's 8 to 32, so widths 9-32 have their own kernel instantiations. Production default is 32; the ~60 t/s single-stream row was measured at 3. `NO_MMVQ=1` forces MMQ at all widths and is **not** for a single operator. | `GGML_CUDA_MMVQ_MAX=0..32` |
 | **K-cache mean centering** — per-(head,channel) bias subtracted before Q4_0 K quantization; softmax-invariant, better fidelity | `--kv-mean-center FILE`, `tools/kv-mean-center` |
 | **Agent serving flags** — RAM prompt cache, idle-slot caching, LCP slot selection, slot save/restore, `--reasoning-effort`, MTP draft with sampling guards; one launch builder emits them | `tenselerate boot`, `scripts/hercules_serve.sh`, `scripts/hercules_slots.sh` |
 

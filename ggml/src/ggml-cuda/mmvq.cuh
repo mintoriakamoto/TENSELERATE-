@@ -1,6 +1,11 @@
 #include "common.cuh"
 
-#define MMVQ_MAX_BATCH_SIZE 8 // Max. batch size for which to use MMVQ kernels.
+// TENSELERATE: raised from upstream's 8 so GGML_CUDA_MMVQ_MAX can keep batches up to 32
+// on the dp4a vector path. Each width is a separate kernel instantiation (see the switch
+// in mmvq.cu), so this costs compile time and binary size, and the per-thread accumulator
+// float tmp[ncols_dst][rows_per_cuda_block] plus the shared tmp_shared[] both scale
+// linearly in the width - expect register pressure above the widths upstream tuned for.
+#define MMVQ_MAX_BATCH_SIZE 32 // Max. batch size for which to use MMVQ kernels.
 
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11);
 

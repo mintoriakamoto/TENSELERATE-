@@ -178,8 +178,11 @@ def test_matmul_routing_is_environment_not_argv():
     assert env_prefix(mmvq_max=1) == {"GGML_CUDA_MMVQ_MAX": "1"}
     assert env_prefix(no_mmvq=True, mmvq_max=1) == {"GGML_CUDA_NO_MMVQ": "1"}  # no_mmvq wins
     assert llama_server_command(MODEL, mmvq_max=1).startswith("GGML_CUDA_MMVQ_MAX=1 ")
+    # the cap is ggml's MMVQ_MAX_BATCH_SIZE, raised to 32 in this fork: 32 is the widest
+    # batch with a kernel instantiation, and anything past it has no `case` to dispatch to.
+    assert env_prefix(mmvq_max=32) == {"GGML_CUDA_MMVQ_MAX": "32"}
     with pytest.raises(ValueError, match="mmvq_max"):
-        env_prefix(mmvq_max=9)
+        env_prefix(mmvq_max=33)
 
 
 def test_device_pin_is_environment_for_the_3060_side_server():
@@ -212,8 +215,11 @@ def test_cli_mmvq_max_flag():
     rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
                    "--mmvq-max", "1", "--dry-run"])
     assert rc == 0 and out.startswith("$ GGML_CUDA_MMVQ_MAX=1 ")
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mmvq-max", "32", "--dry-run"])
+    assert rc == 0 and out.startswith("$ GGML_CUDA_MMVQ_MAX=32 ")
     rc, _ = run(["serve", "--backend", "llamacpp", "--model", MODEL,
-                 "--mmvq-max", "12", "--dry-run"])
+                 "--mmvq-max", "33", "--dry-run"])
     assert rc == 2
 
 

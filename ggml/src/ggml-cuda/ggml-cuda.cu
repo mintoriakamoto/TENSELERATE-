@@ -1899,7 +1899,9 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
             if (dst->ne[2] <= get_mmvq_mmid_max_batch(src0->type, cc)) {
                 return false;
             }
-        } else if (GGML_CUDA_CC_IS_AMD(cc)) {
+        // TENSELERATE: mirrors the bound added to the mul_mat_vec_f branch in
+        // ggml_cuda_mul_mat_id - this predicate must agree with that dispatch.
+        } else if (GGML_CUDA_CC_IS_AMD(cc) && dst->ne[2] <= MMVF_MAX_BATCH_SIZE) {
             return false;
         }
     }
@@ -1929,7 +1931,9 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
+        // TENSELERATE: MMVQ_MAX_BATCH_SIZE is raised past MMVF's, so the two are no longer
+        // equal. The gate below is MMVQ's; the MMVF branch inside it carries its own bound.
+        static_assert(MMVQ_MAX_BATCH_SIZE >= MMVF_MAX_BATCH_SIZE);
         if (ne2 <= MMVQ_MAX_BATCH_SIZE) {
             if (ggml_is_quantized(src0->type)) {
                 int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
@@ -1941,7 +1945,9 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
                     return;
                 }
             } else {
-                if (GGML_CUDA_CC_IS_AMD(cc)) {
+                // TENSELERATE: the enclosing gate is MMVQ's (now 32); mul_mat_vec_f only has
+                // kernels up to MMVF_MAX_BATCH_SIZE, so bound this branch by its own constant.
+                if (GGML_CUDA_CC_IS_AMD(cc) && ne2 <= MMVF_MAX_BATCH_SIZE) {
                     ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
                     return;
                 }

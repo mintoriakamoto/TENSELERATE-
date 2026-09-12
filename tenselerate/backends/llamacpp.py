@@ -99,7 +99,7 @@ SAMPLING_ARGV: dict[str, tuple[str, ...]] = {
 SAMPLING_MODES = tuple(SAMPLING_ARGV)
 DEFAULT_SAMPLING = "greedy"  # measured: the draft head only pays under greedy (46.2 vs 29.9 tok/s)
 MAX_MTP_DRAFT = 8
-MMVQ_MAX_BATCH = 8           # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
+MMVQ_MAX_BATCH = 32          # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
 
 # n-gram drafting (`ngram-mod`), off by default.
 #
