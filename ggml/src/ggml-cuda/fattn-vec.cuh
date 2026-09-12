@@ -586,6 +586,11 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
         if constexpr (type_K != GGML_TYPE_F16 && type_K != GGML_TYPE_BF16 && D >= 128) {
             switch (ggml_cuda_fattn_vec_gqa_cols(dst)) {
                 case 8: ggml_cuda_flash_attn_ext_vec_case_impl<D, 8, type_K, type_V, false, true>(ctx, dst); return;
+                // TENSELERATE: 6 is not a power of two but it is this model's GQA ratio
+                // (n_head 24 / n_head_kv 4). An exact fit reads K/V once per block with no
+                // idle lanes, where 8 would waste two columns of registers per block and 2
+                // would read every K/V byte three times.
+                case 6: ggml_cuda_flash_attn_ext_vec_case_impl<D, 6, type_K, type_V, false, true>(ctx, dst); return;
                 case 4: ggml_cuda_flash_attn_ext_vec_case_impl<D, 4, type_K, type_V, false, true>(ctx, dst); return;
                 case 2: ggml_cuda_flash_attn_ext_vec_case_impl<D, 2, type_K, type_V, false, true>(ctx, dst); return;
                 default: break;

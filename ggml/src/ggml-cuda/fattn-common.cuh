@@ -1019,16 +1019,23 @@ static inline int ggml_cuda_fattn_vec_gqa_cols(const ggml_tensor * dst) {
         // the SMs. Auto-on only where the read dominates; GGML_CUDA_FATTN_VEC_GQA=1 forces it.
         return 0;
     }
-    if (gqa_ratio % 8 == 0) {
-        return 8;
+    // TENSELERATE: pick the SMALLEST instantiated width that holds the whole ratio, rather
+    // than the largest power-of-two that divides it. The point of packing is to read and
+    // dequantize each K/V tile once; the kernel tiles the ratio as
+    // ceil(gqa_ratio / ncols) (ntiles_z_gqa) and masks the leftover columns (col_ok), so a
+    // width that does not divide the ratio is already correct - it just costs idle lanes.
+    // The divisor rule was leaving amortization on the table whenever the ratio was not a
+    // power of two: ratio 6 took the %2 rung and read every K/V byte three times, where one
+    // block of 6 reads it once. Widths are those the switch in fattn-vec.cuh instantiates.
+    static const int instantiated[] = { 2, 4, 6, 8 };
+    for (size_t i = 0; i < sizeof(instantiated)/sizeof(instantiated[0]); ++i) {
+        if (gqa_ratio <= instantiated[i]) {
+            return instantiated[i];
+        }
     }
-    if (gqa_ratio % 4 == 0) {
-        return 4;
-    }
-    if (gqa_ratio % 2 == 0) {
-        return 2;
-    }
-    return 0;
+    // Past the widest instantiation the ratio needs several tiles, so take the widest: it
+    // is the fewest passes over K/V, and an exact divisor only saves idle lanes, not reads.
+    return 8;
 }
 
 template <int DV, int ncols1, int ncols2>

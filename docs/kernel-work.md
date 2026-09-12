@@ -12,9 +12,16 @@ Q heads sharing one K/V head at a single token, so K/V are read and
 dequantized once per block; `launch_fattn<D, 1, ncols2>` supplies the
 (sequence, K/V head, gqa tile) grid the MMA kernel already uses. The host gate
 `ggml_cuda_fattn_vec_gqa_cols` (fattn-common.cuh) turns it on for quantized
-K/V, one query token, a mask, no sinks, no ALiBi, D >= 128, GQA ratio even,
+K/V, one query token, a mask, no sinks, no ALiBi, D >= 128, GQA ratio >= 2,
 and KV length >= 32768 (`GGML_CUDA_FATTN_VEC_GQA=1` forces it at any depth, `=0`
-disables; the auto threshold was raised from 4096 until the A/B is measured). Before trusting a number:
+disables; the auto threshold was raised from 4096 until the A/B is measured).
+
+The width the gate returns is the **smallest instantiated `ncols2` that holds the
+whole ratio** (2, 4, 6 or 8), not the largest power-of-two that divides it. The
+divisor rule sent this model's ratio of 6 to width 2 - three passes over K/V,
+a third of the amortization the whole item is for - even though the kernel tiles
+as `ceil(gqa_ratio / ncols2)` and masks leftover columns, so a non-dividing width
+was always correct. `ncols2 = 6` is instantiated for the exact fit. Before trusting a number:
 
 ```
 GGML_CUDA_FATTN_VEC_GQA=1 build/bin/test-backend-ops -o FLASH_ATTN_EXT -b CUDA0   # correctness vs CPU
@@ -163,11 +170,14 @@ benches/cmp170hx-3060/run-open-items.sh`. Four cells: `q8_0`/`q4_0` x
 not in any single cell - if the gap does not improve when the packing is on, the dequant
 was never the binding term, no codec will help, and this item closes.
 
-**Note on 1's packing factor.** `ggml_cuda_fattn_vec_gqa_cols` returns 8, 4 or 2; this
-model's ratio of 6 takes the `% 2` rung, so it packs 2 of 6 heads and the dequant divides
-by 2, not 6. Item 1's own prediction is optimistic by about that factor, and this item
-inherits it. A `% 3` rung (or a direct `ncols2 = 6`) is what makes the budget whole, and
-is worth adding before grading the codec rather than after.
+**Note on 1's packing factor (fixed).** The width ladder used to return the largest
+power-of-two that *divided* the ratio, so this model's 6 took the `% 2` rung: 2 of 6 heads
+per block, every K/V byte read three times, a third of the amortization this item depends
+on. That was a selection bug, not a kernel limit - the kernel tiles the ratio as
+`ceil(gqa_ratio / ncols)` and masks the leftover columns, so a width that does not divide
+the ratio was always correct. The ladder now returns the smallest instantiated width that
+*holds* the ratio, and `ncols2 = 6` is instantiated, so 6 packs in one block with no idle
+lanes. Grade the codec against that, not against the old behaviour.
 
 ## Order
 
