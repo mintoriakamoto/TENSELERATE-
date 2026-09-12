@@ -19,6 +19,8 @@
 #   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
 #                    (predicted to lose) vs the ngram-mod replay drafter at depth
 #                    8 and 15, on a rewrite workload and on a code control
+#   tree_gate        is the MTP head shallow, or is a linear draft betting on one branch?
+#                    Logs conditional per-position acceptance; decides the tree drafter.
 #   kv_codec_gate    whether a heavier KV codec is affordable at all: q4_0 vs q8_0
 #                    at depth, with the packed vector kernel off and on. Decides
 #                    one thing before any codec work starts - see docs/kernel-work.md
@@ -57,7 +59,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -436,6 +438,49 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Is the MTP head shallow, or is a linear draft just betting on one branch?
+#
+# The depth sweep (n-max 1 +35%, 3 -15%, 5 -22%) was read as "the head is shallow:
+# position 1 accepts reliably, positions 2+ do not". That reading is confounded. A linear
+# draft asks the head to predict position 2 given ITS OWN position-1 guess, and that guess
+# is wrong ~12% of the time at 0.881 acceptance. When it is wrong, position 2 cannot be
+# accepted however good the head is. The sweep fused two questions and blamed the first:
+#   (1) can the head predict position 2 at all?
+#   (2) did position 1 happen to be right?
+#
+# The server now logs both, so this run separates them. "acc per pos" is unconditional -
+# position i counted only when everything before it was accepted. "acc given prev" is
+# n_accepted_per_pos[i] / n_accepted_per_pos[i-1], which is P(i accepted | i-1 accepted):
+# the head's real position-2 skill with the branch-luck divided out.
+#
+# Why it matters beyond the reading: MMQ is flat at ~55 ms from N=2 to N=16, so one weight
+# read serves sixteen columns at no extra cost, and depth-1 MTP uses two of them. If the
+# head can predict position 2 when position 1 is right, a tree draft (top-k at position 1,
+# expanded and verified in one batch behind a tree mask) turns the other fourteen free
+# columns into accepted tokens. If it cannot, no tree helps and the existing reading stands.
+#
+# Pre-registered. Mean accepted length today is 1.88 at 46.2 tok/s.
+#   CONFIRMS  acc given prev at position 2 is >= 0.7. The head is not the problem; the
+#             linear draft is. Build the tree drafter (docs/tree-speculation.md).
+#   REFUTES   acc given prev at position 2 is <= 0.3. The head really is shallow, a tree
+#             covers branches that were never going to be accepted anyway, and this line
+#             closes. Between 0.3 and 0.7 is a real answer too - it sets how wide the
+#             position-1 fan has to be before the tree pays, so record it rather than
+#             rerunning until it lands somewhere convenient.
+# Depth 2 is the cheapest shape that produces the number; depth 3 shows whether the
+# conditional rate holds up or decays, which is what sets usable tree depth.
+exp_tree_gate() {
+    local d
+    for d in 2 3; do
+        measure_config "tree_gate-d$d" \
+            "MTP draft depth $d, greedy: conditional per-position acceptance" \
+            "production args, --mtp-draft $d --sampling greedy; read 'acc given prev' from the server log" \
+            "prediction: acc given prev at position 2 >= 0.7 if the depth failure is branch luck, <= 0.3 if the head is shallow" \
+            -- "${PROD_ARGS[@]}" --mtp-draft "$d" --sampling greedy -- --loop-check || true
+    done
+    log "tree_gate: the number that decides this is 'acc given prev', NOT 'acc per pos'. The first position of 'acc given prev' is position 2 given position 1."
+}
+
 # Is a heavier KV codec affordable at all? One question, four cells, answered before
 # any codec kernel is written.
 #
