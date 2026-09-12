@@ -116,9 +116,65 @@ summed time of kernels under 20 us. If the sum of the small kernels is not
 several ms, this whole section is wrong and the residual is somewhere else
 (the attention path, the MTP verify columns, or a host-side gap).
 
+## 4. A heavier KV codec, paid for by the packing in 1 (more resident context, same VRAM)
+
+**Status: gated. `EXPERIMENTS=kv_codec_gate` decides whether to build it; no kernel yet
+and none should be written until that run reports.**
+
+**The inversion.** `q4_0` KV is 18 KiB/token against `q8_0`'s 34, and still measures
+**-8%/token at depth**. The bench README records that as "the dequant costs more than the
+bytes save", which is true but incomplete: on the vec path the dequant is paid **once per
+query head** and the bytes are saved **once**. With `gqa_ratio` 6 the saving is counted
+once against a cost counted six times. That is the same accounting behind the 51 ms KV
+term in 1 - it is not a fact about `q4_0`, it is a fact about the kernel.
+
+Item 1 divides the dequant term and leaves the byte term whole. So the packing is not only
+a bandwidth fix; it is a **budget**. A codec that is several times more expensive to decode
+than `q8_0` is unaffordable today and roughly free once each K/V tile is decoded once per
+block instead of once per query head. The heavier the codec, the more the amortization is
+worth - the opposite of the usual direction.
+
+**What it buys, in this box's units.** 16 of 64 layers carry KV
+(`full_attention_interval` 4). At `q8_0` that is 9.1 GB per 262K slot, so roughly three
+deep slots fit the free VRAM. At an effective ~2.5 bits it is about 3 GB per slot, so
+roughly nine. Same card, same weights: **the eight-slot configuration at a true 256K each
+instead of a shared pool split eight ways.** That is the whole point - not tokens per
+second, tokens *resident*.
+
+**Why it is not free elsewhere.** On silicon whose MMA path already batches GQA, nobody
+pays the per-query-head dequant, so nobody has this budget to spend and the trade looks
+unattractive. This card is on the vec path *because* the KV is quantized - quantizing KV
+selects the kernel that punishes quantized KV. Item 1 breaks that loop, and what is left
+over is the thing to spend.
+
+**Composes with what is already here.** `--kv-mean-center` subtracts a per-(head,channel)
+bias before `Q4_0` K quantization and is softmax-invariant - it exists to buy back exactly
+the fidelity an aggressive K codec gives up. It has no measured row either; it should be
+graded in the same sitting.
+
+**Change (only if the gate confirms).** A codebook/grouped codec for K and V decoded once
+per block into shared memory inside the packed vec kernel from 1, dispatched on the same
+predicate (`ggml_is_quantized(K->type) && Q->ne[1] == 1 && gqa_opt_applies`). Correctness
+against CPU via `test-backend-ops -o FLASH_ATTN_EXT` before any timing, as in 1.
+
+**Prove before writing:** `EXPERIMENTS=kv_codec_gate MODEL=... bash
+benches/cmp170hx-3060/run-open-items.sh`. Four cells: `q8_0`/`q4_0` x
+`GGML_CUDA_FATTN_VEC_GQA` 0/1. The claim lives in the **gap between the two KV types**,
+not in any single cell - if the gap does not improve when the packing is on, the dequant
+was never the binding term, no codec will help, and this item closes.
+
+**Note on 1's packing factor.** `ggml_cuda_fattn_vec_gqa_cols` returns 8, 4 or 2; this
+model's ratio of 6 takes the `% 2` rung, so it packs 2 of 6 heads and the dequant divides
+by 2, not 6. Item 1's own prediction is optimistic by about that factor, and this item
+inherits it. A `% 3` rung (or a direct `ncols2 = 6`) is what makes the budget whole, and
+is worth adding before grading the codec rather than after.
+
 ## Order
 
 The profile in 3 first: it is one command and it decides whether the
 single-stream residual is launches (fuse), or something else. Then 2: it
 changes what the retrained head is worth and has a measured harness (the
-NO_MMVQ sweep). 1 is written; its A/B is on the open-items list.
+NO_MMVQ sweep). 1 is written; its A/B is on the open-items list. 4 is gated
+behind 1's A/B and behind its own `kv_codec_gate` run - it is the largest
+prize here and the one most likely to be closed by a single measurement, so
+it is cheap to settle and expensive to assume.

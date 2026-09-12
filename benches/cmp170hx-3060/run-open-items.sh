@@ -19,6 +19,10 @@
 #   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
 #                    (predicted to lose) vs the ngram-mod replay drafter at depth
 #                    8 and 15, on a rewrite workload and on a code control
+#   kv_codec_gate    whether a heavier KV codec is affordable at all: q4_0 vs q8_0
+#                    at depth, with the packed vector kernel off and on. Decides
+#                    one thing before any codec work starts - see docs/kernel-work.md
+#                    item 4. Refutation is pre-registered in the function.
 #
 # Env: MODEL (required) LLAMA_SERVER (binary; default tenselerate's) PORT (8089)
 #      LLAMA_BENCH (llama-bench binary; default next to LLAMA_SERVER or build/bin)
@@ -53,7 +57,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -432,6 +436,44 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Is a heavier KV codec affordable at all? One question, four cells, answered before
+# any codec kernel is written.
+#
+# The claim under test: on the vec path the KV dequant is paid once per QUERY head,
+# not once per KV head. This model has gqa_ratio 6 (n_head 24 / n_head_kv 4), so the
+# same bytes are decoded six times per token - the 51 ms KV term at 262K against ~11 ms
+# of actual bytes. If that is right, it explains why q4_0 halves the KV bytes and still
+# measures -8%/token at depth: the saving is counted once and the dequant six times.
+#
+# The packed vector kernel (GGML_CUDA_FATTN_VEC_GQA) dequantizes each K/V tile once per
+# block and reuses it across the packed query heads. That divides the dequant term while
+# leaving the byte term whole - so it should move q4_0 relative to q8_0, not just move
+# both. A codec that is Nx more expensive to decode than q8_0 is affordable only if that
+# division is real, which is the whole reason to run this before building one.
+#
+# Pre-registered. q4_0 is 18 KiB/token against q8_0's 34, and today measures -8% at depth.
+#   CONFIRMS  the q4_0-vs-q8_0 gap with GQA=1 is better than the gap with GQA=0, i.e. the
+#             dequant term shrank. Heavier codecs get cheaper the more they are amortized,
+#             and kernel-work.md item 4 is worth building.
+#   REFUTES   the gap is unchanged or worse with GQA=1. The dequant was never the binding
+#             term, every byte saved is paid back in something else, and no codec - 4-bit,
+#             2-bit or codebook - will help. Close item 4 and do not write the kernel.
+# Note the refutation does not depend on GQA=1 being faster in absolute terms: it is the
+# GAP BETWEEN THE TWO KV TYPES that carries the claim. Record all four numbers.
+exp_kv_codec_gate() {
+    local blog="$LOGS/kv_codec_gate-$(ts).log" depth="${KV_GATE_DEPTH:-131072}" kv gqa r
+    for kv in q8_0 q4_0; do
+        for gqa in 0 1; do
+            r=$(run_bench "kvgate-$kv-gqa$gqa" "$blog" "GGML_CUDA_FATTN_VEC_GQA=$gqa" "$MODEL" \
+                    -p "$depth" -n 32 -r 1 -ctk "$kv" -ctv "$kv") || return 1
+            add_row "llama-bench tg32 at ${depth} depth, $kv KV, packed attention $([ "$gqa" = 1 ] && echo ON || echo OFF)" \
+                "$r" "$(bench_bin) -p $depth -n 32 -r 1 -ctk $kv -ctv $kv, GGML_CUDA_FATTN_VEC_GQA=$gqa" \
+                "cell $kv/GQA=$gqa. What decides item 4 is (q4_0 - q8_0) at GQA=1 versus the same gap at GQA=0, not any single cell"
+        done
+    done
+    log "kv_codec_gate: compare the two GAPS, not the four cells. Gap improves -> build the codec; gap flat or worse -> close docs/kernel-work.md item 4."
+}
+
 exp_bench_ab() {
     local blog="$LOGS/bench_ab-$(ts).log" r
     r=$(run_bench "new-gqa0" "$blog" "GGML_CUDA_FATTN_VEC_GQA=0" "$MODEL" -p 512 -n 64 -r 3) || return 1
