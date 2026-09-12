@@ -157,6 +157,7 @@ def build_llama_server_argv(
     cache_idle_slots: bool = True,
     slot_similarity: float = DEFAULT_SLOT_SIMILARITY,
     slot_save_path: str | None = None,
+    backend_sampling: bool = False,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -229,6 +230,15 @@ def build_llama_server_argv(
         "--slot-prompt-similarity", f"{slot_similarity:g}",
         "--reasoning-effort", reasoning,
     ]
+    if backend_sampling:
+        # `-bs`: sample on the GPU instead of copying the logit row to the host. The row
+        # is vocab_size floats - 248,320 on this model, ~0.99 MB - and this box's link is
+        # PCIe Gen2 x4 at ~2 GB/s, so the copy is ~0.6 ms per sampled position where an
+        # x16 Gen4 machine would spend ~30 us and never notice. llama.cpp turns it back
+        # off by itself for a grammar or a reasoning budget (common/sampling.cpp), so a
+        # tool-call request with a grammar silently keeps the host path: check the server
+        # log for "backend sampling is not compatible" before reading any A/B.
+        argv += ["-bs"]
     if slot_save_path is not None:
         if not slot_save_path:
             raise ValueError("slot_save_path must be a directory path")

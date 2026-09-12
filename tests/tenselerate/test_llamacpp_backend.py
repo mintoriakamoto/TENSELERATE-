@@ -322,3 +322,19 @@ def test_cli_ngram_flags_reach_the_launch():
     assert rc == 0
     assert "--spec-type ngram-mod" in out
     assert "--spec-ngram-mod-n-max 8 --spec-ngram-mod-n-min 2" in out
+
+
+def test_backend_sampling_is_opt_in_and_emits_bs():
+    # The logit row is vocab_size floats (248,320 on this model, ~0.99 MB) and this box's
+    # link is PCIe Gen2 x4. Sampling on the GPU skips that copy - but it is off by default
+    # in llama.cpp and must be asked for, so the launch has to emit the flag explicitly.
+    assert "-bs" not in build_llama_server_argv(MODEL)
+    assert "-bs" in build_llama_server_argv(MODEL, backend_sampling=True)
+
+
+def test_cli_backend_sampling_flag():
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--backend-sampling", "--dry-run"])
+    assert rc == 0 and " -bs " in out
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--dry-run"])
+    assert rc == 0 and " -bs " not in out

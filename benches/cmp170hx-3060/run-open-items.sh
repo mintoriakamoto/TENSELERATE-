@@ -19,6 +19,8 @@
 #   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
 #                    (predicted to lose) vs the ngram-mod replay drafter at depth
 #                    8 and 15, on a rewrite workload and on a code control
+#   backend_sampling -bs (sample on the GPU) vs the host copy: a 248,320-float logit
+#                    row over PCIe Gen2 x4, twice per verify step at MTP depth 1
 #   tree_gate        is the MTP head shallow, or is a linear draft betting on one branch?
 #                    Logs conditional per-position acceptance; decides the tree drafter.
 #   kv_codec_gate    whether a heavier KV codec is affordable at all: q4_0 vs q8_0
@@ -59,7 +61,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -438,6 +440,41 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Does sampling on the GPU pay on a 2 GB/s link with a 248,320-token vocabulary?
+#
+# llama.cpp samples on the host by default: the logit row is copied device-to-host every
+# sampled position. That row is vocab_size floats - this model's vocabulary is 248,320, so
+# ~0.99 MB - and this box's link is PCIe Gen2 x4 at ~2 GB/s. That is ~0.6 ms per sampled
+# position, and under MTP depth 1 there are two positions per verify step. An x16 Gen4
+# machine moves the same row in ~30 us and nobody has ever had a reason to care, which is
+# why `-bs` is still marked experimental and off by default upstream. The product of an
+# unusually large vocabulary and an unusually narrow link is what makes it worth a run here.
+#
+# It is also a blocking copy, so the cost is not only bytes: the sync each step can break
+# CUDA-graph replay batching. That part cannot be predicted from the file, only measured.
+#
+# Pre-registered. Greedy MTP depth 1 is 46.2 tok/s.
+#   CONFIRMS  -bs is faster. Size the win against ~0.6 ms/position: a gain far larger than
+#             ~1.2 ms per step means the sync, not the bytes, was the cost - which is a
+#             more interesting result and worth a profile.
+#   REFUTES   -bs is equal or slower. The copy was already overlapped, and this closes.
+# Read the server log before trusting either number: llama.cpp silently disables backend
+# sampling for a grammar or a reasoning budget ("backend sampling is not compatible"), and
+# Hermes tool calls use grammars. A run whose log carries that line measured nothing.
+exp_backend_sampling() {
+    measure_config "backend_sampling-off" \
+        "greedy MTP depth 1, host sampling (default)" \
+        "production args, --sampling greedy" \
+        "baseline: 46.2 tok/s measured" \
+        -- "${PROD_ARGS[@]}" --sampling greedy -- --loop-check || true
+    measure_config "backend_sampling-on" \
+        "greedy MTP depth 1, GPU sampling (-bs)" \
+        "same, --backend-sampling" \
+        "prediction: +0.6 ms/position of PCIe saved, ~1.2 ms/step under depth 1; check the log for the grammar/reasoning-budget disable line" \
+        -- "${PROD_ARGS[@]}" --sampling greedy --backend-sampling -- --loop-check || true
+    log "backend_sampling: grep the server log for 'backend sampling is not compatible' - if it is there, the ON run silently used the host path and measured nothing."
+}
+
 # Is the MTP head shallow, or is a linear draft just betting on one branch?
 #
 # The depth sweep (n-max 1 +35%, 3 -15%, 5 -22%) was read as "the head is shallow:
