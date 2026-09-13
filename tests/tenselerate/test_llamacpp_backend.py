@@ -178,8 +178,11 @@ def test_matmul_routing_is_environment_not_argv():
     assert env_prefix(mmvq_max=1) == {"GGML_CUDA_MMVQ_MAX": "1"}
     assert env_prefix(no_mmvq=True, mmvq_max=1) == {"GGML_CUDA_NO_MMVQ": "1"}  # no_mmvq wins
     assert llama_server_command(MODEL, mmvq_max=1).startswith("GGML_CUDA_MMVQ_MAX=1 ")
+    # the cap is ggml's MMVQ_MAX_BATCH_SIZE, raised to 32 in this fork: 32 is the widest
+    # batch with a kernel instantiation, and anything past it has no `case` to dispatch to.
+    assert env_prefix(mmvq_max=32) == {"GGML_CUDA_MMVQ_MAX": "32"}
     with pytest.raises(ValueError, match="mmvq_max"):
-        env_prefix(mmvq_max=9)
+        env_prefix(mmvq_max=33)
 
 
 def test_device_pin_is_environment_for_the_3060_side_server():
@@ -212,8 +215,11 @@ def test_cli_mmvq_max_flag():
     rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
                    "--mmvq-max", "1", "--dry-run"])
     assert rc == 0 and out.startswith("$ GGML_CUDA_MMVQ_MAX=1 ")
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mmvq-max", "32", "--dry-run"])
+    assert rc == 0 and out.startswith("$ GGML_CUDA_MMVQ_MAX=32 ")
     rc, _ = run(["serve", "--backend", "llamacpp", "--model", MODEL,
-                 "--mmvq-max", "12", "--dry-run"])
+                 "--mmvq-max", "33", "--dry-run"])
     assert rc == 2
 
 
@@ -253,37 +259,109 @@ def test_cli_boot_can_bring_up_the_llamacpp_backend():
     assert "--kv-unified" in out
 
 
-def test_env_prefix_attn_window():
-    from tenselerate.backends.llamacpp import env_prefix
-    assert env_prefix(attn_window=65536) == {"LLAMA_ATTN_WINDOW": "65536"}
-    assert env_prefix(attn_window=32768, attn_sinks=36000) == {
-        "LLAMA_ATTN_WINDOW": "32768", "LLAMA_ATTN_SINKS": "36000"}
-    assert "LLAMA_ATTN_WINDOW" not in env_prefix()
-    with pytest.raises(ValueError):
-        env_prefix(attn_window=0)
-    with pytest.raises(ValueError):
-        env_prefix(attn_sinks=4)          # sinks without a window
+def test_ngram_drafting_is_off_by_default_and_ordered_before_the_mtp_head():
+    # The MTP depth sweep measured the head as shallow, not broken: n-max 1 is
+    # +35%, n-max 3 is -15%, n-max 5 is -22%. So width cannot come from a deeper
+    # MTP draft. ngram-mod is a different source - it replays a run already in
+    # the context and runs no model - so it can be deep without paying for
+    # columns that will not be accepted.
+    assert not any(x.startswith("--spec-ngram") for x in argv())
+
+    mtp = "/models/Qwen3.8-27B-TurboFCFusion-MTP-Q4_K_M.gguf"
+    a = build_llama_server_argv(mtp, ngram_draft=8)
+    # order is load-bearing: common_speculative takes the FIRST implementation
+    # that returns a non-empty draft and never concatenates, so ngram-mod must
+    # precede draft-mtp or the always-drafting MTP head silences it entirely
+    assert after(a, "--spec-type") == "ngram-mod,draft-mtp"
+    assert after(a, "--spec-ngram-mod-n-max") == "8"
+    assert after(a, "--spec-draft-n-max") == "1"     # the measured optimum, untouched
+
+    # ngram-mod alone, on a GGUF with no MTP head
+    b = argv(ngram_draft=4)
+    assert after(b, "--spec-type") == "ngram-mod"
+    assert not any(x.startswith("--spec-draft") for x in b)
 
 
-def test_attn_window_relaxes_the_pool_floor_to_slots_x_window():
-    from tenselerate.backends.llamacpp import build_llama_server_argv
-    # without a window the pool must hold one locked 256K window
-    with pytest.raises(ValueError):
-        build_llama_server_argv(MODEL, ctx_pool=32768 * 4, slots=4)
-    # with a window the pool is sequence capacity: slots x window is the floor
-    argv = build_llama_server_argv(MODEL, ctx_pool=32768 * 4, slots=4, attn_window=32768)
-    assert "-np 4" in " ".join(argv) and "-c 131072" in " ".join(argv)
-    with pytest.raises(ValueError):
-        build_llama_server_argv(MODEL, ctx_pool=32768 * 3, slots=4, attn_window=32768)
+def test_ngram_min_defaults_below_the_depth_because_llama_cpps_own_default_drafts_nothing():
+    # llama.cpp defaults n_min 48 against n_max 64. ngram-mod discards the whole
+    # draft when the replay ends before n_min, so inheriting 48 under a depth-8
+    # draft would silently never draft: every request falls through to the MTP
+    # path and the only symptom is a speedup that never arrives.
+    assert after(argv(ngram_draft=8), "--spec-ngram-mod-n-min") == "4"
+    assert after(argv(ngram_draft=2), "--spec-ngram-mod-n-min") == "2"   # clamped to the depth
+    assert after(argv(ngram_draft=8, ngram_min=1), "--spec-ngram-mod-n-min") == "1"
+    with pytest.raises(ValueError, match="ngram_min"):
+        argv(ngram_draft=8, ngram_min=48)
+    with pytest.raises(ValueError, match="ngram_min"):
+        argv(ngram_draft=8, ngram_min=0)
+    with pytest.raises(ValueError, match="ngram_draft is None"):
+        argv(ngram_min=4)
 
 
-def test_cli_attn_window_flags():
-    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
-                   "--attn-window", "65536", "--attn-sinks", "36000",
-                   "--slots", "9", "--ctx-pool", str(65536 * 9), "--dry-run"])
+def test_ngram_depth_is_bounded_by_the_flat_mmq_region():
+    # The width sweep measured MMQ flat at ~55 ms from N=2 to N=16, which is why
+    # draft columns inside that region are close to free. Past it each column is
+    # paid, so a depth that pushes 1 + n_max over 16 is refused rather than
+    # quietly turning a speed knob into a slowdown.
+    assert after(argv(ngram_draft=15), "--spec-ngram-mod-n-max") == "15"
+    with pytest.raises(ValueError, match="ngram_draft"):
+        argv(ngram_draft=16)
+    with pytest.raises(ValueError, match="ngram_draft"):
+        argv(ngram_draft=0)
+    with pytest.raises(ValueError, match="ngram_match"):
+        argv(ngram_draft=8, ngram_match=0)
+    assert after(argv(ngram_draft=8), "--spec-ngram-mod-n-match") == "24"
+
+
+def test_cli_ngram_flags_reach_the_launch():
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--ngram-draft", "8", "--ngram-min", "2", "--dry-run"])
+    out = buf.getvalue()
     assert rc == 0
-    assert out.startswith("$ LLAMA_ATTN_WINDOW=65536 LLAMA_ATTN_SINKS=36000 ")
-    assert "-np 9" in out
-    rc, _ = run(["serve", "--backend", "llamacpp", "--model", MODEL,
-                 "--attn-window", "0", "--dry-run"])
-    assert rc == 2
+    assert "--spec-type ngram-mod" in out
+    assert "--spec-ngram-mod-n-max 8 --spec-ngram-mod-n-min 2" in out
+
+
+def test_backend_sampling_is_opt_in_and_emits_bs():
+    # The logit row is vocab_size floats (248,320 on this model, ~0.99 MB) and this box's
+    # link is PCIe Gen2 x4. Sampling on the GPU skips that copy - but it is off by default
+    # in llama.cpp and must be asked for, so the launch has to emit the flag explicitly.
+    assert "-bs" not in build_llama_server_argv(MODEL)
+    assert "-bs" in build_llama_server_argv(MODEL, backend_sampling=True)
+
+
+def test_cli_backend_sampling_flag():
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--backend-sampling", "--dry-run"])
+    assert rc == 0 and " -bs " in out
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--dry-run"])
+    assert rc == 0 and " -bs " not in out
+
+
+def test_extra_appends_raw_llama_server_args():
+    # Diagnostic escape hatch: -v turns on ggml's debug log, which is the only way to see
+    # "CUDA graph warmup reset". Absent unless asked for, so production launches are unchanged.
+    assert "-v" not in build_llama_server_argv(MODEL)
+    a = build_llama_server_argv(MODEL, extra=["-v"])
+    assert a[-1] == "-v"
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--extra=-v", "--dry-run"])
+    assert rc == 0 and " -v\n" in out          # last flag on the command line
+
+
+def test_synth_len_is_bounded_by_the_draft_depth():
+    # --spec-synth-len is an instrument: it accepts draft tokens at the rate whose mean
+    # accepted length is L, with the drafter bypassed. A step that drafts d tokens can
+    # accept at most d + 1 including the target's own token, so L past that is meaningless
+    # and llama.cpp would reject it at startup - catch it in the launch builder instead.
+    a = build_llama_server_argv(MODEL, mtp_draft=3, synth_len=2.5)
+    assert after(a, "--spec-synth-len") == "2.5"
+    assert "--spec-synth-len" not in build_llama_server_argv(MODEL, mtp_draft=3)
+    with pytest.raises(ValueError, match="synth_len"):
+        build_llama_server_argv(MODEL, mtp_draft=1, synth_len=9)
+    with pytest.raises(ValueError, match="synth_len"):
+        build_llama_server_argv(MODEL, mtp_draft=1, synth_len=0.5)
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mtp-draft", "3", "--synth-len", "2", "--dry-run"])
+    assert rc == 0 and "--spec-synth-len 2" in out

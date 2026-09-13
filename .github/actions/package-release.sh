@@ -21,7 +21,7 @@ if [ -f build-kernels/libtenselerate_int8_gemm_c.so ]; then
 fi
 cp -r tenselerate "$STAGE/tenselerate"
 find "$STAGE/tenselerate" -name '__pycache__' -type d -prune -exec rm -rf {} +
-cp scripts/tenselerate-update.sh scripts/tenselerate-build.sh scripts/hercules_serve.sh scripts/hercules_side_serve.sh scripts/hercules_slots.sh "$STAGE/scripts/"
+cp scripts/tenselerate-update.sh scripts/tenselerate-build.sh scripts/hercules_serve.sh scripts/hercules_slots.sh "$STAGE/scripts/"
 cp HERCULES.md "$STAGE/"
 mkdir -p "$STAGE/docs" "$STAGE/benches"
 cp docs/rig-cmp170hx-3060.md docs/tenselerate-engine.md "$STAGE/docs/"

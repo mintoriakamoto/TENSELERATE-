@@ -77,7 +77,7 @@ def publishes(changed: list[str]) -> bool:
 # publishing, the updater serves a binary that does not contain it.
 @pytest.mark.parametrize("path", [
     "src/llama-model.cpp",
-    "src/tenselerate-attn-window.cpp",
+    "src/tenselerate-kv-mean-center.cpp",
     "ggml/src/ggml-cuda/mmvq.cu",
     "ggml/src/ggml-cuda/fattn-vec.cuh",
     "common/arg.cpp",
@@ -86,7 +86,7 @@ def publishes(changed: list[str]) -> bool:
     "tenselerate/csrc/int8_gemm.cu",
     "CMakeLists.txt",
     "cmake/build-info.cmake",
-    "tests/test-attn-window.cpp",
+    "tests/test-seq-fork.cpp",
     ".github/workflows/release.yml",
     ".github/actions/package-release.sh",
     "scripts/build-info.sh",
@@ -133,3 +133,98 @@ def test_scripts_are_not_ignored_wholesale():
     # a blanket 'scripts/**' would be wrong; only named files may be ignored
     assert not any(p in ("scripts/**", "scripts/*", "tests/**")
                    for p in ignore_patterns())
+
+
+# --------------------------------------------------------------------------
+# The published binary's build configuration.
+#
+# Two properties of the CUDA build are load-bearing on this box and neither is
+# visible in the tarball's name, so they are pinned here rather than left to a
+# reviewer to notice:
+#
+#   CUDA 12.8.1  the runtime is linked statically, so the toolkit the release
+#                container carries IS the runtime that executes on the cards.
+#                A bare "12.8" tag would float across patch levels.
+#   FORCE_MMQ    without it ggml_cuda_should_use_mmq() falls through to cuBLAS
+#                once the batch is wide enough (sm_80 has fp16 mma), so prefill
+#                and other wide-batch matmuls leave the int8 MMQ path and pay a
+#                dequant to fp16. This is a routing change, not a measured win:
+#                the number belongs in benches/cmp170hx-3060/README.md.
+#
+# CI must compile against the same toolkit or it is not a pre-merge proxy for
+# what ships, so the engine workflow is held to the same image.
+ENGINE = ROOT / ".github" / "workflows" / "tenselerate-engine.yml"
+CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu24.04"
+
+
+def test_release_builds_cuda_12_8_1_with_forced_mmq():
+    body = RELEASE.read_text()
+    assert f"container: {CUDA_IMAGE}" in body, "release.yml must pin the CUDA patch level"
+    assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "the published binary must force the MMQ path"
+    assert "-DGGML_CUDA_DISABLE_DP4A=ON" in body, \
+        "the 170HX dispatches dp4a ~16x slow; the dp2a emulation must be compiled in"
+    # the flags are worthless if they never reach the artifact, so the build asserts
+    # on llama-cli's own feature line
+    assert "for feat in FORCE_MMQ DISABLE_DP4A" in body, \
+        "release.yml must verify both flags in the built binary"
+
+
+def test_release_targets_only_the_card_the_box_has():
+    # The 3060 is gone: one CMP 170HX, sm_80. Building 86-real as well costs
+    # build time and binary size for silicon nobody here owns, and - worse - a
+    # fat binary invites the dp4a emulation question back, since that flag is a
+    # global define that is right for a CMP card and wrong for a consumer one.
+    body = RELEASE.read_text()
+    assert 'CUDA_ARCHS: "80-real"' in body, "the release must build sm_80 only"
+    assert "86-real" not in body, "sm_86 is silicon this box no longer has"
+    assert "3060" not in body, "the release workflow should not describe a card that is gone"
+
+
+def test_the_prune_keep_rule_still_matches_the_older_dual_card_assets():
+    # The asset was renamed sm80-86 -> sm80 when the second card left. The keep
+    # rule is a substring and `sm80` is a prefix of `sm80-86`, so the releases
+    # built before the rename are still recognised. If that ever stops being
+    # true the prune would classify eleven good releases as disposable.
+    prune = (ROOT / "scripts" / "prune-releases.sh").read_text()
+    assert 'FORK_ASSET="${FORK_ASSET:-bin-ubuntu-cuda-12.8-sm80}"' in prune
+    legacy = "tenselerate-main-b11094-x-bin-ubuntu-cuda-12.8-sm80-86-x64.tar.gz"
+    assert "bin-ubuntu-cuda-12.8-sm80" in legacy, "sanity: the prefix must match the old name"
+    assert legacy in prune, "the self-test fixture must keep exercising a legacy asset name"
+
+
+def test_ci_compiles_against_the_same_toolkit_as_the_release():
+    body = ENGINE.read_text()
+    assert f"container: {CUDA_IMAGE}" in body, "CI must compile against the release toolkit"
+    assert "-DGGML_CUDA_FORCE_MMQ=ON" in body, "CI must compile the same MMQ routing as the release"
+    assert "-DGGML_CUDA_DISABLE_DP4A=ON" in body, "CI must compile the same dp4a emulation"
+    assert "86-real" not in body, "CI must not build for a card this box no longer has"
+
+
+def test_no_workflow_uses_the_env_context_in_container():
+    # `jobs.<id>.container` has no access to the env context: a workflow-level
+    # `env:` there does not interpolate, the file fails to parse, and the run
+    # dies with zero jobs and the file path as its name. Caught the hard way.
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        body = wf.read_text()
+        for i, line in enumerate(body.splitlines(), 1):
+            if line.lstrip().startswith("container:") and "env." in line:
+                raise AssertionError(
+                    f"{wf.name}:{i} uses the env context in `container:`, which "
+                    f"does not parse: {line.strip()}")
+
+
+def test_the_option_the_workflows_pass_actually_exists():
+    # a renamed upstream option would make both workflows silently no-ops
+    opts = (ROOT / "ggml" / "CMakeLists.txt").read_text()
+    assert re.search(r"^option\(GGML_CUDA_FORCE_MMQ\b", opts, re.M), \
+        "GGML_CUDA_FORCE_MMQ is not an option in ggml/CMakeLists.txt any more"
+    cuda_cmake = (ROOT / "ggml" / "src" / "ggml-cuda" / "CMakeLists.txt").read_text()
+    assert "add_compile_definitions(GGML_CUDA_FORCE_MMQ)" in cuda_cmake, \
+        "the option no longer turns into a compile definition"
+    # the fork's own dp4a option, and the one line that makes it observable
+    assert re.search(r"^option\(GGML_CUDA_DISABLE_DP4A\b", opts, re.M), \
+        "the fork's GGML_CUDA_DISABLE_DP4A option is gone"
+    assert "add_compile_definitions(GGML_CUDA_DISABLE_DP4A)" in cuda_cmake
+    ggml_cuda = (ROOT / "ggml" / "src" / "ggml-cuda" / "ggml-cuda.cu").read_text()
+    assert 'features.push_back({ "DISABLE_DP4A", "1" })' in ggml_cuda, \
+        "DISABLE_DP4A must stay in the reported features or the build cannot verify it"

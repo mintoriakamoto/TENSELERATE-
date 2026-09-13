@@ -18,10 +18,8 @@ supported model — it is never loadable from a GGUF file.
 
 The reference engine is designed around a 1,000,000-token context floor
 (MIN_CONTEXT_TOKENS). That is a design decision, not a measured capability: the
-served llama.cpp path caps a sequence at the 262,144-token trained range unless
-the opt-in bounded window (`--attn-window`) is set, and recall past the window
-has not been measured (docs/bounded-window-serving.md). The floor has one
-unavoidable engineering consequence:
+served llama.cpp path caps a sequence at the 262,144-token trained range, the
+model's rotary limit. The floor has one unavoidable engineering consequence:
 1M is far beyond this model's trained rotary range (262,144), so serving it with
 *full* attention would require RoPE scaling (YaRN), which we do not do. The only
 way to have both is the hybrid window:

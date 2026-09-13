@@ -674,11 +674,35 @@ struct server_slot {
                 }
             }
 
+            // TENSELERATE: the per-position rates above are unconditional - position i is
+            // counted only when every position before it was also accepted, so a low value
+            // cannot tell "the drafter cannot predict position i" apart from "position i-1
+            // happened to be wrong". Those are different problems with different fixes: the
+            // first says the draft head is shallow, the second says a linear draft bets on
+            // one branch and a tree would not. Dividing consecutive counts separates them.
+            std::string acceptance_rates_conditional;
+            for (size_t i = 1; i < n_accepted_per_pos.size(); ++i) {
+                if (i > 1) {
+                    acceptance_rates_conditional += ", ";
+                }
+                if (n_accepted_per_pos[i - 1] > 0) {
+                    acceptance_rates_conditional += string_format("%.3f",
+                            (double) n_accepted_per_pos[i] / (double) n_accepted_per_pos[i - 1]);
+                } else {
+                    acceptance_rates_conditional += "n/a";
+                }
+            }
+
             SLT_INF(*this,
                     "draft acceptance = %0.5f (%5d accepted / %5d generated), mean len = %5.2f\n",
                     draft_ratio, n_draft_accepted, n_draft_total, mean_acc_len);
-            SLT_TRC(*this,
+            SLT_INF(*this,
                     "     acc per pos = (%s)\n", acceptance_rates_per_pos.c_str());
+            if (!acceptance_rates_conditional.empty()) {
+                SLT_INF(*this,
+                        "  acc given prev = (%s)  <- P(position i accepted | i-1 accepted)\n",
+                        acceptance_rates_conditional.c_str());
+            }
         }
 
         common_speculative_print_stats(spec);
@@ -1260,7 +1284,7 @@ private:
             const int n_ctx_capped = params_base.kv_unified_per_slot > 0 ?
                 std::min(n_ctx_seq, params_base.kv_unified_per_slot) : n_ctx_seq;
 
-            if (n_ctx_capped > n_ctx_train && getenv("LLAMA_ATTN_WINDOW") == nullptr) {
+            if (n_ctx_capped > n_ctx_train) {
                 SRV_WRN("the slot context (%d) exceeds the training context of the model (%d) - capping\n",
                         n_ctx_capped, n_ctx_train);
             }
@@ -1596,7 +1620,7 @@ private:
         // whole context (including the GDN memory of everything that has fallen
         // out of the attention window) in one decode step instead of a prompt
         // cache load or a full prefill. Falls back to normal selection whenever
-        // the fork is not applicable. See docs/bounded-window-serving.md.
+        // the fork is not applicable.
         if (task.id_fork_src >= 0) {
             server_slot * src = get_slot_by_id(task.id_fork_src);
 
@@ -4195,13 +4219,6 @@ private:
 
         if (params_base.kv_unified_per_slot > 0) {
             res = std::min(res, params_base.kv_unified_per_slot);
-        }
-
-        // TENSELERATE: with LLAMA_ATTN_WINDOW the attention layers see at most
-        // n_swa tokens and the recurrent layers have no positions, so a sequence
-        // may run past the training context without extrapolating anything
-        if (getenv("LLAMA_ATTN_WINDOW") != nullptr) {
-            return res;
         }
 
         return std::min(res, llama_model_n_ctx_train(model_tgt));

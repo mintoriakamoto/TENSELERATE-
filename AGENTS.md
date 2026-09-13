@@ -29,9 +29,21 @@ python3 -m pytest tests/tenselerate -q          # ~5 s
 flake8 tenselerate tests/tenselerate            # CI enforces flake8 and ty
 ```
 
-CUDA: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80;86"`. CI compiles the
-CUDA backend for sm_80 on every PR; there is no GPU in CI, so kernel changes
-are proven on the box with the release binary.
+CUDA: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80;86"
+-DGGML_CUDA_FORCE_MMQ=ON -DGGML_CUDA_DISABLE_DP4A=ON`, built against **CUDA 12.8.1** - the release links the
+CUDA runtime statically, so the toolkit that builds it is the one that runs on
+the cards, and the patch level is pinned (`CUDA_IMAGE` in both workflows, held
+by `tests/tenselerate/test_release_triggers.py`). `FORCE_MMQ` keeps quantized
+matmuls on the int8 MMQ path instead of falling through to cuBLAS once the
+batch is wide; the release build asserts it reached the binary by grepping
+`llama-cli --version`. `DISABLE_DP4A` swaps `__dp4a` for a `prmt`+`dp2a`
+emulation: the CMP 170HX dispatches dp4a about 16x slower than regular silicon,
+so the fork's own kernel comment records ~2x end-to-end decode from the swap. It
+is the fork's option, it is reported in `--version` by a one-line
+`TENSELERATE` hook so the build can assert it, and it would be the wrong flag on
+a non-CMP card. CI compiles the CUDA backend for sm_80 on every PR
+against the same image; there is no GPU in CI, so kernel changes are proven on
+the box with the release binary.
 
 Tests that matter for the fork's own code: `test-recurrent-state-rollback*`
 (GDN rollback, the MTP verify crop), `test-kv-mean-center`,

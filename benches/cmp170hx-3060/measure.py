@@ -75,8 +75,32 @@ PROMPTS = {
         "loads a 16 GB model slowly but can still decode quickly once the weights are "
         "resident, and what that implies for restarting a model server often."
     ),
+    # The agent edit loop, and the only shape where an n-gram drafter can show
+    # what it is for: the answer is mostly a verbatim replay of text already in
+    # the context. json/code/prose all generate text that never appeared in the
+    # prompt, so ngram-mod must MISS on them - which is what makes them the
+    # control. Not in DEFAULT_SHAPES: it would change every existing row.
+    "rewrite": (
+        "Here is a module.\n\n```python\n"
+        "def parse_kv(text: str) -> dict[str, str]:\n"
+        '    """Parse \'key=value\' lines into a dict."""\n'
+        "    out: dict[str, str] = {}\n"
+        "    for line in text.splitlines():\n"
+        "        line = line.strip()\n"
+        "        if not line or line.startswith('#'):\n"
+        "            continue\n"
+        "        if '=' not in line:\n"
+        "            raise ValueError(f'no = in line: {line!r}')\n"
+        "        key, _, value = line.partition('=')\n"
+        "        out[key.strip()] = value.strip()\n"
+        "    return out\n"
+        "```\n\n"
+        "Re-emit the module exactly as given, changing only the ValueError message to "
+        "read 'malformed line: {line!r}'. Code only, no explanation, no diff."
+    ),
 }
 SHAPES = tuple(PROMPTS)
+DEFAULT_SHAPES = ("json", "code", "prose")   # the three the README's rows were measured on
 
 _ADJ = ("quiet", "red", "narrow", "old", "bright", "cold", "long", "small", "heavy", "late")
 _NOUN = ("harbour", "ledger", "engine", "valley", "kettle", "bridge", "orchard", "signal",
@@ -238,8 +262,18 @@ def run_shapes(a: argparse.Namespace, sampling: dict) -> list[dict]:
 
 def run_concurrency(a: argparse.Namespace, sampling: dict) -> list[dict]:
     k = a.concurrency
-    prefixes = [synthetic_prompt(a.base_url, a.prefix_tokens, f"-s{j}", a.timeout)[0] for j in range(k)]
-    shapes = [a.shapes[j % len(a.shapes)] for j in range(k)]
+    # Distinct prefixes by default: that isolates width from prompt-cache sharing, which is
+    # what the width sweep wanted. --swarm does the opposite on purpose - one prefix and one
+    # shape for every stream, the Hermes delegation shape (children off a shared system
+    # prompt, doing the same kind of work). The ngram-mod container is shared across all
+    # sequences (see common/speculative.cpp), so correlated streams can draft for each other;
+    # distinct prefixes give it nothing to share and hide the effect entirely.
+    if a.swarm:
+        prefixes = [synthetic_prompt(a.base_url, a.prefix_tokens, "-swarm", a.timeout)[0]] * k
+        shapes = [a.shapes[0]] * k
+    else:
+        prefixes = [synthetic_prompt(a.base_url, a.prefix_tokens, f"-s{j}", a.timeout)[0] for j in range(k)]
+        shapes = [a.shapes[j % len(a.shapes)] for j in range(k)]
     contents = [prefixes[j] + "Now, unrelated to the register above:\n\n" + PROMPTS[shapes[j]]
                 for j in range(k)]
 
@@ -360,8 +394,8 @@ class _Stub(BaseHTTPRequestHandler):
 
 
 def _ns(**kw) -> argparse.Namespace:
-    base = dict(base_url=DEFAULT_BASE, model="stub", n=1, shapes=list(SHAPES), max_tokens=64,
-                send_sampling=None, concurrency=0, prefix_tokens=200, prefill_tokens=0,
+    base = dict(base_url=DEFAULT_BASE, model="stub", n=1, shapes=list(DEFAULT_SHAPES), max_tokens=64,
+                send_sampling=None, concurrency=0, swarm=False, prefix_tokens=200, prefill_tokens=0,
                 slot_size=262144, loop_check=True, timeout=10.0, json_out=None)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -444,12 +478,17 @@ def main() -> int:
     ap.add_argument("--base-url", default=DEFAULT_BASE)
     ap.add_argument("--model", default="tenselerate", help="the server's --alias")
     ap.add_argument("--n", type=int, default=3, help="requests per shape (or per depth run)")
-    ap.add_argument("--shapes", default=",".join(SHAPES), help="comma list of json,code,prose")
+    ap.add_argument("--shapes", default=",".join(DEFAULT_SHAPES),
+                    help=f"comma list of {','.join(SHAPES)} (default: {','.join(DEFAULT_SHAPES)})")
     ap.add_argument("--max-tokens", type=int, default=400)
     ap.add_argument("--send-sampling", default=None,
                     help="client-side override, e.g. temp=0.7,rp=1.15[,top_p=..,top_k=..,min_p=..]; "
                          "default sends none, so the server's request defaults apply")
     ap.add_argument("--concurrency", type=int, default=0, help="fire K requests at once on K slots")
+    ap.add_argument("--swarm", action="store_true",
+                    help="with --concurrency: every stream shares one prefix and one shape "
+                         "(the delegation shape), so the shared ngram container can draft "
+                         "one stream from another. Default is distinct prefixes")
     ap.add_argument("--prefix-tokens", type=int, default=1500,
                     help="--concurrency: distinct synthetic prefix per stream, in tokens")
     ap.add_argument("--prefill-tokens", type=int, default=0,

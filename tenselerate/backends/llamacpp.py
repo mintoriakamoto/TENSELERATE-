@@ -99,7 +99,34 @@ SAMPLING_ARGV: dict[str, tuple[str, ...]] = {
 SAMPLING_MODES = tuple(SAMPLING_ARGV)
 DEFAULT_SAMPLING = "greedy"  # measured: the draft head only pays under greedy (46.2 vs 29.9 tok/s)
 MAX_MTP_DRAFT = 8
-MMVQ_MAX_BATCH = 8           # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
+MMVQ_MAX_BATCH = 32          # ggml's MMVQ_MAX_BATCH_SIZE; GGML_CUDA_MMVQ_MAX clamps to it
+
+# n-gram drafting (`ngram-mod`), off by default.
+#
+# Why this is not the same bet as a deeper MTP draft. The depth sweep measured
+# the head as shallow, not broken: position 1 accepts at 0.88, positions 2+ do
+# not, so n-max 1 is +35% and n-max 5 is -22%. Raising the MTP depth buys
+# columns that are very unlikely to be accepted, and a rejected draft column is
+# paid in full.
+#
+# `ngram-mod` drafts from a different source entirely: it hashes the last
+# `n_match` tokens of the live context and replays whatever followed that same
+# run earlier in the same context. It runs no model, so a miss costs a hash
+# lookup rather than a forward pass. On an agent loop - a file re-emitted with
+# one line changed, a diff quoted back, a tool result repeated - a hit is often
+# a long verbatim run, which is where the width sweep's flat MMQ region (55 ms
+# from N=2 to N=16) turns into free tokens.
+#
+# Ordering is load-bearing. common_speculative tries the implementations in the
+# order given and takes the FIRST one that returns a non-empty draft for that
+# sequence; drafts are never concatenated (common/speculative.cpp, the
+# `for (auto & impl : spec->impls)` loop that sets `impl_last`). So `ngram-mod`
+# must come before `draft-mtp`: the free drafter gets first refusal, and every
+# sequence it declines falls through to the measured depth-1 MTP path
+# unchanged. Reversing the order would silence ngram-mod entirely, because the
+# MTP head always produces a draft.
+DEFAULT_NGRAM_MATCH = 24     # llama.cpp's default context-suffix hash length
+MAX_NGRAM_DRAFT = 15         # keeps 1 + n_max inside the flat MMQ region (N<=16)
 
 
 def resolve_mtp_draft(model: str, mtp_draft: int | None) -> int:
@@ -122,12 +149,16 @@ def build_llama_server_argv(
     alias: str = DEFAULT_ALIAS,
     mtp_draft: int | None = DEFAULT_MTP_DRAFT,
     mtp_model: str | None = None,
+    ngram_draft: int | None = None,
+    ngram_min: int | None = None,
+    ngram_match: int = DEFAULT_NGRAM_MATCH,
     sampling: str = DEFAULT_SAMPLING,
     cache_ram_mib: int = DEFAULT_CACHE_RAM_MIB,
     cache_idle_slots: bool = True,
     slot_similarity: float = DEFAULT_SLOT_SIMILARITY,
     slot_save_path: str | None = None,
-    attn_window: int | None = None,
+    backend_sampling: bool = False,
+    synth_len: float | None = None,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -143,17 +174,10 @@ def build_llama_server_argv(
         raise ValueError(f"reasoning must be one of {REASONING_LEVELS}, got {reasoning!r}")
     if slots < 1:
         raise ValueError("slots must be >= 1")
-    if attn_window is not None and attn_window < 1:
-        raise ValueError("attn_window must be a positive token count")
-    if attn_window is None and ctx_pool < MIN_ATTENTION_WINDOW:
+    if ctx_pool < MIN_ATTENTION_WINDOW:
         raise ValueError(
             f"ctx_pool {ctx_pool:,} cannot hold one locked {MIN_ATTENTION_WINDOW:,}-token "
             "window; the pool is shared by all slots but the main session must fit")
-    if attn_window is not None and ctx_pool < attn_window * slots:
-        raise ValueError(
-            f"ctx_pool {ctx_pool:,} is smaller than {slots} slots x the {attn_window:,}-token "
-            "attention window; with a bounded window the pool is the sequence capacity, "
-            "so make it at least slots x window (larger is free: only the window is KV)")
     if not alias:
         raise ValueError("alias must be a non-empty model id for the agent to address")
     if sampling not in SAMPLING_MODES:
@@ -171,6 +195,29 @@ def build_llama_server_argv(
         raise ValueError("mtp_model given but mtp_draft is 0; a sidecar head needs a draft depth")
     if not 0 <= mtp_draft <= MAX_MTP_DRAFT:
         raise ValueError(f"mtp_draft must be 0 (off) .. {MAX_MTP_DRAFT}, got {mtp_draft}")
+    if ngram_draft is not None:
+        if not 1 <= ngram_draft <= MAX_NGRAM_DRAFT:
+            raise ValueError(
+                f"ngram_draft must be 1 .. {MAX_NGRAM_DRAFT} (or None for off), got "
+                f"{ngram_draft}; past {MAX_NGRAM_DRAFT} the verify batch leaves the "
+                "flat MMQ region and every extra column is paid in full")
+        # llama.cpp's own default is n_min 48 against n_max 64. Carried into a
+        # short draft it is a trap: ngram-mod discards the WHOLE draft when the
+        # replayed run ends before n_min (common/speculative.cpp clears the
+        # result and returns), so n_min > n_max can never draft. It fails
+        # silently - every request falls through to the MTP path and the only
+        # symptom is that the speedup never arrives - so default it and refuse
+        # the impossible combination rather than emit it.
+        if ngram_min is None:
+            ngram_min = min(4, ngram_draft)
+        if not 1 <= ngram_min <= ngram_draft:
+            raise ValueError(
+                f"ngram_min must be 1 .. ngram_draft ({ngram_draft}), got {ngram_min}; "
+                "a minimum above the maximum discards every draft silently")
+        if ngram_match < 1:
+            raise ValueError("ngram_match must be a positive token count")
+    elif ngram_min is not None:
+        raise ValueError("ngram_min given but ngram_draft is None (n-gram drafting is off)")
     argv = [
         binary, "-m", model, "--alias", alias,
         "--host", host, "--port", str(port),
@@ -184,6 +231,25 @@ def build_llama_server_argv(
         "--slot-prompt-similarity", f"{slot_similarity:g}",
         "--reasoning-effort", reasoning,
     ]
+    if synth_len is not None:
+        # `--spec-synth-len L` solves for the per-position acceptance probability whose mean
+        # accepted length is exactly L, then accepts at that rate instead of consulting the
+        # drafter. A dial on acceptance with the drafter's own cost removed - which makes it
+        # an instrument, not a benchmark toy. Benchmarking only: output is not the model's.
+        n_max = mtp_draft if mtp_draft else 0
+        if not 1.0 <= synth_len <= n_max + 1.0:
+            raise ValueError(
+                f"synth_len must be in [1, {n_max + 1}] (1 + the draft depth), got {synth_len}")
+        argv += ["--spec-synth-len", f"{synth_len:g}"]
+    if backend_sampling:
+        # `-bs`: sample on the GPU instead of copying the logit row to the host. The row
+        # is vocab_size floats - 248,320 on this model, ~0.99 MB - and this box's link is
+        # PCIe Gen2 x4 at ~2 GB/s, so the copy is ~0.6 ms per sampled position where an
+        # x16 Gen4 machine would spend ~30 us and never notice. llama.cpp turns it back
+        # off by itself for a grammar or a reasoning budget (common/sampling.cpp), so a
+        # tool-call request with a grammar silently keeps the host path: check the server
+        # log for "backend sampling is not compatible" before reading any A/B.
+        argv += ["-bs"]
     if slot_save_path is not None:
         if not slot_save_path:
             raise ValueError("slot_save_path must be a directory path")
@@ -191,10 +257,21 @@ def build_llama_server_argv(
     # request-level defaults; the acceptance test is exact match against the
     # sampled token, so temperature and repeat penalty fight the draft head
     argv += list(SAMPLING_ARGV[sampling])
+    # ngram-mod first: it is tried first and only falls through to the MTP head
+    # when it has no run to replay, so the free drafter gets first refusal and
+    # the measured depth-1 path is untouched on a miss. See MAX_NGRAM_DRAFT.
+    spec_types = (["ngram-mod"] if ngram_draft is not None else []) + \
+                 (["draft-mtp"] if mtp_draft else [])
+    if spec_types:
+        argv += ["--spec-type", ",".join(spec_types)]
+    if ngram_draft is not None:
+        argv += ["--spec-ngram-mod-n-max", str(ngram_draft),
+                 "--spec-ngram-mod-n-min", str(ngram_min),
+                 "--spec-ngram-mod-n-match", str(ngram_match)]
     if mtp_draft:
         # the MTP head lives inside the -MTP- GGUF; -md only for a retrained
         # sidecar head exported by convert_hf_to_gguf.py --mtp (scripts/mtp-head-train.py)
-        argv += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft)]
+        argv += ["--spec-draft-n-max", str(mtp_draft)]
         if mtp_model is not None:
             argv += ["-md", mtp_model]
     argv += list(extra)
@@ -202,16 +279,8 @@ def build_llama_server_argv(
 
 
 def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
-               device: int | None = None, attn_window: int | None = None,
-               attn_sinks: int | None = None) -> dict[str, str]:
+               device: int | None = None) -> dict[str, str]:
     """
-    `attn_window=N` bounds the 16 full-attention layers to a sliding window of N
-    tokens (+ `attn_sinks` pinned leading positions, default 4) through this fork's
-    LLAMA_ATTN_WINDOW / LLAMA_ATTN_SINKS. The 48 Gated-DeltaNet layers carry the
-    long range with a fixed state, so the sequence is unbounded while KV per slot
-    is O(window): the lever for many slots at unbounded context
-    (docs/bounded-window-serving.md).
-
     The launch environment. `device=N` pins the server to one CUDA device
     (CUDA_VISIBLE_DEVICES=N, so `--main-gpu 0` inside the process is that card):
     the RTX 3060 side server for Hermes delegation children and the compaction
@@ -227,17 +296,7 @@ def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
         raise ValueError(f"mmvq_max must be 0..{MMVQ_MAX_BATCH}, got {mmvq_max}")
     if device is not None and device < 0:
         raise ValueError(f"device must be a CUDA device index >= 0, got {device}")
-    if attn_window is not None and attn_window < 1:
-        raise ValueError(f"attn_window must be a positive token count, got {attn_window}")
-    if attn_sinks is not None and attn_window is None:
-        raise ValueError("attn_sinks needs attn_window")
-    if attn_sinks is not None and attn_sinks < 0:
-        raise ValueError(f"attn_sinks must be >= 0, got {attn_sinks}")
     out: dict[str, str] = {}
-    if attn_window is not None:
-        out["LLAMA_ATTN_WINDOW"] = str(attn_window)
-        if attn_sinks is not None:
-            out["LLAMA_ATTN_SINKS"] = str(attn_sinks)
     if device is not None:
         out["CUDA_VISIBLE_DEVICES"] = str(device)
     if no_mmvq:
@@ -249,21 +308,17 @@ def env_prefix(*, no_mmvq: bool = False, mmvq_max: int | None = None,
 
 def llama_server_env(
     *, no_mmvq: bool = False, mmvq_max: int | None = None, device: int | None = None,
-    attn_window: int | None = None, attn_sinks: int | None = None,
     base: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """The environment for the launch: the caller's, plus device pin and routing flags."""
     env = dict(os.environ if base is None else base)
-    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device,
-                          attn_window=attn_window, attn_sinks=attn_sinks))
+    env.update(env_prefix(no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device))
     return env
 
 
 def llama_server_command(model: str, *, no_mmvq: bool = False, mmvq_max: int | None = None,
-                         device: int | None = None, attn_window: int | None = None,
-                         attn_sinks: int | None = None, **kw) -> str:
+                         device: int | None = None, **kw) -> str:
     """The launch as one copy-pasteable shell line, env prefix included."""
     prefix = "".join(f"{k}={v} " for k, v in env_prefix(
-        no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device,
-        attn_window=attn_window, attn_sinks=attn_sinks).items())
-    return prefix + " ".join(build_llama_server_argv(model, attn_window=attn_window, **kw))
+        no_mmvq=no_mmvq, mmvq_max=mmvq_max, device=device).items())
+    return prefix + " ".join(build_llama_server_argv(model, **kw))

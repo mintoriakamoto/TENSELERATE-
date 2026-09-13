@@ -198,8 +198,7 @@ def cmd_info(args: argparse.Namespace) -> int:
          "reference engine;")
     _out("                   the served llama-server path caps a sequence at the "
          "262,144 trained")
-    _out("                   range unless --attn-window is set, which makes "
-         "sequences unbounded)")
+    _out("                   range, the model's rotary limit)")
     _out(f"SPEED TARGET     : {MIN_DECODE_TOKS:,} tok/s aggregate (a target, not a "
          "measurement:")
     _out("                   measured on the 170HX 33.5 single stream, 70.5 at "
@@ -535,19 +534,20 @@ def _serve_llamacpp(args: argparse.Namespace) -> int:
             slots=args.slots, ctx_pool=args.ctx_pool, kv=args.kv,
             reasoning=args.reasoning, alias=args.alias, mtp_draft=args.mtp_draft,
             mtp_model=args.mtp_model, sampling=args.sampling,
+            ngram_draft=args.ngram_draft, ngram_min=args.ngram_min,
+            ngram_match=args.ngram_match,
             cache_ram_mib=args.cache_ram, cache_idle_slots=not args.no_cache_idle_slots,
             slot_similarity=args.slot_similarity, slot_save_path=args.slot_save_path,
-            attn_window=args.attn_window)
+            backend_sampling=args.backend_sampling, extra=args.extra,
+            synth_len=args.synth_len)
     except ValueError as e:
         _out(f"error: {e}")
         return 2
     try:
         env = llama_server_env(no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max,
-                               device=args.device, attn_window=args.attn_window,
-                               attn_sinks=args.attn_sinks)
+                               device=args.device)
         prefix = "".join(f"{k}={v} " for k, v in env_prefix(
-            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max, device=args.device,
-            attn_window=args.attn_window, attn_sinks=args.attn_sinks).items())
+            no_mmvq=args.no_mmvq, mmvq_max=args.mmvq_max, device=args.device).items())
     except ValueError as e:
         _out(f"error: {e}")
         return 2
@@ -629,8 +629,8 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     from tenselerate.backends.llamacpp import (
         DEFAULT_ALIAS, DEFAULT_CTX_POOL, DEFAULT_KV, DEFAULT_MTP_DRAFT,
         DEFAULT_CACHE_RAM_MIB, DEFAULT_REASONING, DEFAULT_SAMPLING,
-        DEFAULT_SLOT_SIMILARITY, DEFAULT_SLOTS, KV_TYPES, REASONING_LEVELS,
-        SAMPLING_MODES,
+        DEFAULT_SLOT_SIMILARITY, DEFAULT_SLOTS, DEFAULT_NGRAM_MATCH,
+        KV_TYPES, MAX_NGRAM_DRAFT, REASONING_LEVELS, SAMPLING_MODES,
     )
     p.add_argument("--backend", default="reference",
                    choices=("reference", "llamacpp", "vllm"),
@@ -654,6 +654,19 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    choices=REASONING_LEVELS,
                    help="llamacpp backend: Qwen3.8 reasoning_effort "
                         f"({DEFAULT_REASONING}; fewer thinking tokens)")
+    p.add_argument("--synth-len", type=float, default=None, metavar="L",
+                   help="llamacpp backend: BENCHMARKING ONLY. Accept draft tokens "
+                        "synthetically at the rate whose mean accepted length is L, "
+                        "bypassing the drafter. Output is not the model's; this is an "
+                        "instrument for separating step cost from drafter cost")
+    p.add_argument("--extra", action="append", default=[], metavar="ARG",
+                   help="llamacpp backend: append a raw llama-server argument "
+                        "(repeatable). Diagnostic escape hatch - e.g. --extra -v to "
+                        "turn on the ggml debug log. Not for production launches")
+    p.add_argument("--backend-sampling", action="store_true",
+                   help="llamacpp backend: sample on the GPU (-bs) instead of copying "
+                        "the logit row over PCIe; worth most on a narrow link with a "
+                        "large vocabulary. Off for grammars and reasoning budgets")
     p.add_argument("--no-mmvq", action="store_true",
                    help="llamacpp backend: set GGML_CUDA_NO_MMVQ=1 (force the "
                         "tensor-core MMQ path at every batch width)")
@@ -682,6 +695,20 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: a retrained MTP head GGUF served as a sidecar "
                         "(-md; scripts/mtp-head-train.py -> convert_hf_to_gguf.py --mtp); "
                         "defaults --mtp-draft to 3")
+    p.add_argument("--ngram-draft", type=int, default=None,
+                   help="llamacpp backend: n-gram draft depth (--spec-ngram-mod-n-max; "
+                        f"1..{MAX_NGRAM_DRAFT}, default off). Replays a run that already "
+                        "appeared in this context, so a hit is free tokens on re-emitted "
+                        "code and a miss is a hash lookup, not a forward pass. Tried "
+                        "before the MTP head; a miss falls through to it unchanged")
+    p.add_argument("--ngram-min", type=int, default=None,
+                   help="llamacpp backend: --spec-ngram-mod-n-min, the shortest replay "
+                        "worth drafting (default: min(4, --ngram-draft)). llama.cpp's own "
+                        "default of 48 exceeds any short draft depth and would discard "
+                        "every draft silently, so it is not inherited here")
+    p.add_argument("--ngram-match", type=int, default=DEFAULT_NGRAM_MATCH,
+                   help="llamacpp backend: --spec-ngram-mod-n-match, the context-suffix "
+                        f"length hashed to find the replay ({DEFAULT_NGRAM_MATCH})")
     p.add_argument("--sampling", default=DEFAULT_SAMPLING, choices=SAMPLING_MODES,
                    help="llamacpp backend: server-default sampling. greedy (default): "
                         "--temp 0 --repeat-penalty 1.0, the only sampling under which the "
@@ -692,17 +719,6 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
                    help="llamacpp backend: GGML_CUDA_MMVQ_MAX - widest batch kept on "
                         "the dp4a vector path (0..8); 1 keeps single-token decode "
                         "there and routes draft verification to MMQ tensor cores")
-    p.add_argument("--attn-window", type=int, default=None,
-                   help="llamacpp backend: bound the 16 full-attention layers to a "
-                        "sliding window of N tokens (LLAMA_ATTN_WINDOW). The GDN layers "
-                        "carry the long range, so sequences are unbounded and KV per slot "
-                        "is O(N): 65536 fits ~9 slots at q8_0 on the 40 GiB 170HX, 32768 "
-                        "~16 (docs/bounded-window-serving.md). Off by default")
-    p.add_argument("--attn-sinks", type=int, default=None,
-                   help="llamacpp backend: with --attn-window, leading positions pinned "
-                        "in attention forever (LLAMA_ATTN_SINKS, default 4). Set it to the "
-                        "system-prompt length to keep tools and instructions attendable at "
-                        "any depth")
     p.add_argument("--device", type=int, default=None,
                    help="llamacpp backend: pin the server to one CUDA device "
                         "(CUDA_VISIBLE_DEVICES); the RTX 3060 side server for "

@@ -411,6 +411,11 @@ ending it. `--sampling dry` / `--sampling low` are the two guards under test.
 
 ## Splitting the 27B across both cards - why it cannot be faster
 
+> Historical: the RTX 3060 has since been removed and this is now a single-card
+> box. The arithmetic below is kept because it is the reasoning that settled the
+> question, and because the same argument applies to any second card added later.
+
+
 A layer split runs the two cards *in sequence* for every token: the 170HX
 does its layers, ships one hidden state (10 KB) over PCIe Gen2 x4 (~50 us,
 negligible), then the 3060 does its layers. Per-token time is the sum, and
@@ -579,6 +584,35 @@ numbers): `docs/research-week-2026-09-07.md`, test plan at the end.
   read-once N-column kernel is worth ~3x on aggregate - `docs/kernel-readonce.md`)
   or 1x (it is latency-bound and that kernel wins nothing). Predictions are
   pre-registered in the script header; grade all four.
+- **draft width at temp 0** (`EXPERIMENTS=spec_depth MODEL=... bash benches/cmp170hx-3060/run-open-items.sh`,
+  ~20 min): the depth sweep says width cannot come from the MTP head (n-max 1
+  +35%, n-max 3 -15%, n-max 5 -22%: position 1 accepts at 0.88, positions 2+ do
+  not, and a rejected column is paid in full). `ngram-mod` is the other source -
+  it drafts by replaying a run already in the context, so it runs no model and a
+  miss is a hash lookup. Ordered ahead of `draft-mtp`, a miss falls through to
+  the measured depth-1 path unchanged. Two shapes: `rewrite` (verbatim replay,
+  where a hit turns the flat MMQ region into ~9 tokens per weight read) and
+  `code` (the control, where it must miss). Predictions are pre-registered in
+  the experiment; the two that can refute it are **code + ngram 8 below 42
+  tok/s** (the miss is not free, so ngram cannot be a default) and **code + MTP
+  8 above 46.2** (the shallow-head reading is wrong).
+- **`GGML_CUDA_FORCE_MMQ` + `GGML_CUDA_DISABLE_DP4A`, which now ship together
+  and must be graded together.** MMQ's inner loop IS `__dp4a`, and this card
+  dispatches dp4a ~16x slower than regular silicon, so forcing more work onto
+  the MMQ path without the dp2a emulation is plausibly a net loss - and with it,
+  plausibly the largest single win on the box (the kernel comment records ~2x
+  end-to-end decode from the emulation alone). Grade the pair, not each flag:
+  neither number means much without the other. Without the flag
+  `ggml_cuda_should_use_mmq()` returns `!fp16_mma_hardware_available(cc) ||
+  ne11 < MMQ_DP4A_MAX_BATCH_SIZE` on NVIDIA, and sm_80 has fp16 mma - so every
+  batch wider than that threshold was leaving the int8 MMQ path for cuBLAS and
+  paying a dequant to fp16. The flag pins those matmuls to MMQ. Note this is a
+  different axis from the fork's `GGML_CUDA_MMVQ_MAX`, which chooses MMVQ vs
+  MMQ for *narrow* batches; FORCE_MMQ chooses MMQ vs cuBLAS for *wide* ones.
+  So the rows to take are prefill (`llama-bench -p 4096`, against the measured
+  855.6 tok/s) and the width sweep at N=16/32 (against 122 / 134), on binaries
+  with the flag off and on. It could be a regression: cuBLAS is not a slow path
+  at width, and nobody has shown int8 MMQ beats it here.
 - N=9 and N=12 (locates the MMVQ->MMQ knee; running). N=32 landed at 134 (row above); the knee is the only open width
 - **server prefill vs llama-bench prefill**: 316 vs 856 tok/s on the same card. `-ub 2048 -b 4096` and a prompt-cache hit rate from the server log; the gap is configuration until proven otherwise
 - **Hermes production tok/s** at draft depth 4 / q4_0 KV: the box reported acceptance and latency but not tokens per second; the `timings` object of one long completion decides whether depth 4 beats depth 1 greedy (46.2)

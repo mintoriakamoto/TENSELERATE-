@@ -3,7 +3,7 @@ name: Release
 # Every native-code push to main publishes a `main-b<N>-<sha>` release with the
 # binaries scripts/tenselerate-update.sh downloads (`--binary`):
 #   tenselerate-<tag>-bin-ubuntu-x64.tar.gz                  CPU build
-#   tenselerate-<tag>-bin-ubuntu-cuda-12.8-sm80-86-x64.tar.gz CMP 170HX + RTX 3060 build
+#   tenselerate-<tag>-bin-ubuntu-cuda-12.8-sm80-x64.tar.gz CMP 170HX build
 # <N> is `git rev-list --count HEAD`, the same number cmake/build-info.cmake
 # stamps into `llama-cli --version`, so the updater can compare a running
 # binary against the newest release. Docs-only pushes publish nothing.
@@ -39,7 +39,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CUDA_ARCHS: "80-real;86-real"
+  CUDA_ARCHS: "80-real"
 
 jobs:
   meta:
@@ -98,10 +98,16 @@ jobs:
           retention-days: 7
 
   build-cuda:
-    name: build bin-ubuntu-cuda-12.8-sm80-86-x64 (CMP 170HX + RTX 3060)
+    name: build bin-ubuntu-cuda-12.8-sm80-x64 (CMP 170HX)
     needs: meta
     if: needs.meta.outputs.exists == 'false'
     runs-on: ubuntu-24.04
+    # Pinned to the patch level: the binary links the CUDA runtime statically,
+    # so this toolkit IS what runs on the cards. Held by
+    # tests/tenselerate/test_release_triggers.py, which also holds the engine
+    # workflow to the same image. NB: a workflow-level `env` cannot be used
+    # here - `container:` has no access to the env context - so this is a
+    # literal on purpose.
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     timeout-minutes: 240
     steps:
@@ -116,11 +122,12 @@ jobs:
           fetch-depth: 0
       - name: Trust the checkout inside the container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Build llama-server + llama-cli (CUDA, sm_80 + sm_86)
+      - name: Build llama-server + llama-cli (CUDA, sm_80)
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+            -DGGML_CUDA_FORCE_MMQ=ON -DGGML_CUDA_DISABLE_DP4A=ON \
             -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON \
             -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
           cmake --build build --target llama-server llama-cli
@@ -128,7 +135,17 @@ jobs:
           # (no GPU), so run the version stamp check against the toolkit's libcuda stub.
           mkdir -p "$RUNNER_TEMP/cuda-stubs"
           ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-stubs/libcuda.so.1"
-          LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stubs:${LD_LIBRARY_PATH:-}" ./build/bin/llama-cli --version
+          ver=$(LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stubs:${LD_LIBRARY_PATH:-}" ./build/bin/llama-cli --version 2>&1)
+          printf '%s\n' "$ver"
+          # The flag is only useful if it reached the binary. ggml lists it in the
+          # CUDA feature line, so assert on the artifact rather than on the cmake
+          # argument: a renamed or dropped option would otherwise publish silently.
+          for feat in FORCE_MMQ DISABLE_DP4A; do
+            printf '%s' "$ver" | grep -q "$feat" || {
+              echo "::error::llama-cli does not report $feat - that build flag did not reach the binary"
+              exit 1
+            }
+          done
       - name: Build the TENSELERATE int8 kernel bridge (.so)
         run: |
           cmake -S tenselerate/csrc -B build-kernels -G Ninja \
@@ -136,10 +153,10 @@ jobs:
           cmake --build build-kernels
           test -f build-kernels/libtenselerate_int8_gemm_c.so
       - name: Package
-        run: bash .github/actions/package-release.sh "${{ needs.meta.outputs.tag }}" cuda-12.8-sm80-86
+        run: bash .github/actions/package-release.sh "${{ needs.meta.outputs.tag }}" cuda-12.8-sm80
       - uses: actions/upload-artifact@v7
         with:
-          name: bin-ubuntu-cuda-12.8-sm80-86-x64
+          name: bin-ubuntu-cuda-12.8-sm80-x64
           path: dist/*.tar.gz
           retention-days: 7
 
@@ -169,8 +186,8 @@ jobs:
             git log -1 --pretty=%B
             echo
             echo '---'
-            echo "Assets: \`bin-ubuntu-x64\` (CPU) and \`bin-ubuntu-cuda-12.8-sm80-86-x64\`"
-            echo "(CMP 170HX + RTX 3060, needs the NVIDIA driver only - CUDA runtime is linked"
+            echo "Assets: \`bin-ubuntu-x64\` (CPU) and \`bin-ubuntu-cuda-12.8-sm80-x64\`"
+            echo "(CMP 170HX, needs the NVIDIA driver only - CUDA runtime is linked"
             echo "statically). Install: \`scripts/tenselerate-update.sh --binary\`"
             echo "(\`FLAVOR=cuda\` for the GPU build). Serve Hercules:"
             echo "\`tenselerate boot --backend llamacpp --model MODEL.gguf\`."
@@ -199,7 +216,7 @@ jobs:
           KEEP_RELEASES: "8"
         run: |
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
-            --jq '.[] | select([.assets[].name] | any(contains("bin-ubuntu-cuda-12.8-sm80-86")))
+            --jq '.[] | select([.assets[].name] | any(contains("bin-ubuntu-cuda-12.8-sm80")))
                       | "\(.id)\t\(.tag_name)"' > fork-releases.txt || true
           total=$(wc -l < fork-releases.txt)
           echo "$total release(s) carry this fork's CUDA asset; keeping the newest $KEEP_RELEASES"

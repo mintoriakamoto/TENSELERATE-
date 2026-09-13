@@ -162,7 +162,7 @@ def test_this_file_is_not_evidence_that_anything_exists(tmp_path):
 def test_real_env_var_passes(tmp_path):
     # the fork's own knobs, which must keep working after every upstream sync
     body = ("# 170HX\n\n```bash\nexport GGML_CUDA_MMVQ_MAX=3\n"
-            "export LLAMA_ATTN_WINDOW=32768\nexport GGML_CUDA_FATTN_VEC_GQA=1\n```\n")
+            "export LLAMA_SERVER_PIN_SLOTS=0\nexport GGML_CUDA_FATTN_VEC_GQA=1\n```\n")
     assert check(tmp_path, "realenv", body) == []
 
 

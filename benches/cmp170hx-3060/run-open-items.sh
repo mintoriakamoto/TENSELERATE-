@@ -16,6 +16,23 @@
 #   deep_kv          1 slot x 262144, kv q8_0 vs f16, ~250K-token prefill, decode at depth
 #   slot4_width      4 slots x 524288, MTP depth 1, default routing vs --mmvq-max 3 vs --no-mmvq
 #   mtp_control      MTP off vs on under the winning sampling
+#   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
+#                    (predicted to lose) vs the ngram-mod replay drafter at depth
+#                    8 and 15, on a rewrite workload and on a code control
+#   spec_probe       decompose the step with --spec-synth-len: step time by linear fit,
+#                    and the MTP head's own cost by differencing real against synthetic
+#   swarm_ngram      does a swarm draft for itself? The ngram container is shared across
+#                    sequences, and the only row on record was measured single-stream
+#   graph_thrash     are CUDA graphs alive under speculation? ggml keys its graph cache
+#                    on a pointer, and a width change resets the warmup to direct execution
+#   backend_sampling -bs (sample on the GPU) vs the host copy: a 248,320-float logit
+#                    row over PCIe Gen2 x4, twice per verify step at MTP depth 1
+#   tree_gate        is the MTP head shallow, or is a linear draft betting on one branch?
+#                    Logs conditional per-position acceptance; decides the tree drafter.
+#   kv_codec_gate    whether a heavier KV codec is affordable at all: q4_0 vs q8_0
+#                    at depth, with the packed vector kernel off and on. Decides
+#                    one thing before any codec work starts - see docs/kernel-work.md
+#                    item 4. Refutation is pre-registered in the function.
 #
 # Env: MODEL (required) LLAMA_SERVER (binary; default tenselerate's) PORT (8089)
 #      LLAMA_BENCH (llama-bench binary; default next to LLAMA_SERVER or build/bin)
@@ -50,7 +67,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling graph_thrash swarm_ngram spec_probe"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -310,6 +327,70 @@ exp_slot4_width() {
         -- "${PROD_ARGS[@]}" --sampling greedy --no-mmvq -- --concurrency 4 --loop-check || true
 }
 
+exp_spec_depth() {
+    # Where draft width can come from, at temp 0.
+    #
+    # The MTP depth sweep already answered one half: the head is shallow, not
+    # broken. n-max 1 is +35%, n-max 3 is -15%, n-max 5 is -22%, because
+    # position 1 accepts at 0.88 and positions 2+ do not, and a rejected draft
+    # column is paid in full. So depth cannot come from the MTP head, and
+    # `spec_depth-mtp8` is here as the falsifier for exactly that claim.
+    #
+    # ngram-mod is the other half. It drafts by replaying a run already present
+    # in this context, so it runs no model: a miss is a hash lookup, not a
+    # forward pass. It is ordered BEFORE draft-mtp (common_speculative takes the
+    # first implementation that returns a draft and never concatenates), so a
+    # miss falls straight through to the measured depth-1 path.
+    #
+    # Two shapes, because the two directions falsify different things:
+    #   rewrite - the answer is mostly verbatim replay. This is where a hit
+    #             pays, and where the flat MMQ region (55 ms from N=2 to N=16)
+    #             turns 9 verify columns into ~9 tokens for one weight read.
+    #   code    - the answer never appeared in the prompt, so ngram-mod MUST
+    #             miss. This is the control: the fall-through is only free if
+    #             this row lands within noise of the baseline.
+    #
+    # Predictions, written before the run (baseline is 46.2 tok/s greedy MTP-1):
+    #   rewrite baseline   ~46      (MTP depth 1, one accepted token per read)
+    #   rewrite ngram 8     90-160  (a hit drafts up to 8 free columns; the
+    #                                range is wide because per-round hit rate,
+    #                                not per-token acceptance, is what decides)
+    #   rewrite ngram 15   >= ngram 8, and the gap between them says whether the
+    #                      MMQ region is still flat at width 16
+    #   code ngram 8       42-48    (a miss must be free). BELOW 42 REFUTES the
+    #                      ordering claim: it would mean the ngram attempt costs
+    #                      a real pass, not a lookup, and ngram must then be
+    #                      turned on per-workload rather than by default
+    #   code mtp 8         25-30    (below the 34.4 no-MTP baseline, per -22% at
+    #                      n-max 5). ABOVE 46.2 REFUTES the shallow-head reading
+    #                      and the whole depth argument is wrong
+    local how base
+    base="4 slots x 524288 q8_0, greedy (temp 0), measure.py N=$N"
+    how="$base, shape rewrite (verbatim replay) and code (control, must miss)"
+    for shape in rewrite code; do
+        measure_config "spec_depth-$shape-baseline" \
+            "$shape: MTP depth 1, no n-gram draft (production today)" "$how" \
+            "prediction: ~46 tok/s, the greedy MTP-1 baseline" \
+            -- "${PROD_ARGS[@]}" --sampling greedy \
+            -- --shapes "$shape" --n "$N" --loop-check || true
+        measure_config "spec_depth-$shape-ngram8" \
+            "$shape: ngram-mod depth 8 ahead of MTP depth 1" "$how" \
+            "prediction: rewrite 90-160, code 42-48; code below 42 refutes the free-miss claim" \
+            -- "${PROD_ARGS[@]}" --sampling greedy --ngram-draft 8 \
+            -- --shapes "$shape" --n "$N" --loop-check || true
+    done
+    measure_config "spec_depth-rewrite-ngram15" \
+        "rewrite: ngram-mod depth 15 (the edge of the flat MMQ region)" "$how" \
+        "prediction: >= depth 8; the gap grades whether MMQ is still flat at width 16" \
+        -- "${PROD_ARGS[@]}" --sampling greedy --ngram-draft 15 \
+        -- --shapes rewrite --n "$N" --loop-check || true
+    measure_config "spec_depth-code-mtp8" \
+        "code: MTP draft depth 8, the falsifier for the shallow-head reading" "$how" \
+        "prediction: 25-30, below the 34.4 no-MTP baseline; above 46.2 refutes the depth argument" \
+        -- --slots 4 --ctx-pool 524288 --kv q8_0 --mtp-draft 8 --sampling greedy \
+        -- --shapes code --n "$N" --loop-check || true
+}
+
 exp_mtp_control() {
     local w mode temp
     w=${WIN_SAMPLING:-$(cat "$LOGS/winning-sampling" 2>/dev/null || true)}
@@ -365,6 +446,289 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Decompose the decode step with a dial instead of a profiler.
+#
+# --spec-synth-len L solves for the per-position acceptance probability whose MEAN ACCEPTED
+# LENGTH is exactly L, then accepts at that rate without consulting the drafter
+# (common/speculative.cpp, bisection on p). That is a controlled acceptance dial with the
+# drafter's own cost removed, and it makes two quantities measurable that otherwise need a
+# profiler or a new kernel.
+#
+# 1. THE STEP TIME, BY LINEAR FIT. If a verify step costs S(w) and yields L tokens, then
+#    tok/s = L / S(w). Hold the width w fixed, sweep L, and tok/s must come out LINEAR in L
+#    with slope 1/S(w). The fit gives S(w) end to end, in milliseconds, with no nsys and no
+#    instrumentation. Repeat at several widths and S(w) versus w tests the "MMQ is flat from
+#    N=2 to N=16" claim against the real verify path rather than a microbenchmark - a
+#    non-flat S(w) means the flat region is not flat once attention and the GDN block are in
+#    the same step, which would rewrite the case for every width idea in this repo.
+#
+# 2. THE DRAFTER'S OWN COST, BY DIFFERENCE. Run the real MTP head, read the mean accepted
+#    length the server reports, then run synthetic acceptance at that same L. Same width,
+#    same accepted tokens, one difference: whether the head actually ran. The gap IS the
+#    head's cost per step, and nothing else can isolate it.
+#
+# Why (2) matters more than it sounds. The depth sweep (n-max 1 +35%, 3 -15%, 5 -22%) has
+# been read entirely as acceptance collapsing with depth. But a deeper draft also RUNS THE
+# HEAD MORE, and that cost has never been separated from the acceptance story. If the head
+# is expensive, a tree drafter - which runs it more still - is worse than docs/tree-speculation.md
+# projects. If it is nearly free, the tree is better. This experiment decides which, and it
+# should run BEFORE any tree work.
+#
+# Pre-registered:
+#   tok/s linear in L at fixed width    -> the cost model holds; slope gives S(w)
+#   sublinear at high L                 -> something grows with accepted tokens: suspect the
+#                                          GDN rollback after a verify block, or KV writes
+#   S(w) flat in w across 2, 4, 8       -> the flat-MMQ claim survives contact with the real
+#                                          step, and width really is free
+#   S(w) rising with w                  -> width is NOT free end to end; every width-based
+#                                          idea here (tree, self-consistency, ngram) is
+#                                          overvalued and must be re-costed
+#   real == synth at matched L          -> the head is free; depth loses purely on acceptance
+#   real much slower at matched L       -> the head is a real per-step cost and the tree
+#                                          projection in tree-speculation.md is optimistic
+#
+# Output is NOT the model's under synthetic acceptance. These runs measure time, never text.
+exp_spec_probe() {
+    local how="production args, greedy, --synth-len L at fixed --mtp-draft; tok/s only, output is synthetic"
+    local d L
+    for d in 1 3 7; do
+        for L in 1.0 1.5 2.0; do
+            measure_config "spec_probe-d$d-L$L" \
+                "synthetic acceptance L=$L at draft depth $d (verify width $((d+1)))" "$how" \
+                "fit tok/s against L at this depth: slope is 1/S(width $((d+1)))" \
+                -- "${PROD_ARGS[@]}" --mtp-draft "$d" --synth-len "$L" --sampling greedy \
+                -- --loop-check || true
+        done
+    done
+    measure_config "spec_probe-real-d1" "REAL MTP head at depth 1, for the difference" \
+        "production args, greedy, no --synth-len; read 'mean len' from the server log" \
+        "compare against spec_probe-d1-L<mean len>: the gap is the head's cost per step" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 1 --sampling greedy -- --loop-check || true
+    log "spec_probe: fit tok/s vs L per depth (slope = 1/S). Then compare the real depth-1 row against the synthetic row at the SAME mean length - that difference is the MTP head's cost, and it is what decides whether the tree drafter is worth building."
+}
+
+# Does a swarm draft for itself? The ngram container is already shared across sequences.
+#
+# common/speculative.cpp declares it outright:
+#
+#     // shared across all sequences
+#     common_ngram_mod mod;
+#
+# One 4M-entry container, every sequence writing into it and drafting out of it. So a slot
+# can already be drafted from a span another slot emitted seconds earlier - the mechanism
+# for a swarm accelerating itself exists, on by default whenever ngram-mod is enabled, and
+# has never been measured in a configuration where it could do anything.
+#
+# The only row on record (README.md) is "ngram-mod 34.4 tok/s" against a 34.4 baseline -
+# flat, "near-zero acceptance on prose". That was SINGLE STREAM. One sequence has nothing to
+# share with; the container had one writer. The experiment could not have shown the effect it
+# was testing for, and the flat result has been read since as "ngram-mod does not work here".
+#
+# Production is the opposite shape: 8 slots, six delegation children off one ~35K system
+# prompt, doing the same kind of work and emitting the same tool-call scaffolding, the same
+# preambles, the same idioms. That is the case the shared container was built for.
+#
+# Why the draft source needs no trust: a drafted token is only ever ACCEPTED if the target
+# model samples the same token. Drafting slot B from slot A cannot corrupt B's output - a
+# wrong guess costs one verify column, and columns are free from N=2 to N=16 on this card.
+# Speculation launders any guess into a correctness-preserving speedup, which is why the
+# draft may come from another agent, or from anything else lying around.
+#
+# --swarm makes measure.py give every stream ONE prefix and ONE shape (the delegation
+# shape). The default distinct prefixes isolate width from cache sharing, which is right for
+# the width sweep and exactly wrong here.
+#
+# Pre-registered, aggregate tok/s at 8 slots:
+#   CONFIRMS  swarm+ngram beats swarm without ngram, and beats the distinct-prefix arm by
+#             more. The container is doing cross-slot work; draft acceptance per slot should
+#             rise over the run as the shared store fills.
+#   REFUTES   swarm+ngram is flat or worse. Either the children do not repeat each other as
+#             much as assumed, or the miss cost (and the graph thrash from a walking draft
+#             width - see graph_thrash) eats the win. Both are worth knowing; record which.
+# Run graph_thrash first or alongside: a walking draft width is exactly what this arm
+# produces, so a win here could be partly cancelled by an effect measured over there.
+exp_swarm_ngram() {
+    local how="8 slots, measure.py --concurrency 8 --swarm (one shared prefix and shape), greedy, MTP depth 1"
+    measure_config "swarm-nongram" "8 correlated streams, MTP only" "$how" \
+        "baseline for the swarm shape; the shared ngram container is not in play" \
+        -- "${PROD_ARGS[@]}" --slots 8 --mtp-draft 1 --sampling greedy \
+        -- --concurrency 8 --swarm --loop-check || true
+    measure_config "swarm-ngram" "8 correlated streams, ngram-mod ahead of MTP" "$how" \
+        "prediction: above the arm above, because the children repeat each other and the container is shared" \
+        -- "${PROD_ARGS[@]}" --slots 8 --mtp-draft 1 --ngram-draft 8 --ngram-min 4 --sampling greedy \
+        -- --concurrency 8 --swarm --loop-check || true
+    measure_config "swarm-ngram-distinct" "8 UNcorrelated streams, ngram-mod ahead of MTP" \
+        "same, without --swarm: distinct prefixes and rotating shapes" \
+        "the control. If this matches swarm-ngram the effect is not cross-slot sharing" \
+        -- "${PROD_ARGS[@]}" --slots 8 --mtp-draft 1 --ngram-draft 8 --ngram-min 4 --sampling greedy \
+        -- --concurrency 8 --loop-check || true
+    log "swarm_ngram: the comparison that matters is swarm-ngram vs BOTH others. Beating swarm-nongram shows ngram helps; beating swarm-ngram-distinct shows the help is cross-slot."
+}
+
+# Are CUDA graphs alive during speculation, or is every step re-launching ~1000 kernels?
+#
+# ggml keys its CUDA graph cache on `cgraph->nodes[0]` - a POINTER, not a shape
+# (ggml_cuda_graph_get_key). Every batch width therefore lands in the same cache slot.
+# ggml_cuda_graph_update_required then memcmp's every node's ne/nb and source pointers
+# against the previous step, and on any difference ggml_backend_cuda_graph_compute does
+# this:
+#
+#     if (properties_changed) { graph->warmup_complete = false; }   // execute directly
+#
+# so a shape change does not merely update the graph - it drops to direct execution AND
+# resets the warmup, which needs two consecutive stable calls to re-enter. A workload whose
+# batch width alternates never gets two in a row and runs permanently un-graphed.
+#
+# Decode submits draft+1 tokens. MTP depth 1 is always 2, constant. `ngram-mod` with
+# n-min 4 / n-max 8 emits 4..8 tokens on a hit and nothing on a miss, so the width walks
+# 1, 5, 6, 7, 8, 9 - a different shape most steps. The n-gram configuration recommended
+# earlier in this repo may therefore be paying for its free tokens in launch overhead, and
+# nobody has looked.
+#
+# The "CUDA graphs reused = 247, not disabled" row in README.md was taken WITHOUT
+# speculation, where the width is constant at 1. It says nothing about this.
+#
+# ~1000 kernels per token (64 layers, 48 of them GDN) at a few microseconds of dispatch
+# each is the right order of magnitude for the ~11.4 ms of the 29.9 ms step that the
+# two-regime decomposition has never accounted for.
+#
+# Pre-registered, counting log lines per generated token at -v:
+#   CONFIRMS  "CUDA graph warmup reset" appears at a rate near one per step under
+#             ngram+MTP and not under MTP alone. Graph thrash is real; the fix is a
+#             constant-width draft (pad to a fixed column count - free, since MMQ is flat
+#             from N=2 to N=16) rather than a wider one.
+#   REFUTES   resets are rare in every arm. Graphs are alive, the residual is elsewhere,
+#             and kernel-work.md item 3's nsys profile is the next step instead.
+exp_graph_thrash() {
+    local how="production args at -v; count 'CUDA graph warmup reset' and 'CUDA Graph id' lines per generated token in the server log"
+    measure_config "graph_thrash-nospec" "no speculation: constant width 1" "$how" \
+        "baseline: the 247-reused row was taken here" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 0 --sampling greedy --extra=-v -- --loop-check || true
+    measure_config "graph_thrash-mtp1" "MTP depth 1: constant width 2" "$how" \
+        "prediction: as stable as no-spec, because draft+1 does not vary" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 1 --sampling greedy --extra=-v -- --loop-check || true
+    measure_config "graph_thrash-ngram" "ngram-mod 8 ahead of MTP 1: width walks 1,5..9" "$how" \
+        "prediction: warmup resets near one per step; if so the n-gram win is partly cancelled by launch overhead" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 1 --ngram-draft 8 --ngram-min 4 --sampling greedy --extra=-v -- --loop-check || true
+    log "graph_thrash: grep -c 'warmup reset' and 'Graph id' in the server logs and divide by tokens generated. One reset per step means graphs are off."
+}
+
+# Does sampling on the GPU pay on a 2 GB/s link with a 248,320-token vocabulary?
+#
+# llama.cpp samples on the host by default: the logit row is copied device-to-host every
+# sampled position. That row is vocab_size floats - this model's vocabulary is 248,320, so
+# ~0.99 MB - and this box's link is PCIe Gen2 x4 at ~2 GB/s. That is ~0.6 ms per sampled
+# position, and under MTP depth 1 there are two positions per verify step. An x16 Gen4
+# machine moves the same row in ~30 us and nobody has ever had a reason to care, which is
+# why `-bs` is still marked experimental and off by default upstream. The product of an
+# unusually large vocabulary and an unusually narrow link is what makes it worth a run here.
+#
+# It is also a blocking copy, so the cost is not only bytes: the sync each step can break
+# CUDA-graph replay batching. That part cannot be predicted from the file, only measured.
+#
+# Pre-registered. Greedy MTP depth 1 is 46.2 tok/s.
+#   CONFIRMS  -bs is faster. Size the win against ~0.6 ms/position: a gain far larger than
+#             ~1.2 ms per step means the sync, not the bytes, was the cost - which is a
+#             more interesting result and worth a profile.
+#   REFUTES   -bs is equal or slower. The copy was already overlapped, and this closes.
+# Read the server log before trusting either number: llama.cpp silently disables backend
+# sampling for a grammar or a reasoning budget ("backend sampling is not compatible"), and
+# Hermes tool calls use grammars. A run whose log carries that line measured nothing.
+exp_backend_sampling() {
+    measure_config "backend_sampling-off" \
+        "greedy MTP depth 1, host sampling (default)" \
+        "production args, --sampling greedy" \
+        "baseline: 46.2 tok/s measured" \
+        -- "${PROD_ARGS[@]}" --sampling greedy -- --loop-check || true
+    measure_config "backend_sampling-on" \
+        "greedy MTP depth 1, GPU sampling (-bs)" \
+        "same, --backend-sampling" \
+        "prediction: +0.6 ms/position of PCIe saved, ~1.2 ms/step under depth 1; check the log for the grammar/reasoning-budget disable line" \
+        -- "${PROD_ARGS[@]}" --sampling greedy --backend-sampling -- --loop-check || true
+    log "backend_sampling: grep the server log for 'backend sampling is not compatible' - if it is there, the ON run silently used the host path and measured nothing."
+}
+
+# Is the MTP head shallow, or is a linear draft just betting on one branch?
+#
+# The depth sweep (n-max 1 +35%, 3 -15%, 5 -22%) was read as "the head is shallow:
+# position 1 accepts reliably, positions 2+ do not". That reading is confounded. A linear
+# draft asks the head to predict position 2 given ITS OWN position-1 guess, and that guess
+# is wrong ~12% of the time at 0.881 acceptance. When it is wrong, position 2 cannot be
+# accepted however good the head is. The sweep fused two questions and blamed the first:
+#   (1) can the head predict position 2 at all?
+#   (2) did position 1 happen to be right?
+#
+# The server now logs both, so this run separates them. "acc per pos" is unconditional -
+# position i counted only when everything before it was accepted. "acc given prev" is
+# n_accepted_per_pos[i] / n_accepted_per_pos[i-1], which is P(i accepted | i-1 accepted):
+# the head's real position-2 skill with the branch-luck divided out.
+#
+# Why it matters beyond the reading: MMQ is flat at ~55 ms from N=2 to N=16, so one weight
+# read serves sixteen columns at no extra cost, and depth-1 MTP uses two of them. If the
+# head can predict position 2 when position 1 is right, a tree draft (top-k at position 1,
+# expanded and verified in one batch behind a tree mask) turns the other fourteen free
+# columns into accepted tokens. If it cannot, no tree helps and the existing reading stands.
+#
+# Pre-registered. Mean accepted length today is 1.88 at 46.2 tok/s.
+#   CONFIRMS  acc given prev at position 2 is >= 0.7. The head is not the problem; the
+#             linear draft is. Build the tree drafter (docs/tree-speculation.md).
+#   REFUTES   acc given prev at position 2 is <= 0.3. The head really is shallow, a tree
+#             covers branches that were never going to be accepted anyway, and this line
+#             closes. Between 0.3 and 0.7 is a real answer too - it sets how wide the
+#             position-1 fan has to be before the tree pays, so record it rather than
+#             rerunning until it lands somewhere convenient.
+# Depth 2 is the cheapest shape that produces the number; depth 3 shows whether the
+# conditional rate holds up or decays, which is what sets usable tree depth.
+exp_tree_gate() {
+    local d
+    for d in 2 3; do
+        measure_config "tree_gate-d$d" \
+            "MTP draft depth $d, greedy: conditional per-position acceptance" \
+            "production args, --mtp-draft $d --sampling greedy; read 'acc given prev' from the server log" \
+            "prediction: acc given prev at position 2 >= 0.7 if the depth failure is branch luck, <= 0.3 if the head is shallow" \
+            -- "${PROD_ARGS[@]}" --mtp-draft "$d" --sampling greedy -- --loop-check || true
+    done
+    log "tree_gate: the number that decides this is 'acc given prev', NOT 'acc per pos'. The first position of 'acc given prev' is position 2 given position 1."
+}
+
+# Is a heavier KV codec affordable at all? One question, four cells, answered before
+# any codec kernel is written.
+#
+# The claim under test: on the vec path the KV dequant is paid once per QUERY head,
+# not once per KV head. This model has gqa_ratio 6 (n_head 24 / n_head_kv 4), so the
+# same bytes are decoded six times per token - the 51 ms KV term at 262K against ~11 ms
+# of actual bytes. If that is right, it explains why q4_0 halves the KV bytes and still
+# measures -8%/token at depth: the saving is counted once and the dequant six times.
+#
+# The packed vector kernel (GGML_CUDA_FATTN_VEC_GQA) dequantizes each K/V tile once per
+# block and reuses it across the packed query heads. That divides the dequant term while
+# leaving the byte term whole - so it should move q4_0 relative to q8_0, not just move
+# both. A codec that is Nx more expensive to decode than q8_0 is affordable only if that
+# division is real, which is the whole reason to run this before building one.
+#
+# Pre-registered. q4_0 is 18 KiB/token against q8_0's 34, and today measures -8% at depth.
+#   CONFIRMS  the q4_0-vs-q8_0 gap with GQA=1 is better than the gap with GQA=0, i.e. the
+#             dequant term shrank. Heavier codecs get cheaper the more they are amortized,
+#             and kernel-work.md item 4 is worth building.
+#   REFUTES   the gap is unchanged or worse with GQA=1. The dequant was never the binding
+#             term, every byte saved is paid back in something else, and no codec - 4-bit,
+#             2-bit or codebook - will help. Close item 4 and do not write the kernel.
+# Note the refutation does not depend on GQA=1 being faster in absolute terms: it is the
+# GAP BETWEEN THE TWO KV TYPES that carries the claim. Record all four numbers.
+exp_kv_codec_gate() {
+    local blog="$LOGS/kv_codec_gate-$(ts).log" depth="${KV_GATE_DEPTH:-131072}" kv gqa r
+    for kv in q8_0 q4_0; do
+        for gqa in 0 1; do
+            r=$(run_bench "kvgate-$kv-gqa$gqa" "$blog" "GGML_CUDA_FATTN_VEC_GQA=$gqa" "$MODEL" \
+                    -p "$depth" -n 32 -r 1 -ctk "$kv" -ctv "$kv") || return 1
+            add_row "llama-bench tg32 at ${depth} depth, $kv KV, packed attention $([ "$gqa" = 1 ] && echo ON || echo OFF)" \
+                "$r" "$(bench_bin) -p $depth -n 32 -r 1 -ctk $kv -ctv $kv, GGML_CUDA_FATTN_VEC_GQA=$gqa" \
+                "cell $kv/GQA=$gqa. What decides item 4 is (q4_0 - q8_0) at GQA=1 versus the same gap at GQA=0, not any single cell"
+        done
+    done
+    log "kv_codec_gate: compare the two GAPS, not the four cells. Gap improves -> build the codec; gap flat or worse -> close docs/kernel-work.md item 4."
+}
+
 exp_bench_ab() {
     local blog="$LOGS/bench_ab-$(ts).log" r
     r=$(run_bench "new-gqa0" "$blog" "GGML_CUDA_FATTN_VEC_GQA=0" "$MODEL" -p 512 -n 64 -r 3) || return 1

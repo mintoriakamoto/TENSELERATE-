@@ -30,10 +30,10 @@ that Qwen3-Next introduced and `qwen3_5` ships:
 - **16 full-attention layers on a bounded window** (>= the 32K quality floor,
   <= the 262K trained range): every attended position is one the model was
   trained on. KV is constant (~4.25 GiB at the 128K default), which is what
-  makes a 1M context floor possible at all. In the served llama.cpp path this
-  is `--attn-window` (docs/bounded-window-serving.md), off by default until the
-  needle test grades it. The 600 tok/s figure is a design target; measured
-  aggregate on the 170HX is 134 tok/s at N=32.
+  makes a 1M context floor possible at all. The served llama.cpp path does not
+  implement it: a sequence there is capped at the 262,144-token trained range.
+  The 600 tok/s figure is a design target; measured aggregate on the 170HX is
+  134 tok/s at N=32.
 - **Paged KV + continuous batching** (`engine/kvpool.py`, `engine/scheduler.py`):
   the serving-side half of the same story.
 

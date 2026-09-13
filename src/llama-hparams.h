@@ -172,12 +172,6 @@ struct llama_hparams {
     // the size of the sliding window (0 - no SWA)
     uint32_t n_swa = 0;
 
-    // TENSELERATE: attention sinks for a bounded window (StreamingLLM). The first
-    // n_swa_sink positions of every sequence are never SWA-masked and therefore
-    // never evicted from the SWA cache. Process-wide, set once at model load from
-    // LLAMA_ATTN_SINKS when LLAMA_ATTN_WINDOW enables the window (see qwen35.cpp).
-    inline static uint32_t n_swa_sink = 0;
-
     // see llama_non_causal_type
     // note: for SWA_FULL, older tokens (outside the current ubatch) are still window-clipped
     llama_non_causal_type non_causal_type = LLAMA_NON_CAUSAL_TYPE_ALL;
@@ -478,10 +472,6 @@ struct llama_hparams {
                 } break;
             case LLAMA_SWA_TYPE_STANDARD:
                 {
-                    // TENSELERATE: sink positions stay attendable at any distance
-                    if (p0 < (int32_t) n_swa_sink) {
-                        break;
-                    }
                     if (p1 - p0 >= (int32_t) n_swa) {
                         return true;
                     }
