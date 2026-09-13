@@ -348,3 +348,20 @@ def test_extra_appends_raw_llama_server_args():
     assert a[-1] == "-v"
     rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL, "--extra=-v", "--dry-run"])
     assert rc == 0 and " -v\n" in out          # last flag on the command line
+
+
+def test_synth_len_is_bounded_by_the_draft_depth():
+    # --spec-synth-len is an instrument: it accepts draft tokens at the rate whose mean
+    # accepted length is L, with the drafter bypassed. A step that drafts d tokens can
+    # accept at most d + 1 including the target's own token, so L past that is meaningless
+    # and llama.cpp would reject it at startup - catch it in the launch builder instead.
+    a = build_llama_server_argv(MODEL, mtp_draft=3, synth_len=2.5)
+    assert after(a, "--spec-synth-len") == "2.5"
+    assert "--spec-synth-len" not in build_llama_server_argv(MODEL, mtp_draft=3)
+    with pytest.raises(ValueError, match="synth_len"):
+        build_llama_server_argv(MODEL, mtp_draft=1, synth_len=9)
+    with pytest.raises(ValueError, match="synth_len"):
+        build_llama_server_argv(MODEL, mtp_draft=1, synth_len=0.5)
+    rc, out = run(["serve", "--backend", "llamacpp", "--model", MODEL,
+                   "--mtp-draft", "3", "--synth-len", "2", "--dry-run"])
+    assert rc == 0 and "--spec-synth-len 2" in out

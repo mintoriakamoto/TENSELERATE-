@@ -158,6 +158,7 @@ def build_llama_server_argv(
     slot_similarity: float = DEFAULT_SLOT_SIMILARITY,
     slot_save_path: str | None = None,
     backend_sampling: bool = False,
+    synth_len: float | None = None,
     extra: Sequence[str] = (),
 ) -> list[str]:
     """
@@ -230,6 +231,16 @@ def build_llama_server_argv(
         "--slot-prompt-similarity", f"{slot_similarity:g}",
         "--reasoning-effort", reasoning,
     ]
+    if synth_len is not None:
+        # `--spec-synth-len L` solves for the per-position acceptance probability whose mean
+        # accepted length is exactly L, then accepts at that rate instead of consulting the
+        # drafter. A dial on acceptance with the drafter's own cost removed - which makes it
+        # an instrument, not a benchmark toy. Benchmarking only: output is not the model's.
+        n_max = mtp_draft if mtp_draft else 0
+        if not 1.0 <= synth_len <= n_max + 1.0:
+            raise ValueError(
+                f"synth_len must be in [1, {n_max + 1}] (1 + the draft depth), got {synth_len}")
+        argv += ["--spec-synth-len", f"{synth_len:g}"]
     if backend_sampling:
         # `-bs`: sample on the GPU instead of copying the logit row to the host. The row
         # is vocab_size floats - 248,320 on this model, ~0.99 MB - and this box's link is

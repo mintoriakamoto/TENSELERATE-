@@ -19,6 +19,8 @@
 #   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
 #                    (predicted to lose) vs the ngram-mod replay drafter at depth
 #                    8 and 15, on a rewrite workload and on a code control
+#   spec_probe       decompose the step with --spec-synth-len: step time by linear fit,
+#                    and the MTP head's own cost by differencing real against synthetic
 #   swarm_ngram      does a swarm draft for itself? The ngram container is shared across
 #                    sequences, and the only row on record was measured single-stream
 #   graph_thrash     are CUDA graphs alive under speculation? ggml keys its graph cache
@@ -65,7 +67,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling graph_thrash swarm_ngram"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling graph_thrash swarm_ngram spec_probe"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -444,6 +446,67 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Decompose the decode step with a dial instead of a profiler.
+#
+# --spec-synth-len L solves for the per-position acceptance probability whose MEAN ACCEPTED
+# LENGTH is exactly L, then accepts at that rate without consulting the drafter
+# (common/speculative.cpp, bisection on p). That is a controlled acceptance dial with the
+# drafter's own cost removed, and it makes two quantities measurable that otherwise need a
+# profiler or a new kernel.
+#
+# 1. THE STEP TIME, BY LINEAR FIT. If a verify step costs S(w) and yields L tokens, then
+#    tok/s = L / S(w). Hold the width w fixed, sweep L, and tok/s must come out LINEAR in L
+#    with slope 1/S(w). The fit gives S(w) end to end, in milliseconds, with no nsys and no
+#    instrumentation. Repeat at several widths and S(w) versus w tests the "MMQ is flat from
+#    N=2 to N=16" claim against the real verify path rather than a microbenchmark - a
+#    non-flat S(w) means the flat region is not flat once attention and the GDN block are in
+#    the same step, which would rewrite the case for every width idea in this repo.
+#
+# 2. THE DRAFTER'S OWN COST, BY DIFFERENCE. Run the real MTP head, read the mean accepted
+#    length the server reports, then run synthetic acceptance at that same L. Same width,
+#    same accepted tokens, one difference: whether the head actually ran. The gap IS the
+#    head's cost per step, and nothing else can isolate it.
+#
+# Why (2) matters more than it sounds. The depth sweep (n-max 1 +35%, 3 -15%, 5 -22%) has
+# been read entirely as acceptance collapsing with depth. But a deeper draft also RUNS THE
+# HEAD MORE, and that cost has never been separated from the acceptance story. If the head
+# is expensive, a tree drafter - which runs it more still - is worse than docs/tree-speculation.md
+# projects. If it is nearly free, the tree is better. This experiment decides which, and it
+# should run BEFORE any tree work.
+#
+# Pre-registered:
+#   tok/s linear in L at fixed width    -> the cost model holds; slope gives S(w)
+#   sublinear at high L                 -> something grows with accepted tokens: suspect the
+#                                          GDN rollback after a verify block, or KV writes
+#   S(w) flat in w across 2, 4, 8       -> the flat-MMQ claim survives contact with the real
+#                                          step, and width really is free
+#   S(w) rising with w                  -> width is NOT free end to end; every width-based
+#                                          idea here (tree, self-consistency, ngram) is
+#                                          overvalued and must be re-costed
+#   real == synth at matched L          -> the head is free; depth loses purely on acceptance
+#   real much slower at matched L       -> the head is a real per-step cost and the tree
+#                                          projection in tree-speculation.md is optimistic
+#
+# Output is NOT the model's under synthetic acceptance. These runs measure time, never text.
+exp_spec_probe() {
+    local how="production args, greedy, --synth-len L at fixed --mtp-draft; tok/s only, output is synthetic"
+    local d L
+    for d in 1 3 7; do
+        for L in 1.0 1.5 2.0; do
+            measure_config "spec_probe-d$d-L$L" \
+                "synthetic acceptance L=$L at draft depth $d (verify width $((d+1)))" "$how" \
+                "fit tok/s against L at this depth: slope is 1/S(width $((d+1)))" \
+                -- "${PROD_ARGS[@]}" --mtp-draft "$d" --synth-len "$L" --sampling greedy \
+                -- --loop-check || true
+        done
+    done
+    measure_config "spec_probe-real-d1" "REAL MTP head at depth 1, for the difference" \
+        "production args, greedy, no --synth-len; read 'mean len' from the server log" \
+        "compare against spec_probe-d1-L<mean len>: the gap is the head's cost per step" \
+        -- "${PROD_ARGS[@]}" --mtp-draft 1 --sampling greedy -- --loop-check || true
+    log "spec_probe: fit tok/s vs L per depth (slope = 1/S). Then compare the real depth-1 row against the synthetic row at the SAME mean length - that difference is the MTP head's cost, and it is what decides whether the tree drafter is worth building."
+}
+
 # Does a swarm draft for itself? The ngram container is already shared across sequences.
 #
 # common/speculative.cpp declares it outright:
