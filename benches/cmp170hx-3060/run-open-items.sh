@@ -19,6 +19,8 @@
 #   spec_depth       where draft width can come from at temp 0: a deeper MTP draft
 #                    (predicted to lose) vs the ngram-mod replay drafter at depth
 #                    8 and 15, on a rewrite workload and on a code control
+#   swarm_ngram      does a swarm draft for itself? The ngram container is shared across
+#                    sequences, and the only row on record was measured single-stream
 #   graph_thrash     are CUDA graphs alive under speculation? ggml keys its graph cache
 #                    on a pointer, and a width change resets the warmup to direct execution
 #   backend_sampling -bs (sample on the GPU) vs the host copy: a 248,320-float logit
@@ -63,7 +65,7 @@ DEEP_PREFILL="${DEEP_PREFILL:-250000}"
 DRY="${DRY:-}"
 LOGS="${LOGS:-$BENCH_DIR/logs}"
 RESULTS="${RESULTS:-$BENCH_DIR/results-$(date +%F).md}"
-ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling graph_thrash"
+ALL_EXPERIMENTS="bench_ab prefill_ubatch quant_ab loop_guard client_override deep_kv slot4_width mtp_control spec_depth kv_codec_gate tree_gate backend_sampling graph_thrash swarm_ngram"
 EXPERIMENTS="${EXPERIMENTS:-$ALL_EXPERIMENTS}"
 SUMMARY=""          # "name: status" lines, printed at the end
 SERVER_PID=""
@@ -442,6 +444,64 @@ print("pp=%s tg=%s" % ("-" if pp is None else "%.1f" % pp, "-" if tg is None els
 }
 
 # the regression bisect: new binary with the packed attention off / on, and an older binary if given
+# Does a swarm draft for itself? The ngram container is already shared across sequences.
+#
+# common/speculative.cpp declares it outright:
+#
+#     // shared across all sequences
+#     common_ngram_mod mod;
+#
+# One 4M-entry container, every sequence writing into it and drafting out of it. So a slot
+# can already be drafted from a span another slot emitted seconds earlier - the mechanism
+# for a swarm accelerating itself exists, on by default whenever ngram-mod is enabled, and
+# has never been measured in a configuration where it could do anything.
+#
+# The only row on record (README.md) is "ngram-mod 34.4 tok/s" against a 34.4 baseline -
+# flat, "near-zero acceptance on prose". That was SINGLE STREAM. One sequence has nothing to
+# share with; the container had one writer. The experiment could not have shown the effect it
+# was testing for, and the flat result has been read since as "ngram-mod does not work here".
+#
+# Production is the opposite shape: 8 slots, six delegation children off one ~35K system
+# prompt, doing the same kind of work and emitting the same tool-call scaffolding, the same
+# preambles, the same idioms. That is the case the shared container was built for.
+#
+# Why the draft source needs no trust: a drafted token is only ever ACCEPTED if the target
+# model samples the same token. Drafting slot B from slot A cannot corrupt B's output - a
+# wrong guess costs one verify column, and columns are free from N=2 to N=16 on this card.
+# Speculation launders any guess into a correctness-preserving speedup, which is why the
+# draft may come from another agent, or from anything else lying around.
+#
+# --swarm makes measure.py give every stream ONE prefix and ONE shape (the delegation
+# shape). The default distinct prefixes isolate width from cache sharing, which is right for
+# the width sweep and exactly wrong here.
+#
+# Pre-registered, aggregate tok/s at 8 slots:
+#   CONFIRMS  swarm+ngram beats swarm without ngram, and beats the distinct-prefix arm by
+#             more. The container is doing cross-slot work; draft acceptance per slot should
+#             rise over the run as the shared store fills.
+#   REFUTES   swarm+ngram is flat or worse. Either the children do not repeat each other as
+#             much as assumed, or the miss cost (and the graph thrash from a walking draft
+#             width - see graph_thrash) eats the win. Both are worth knowing; record which.
+# Run graph_thrash first or alongside: a walking draft width is exactly what this arm
+# produces, so a win here could be partly cancelled by an effect measured over there.
+exp_swarm_ngram() {
+    local how="8 slots, measure.py --concurrency 8 --swarm (one shared prefix and shape), greedy, MTP depth 1"
+    measure_config "swarm-nongram" "8 correlated streams, MTP only" "$how" \
+        "baseline for the swarm shape; the shared ngram container is not in play" \
+        -- "${PROD_ARGS[@]}" --slots 8 --mtp-draft 1 --sampling greedy \
+        -- --concurrency 8 --swarm --loop-check || true
+    measure_config "swarm-ngram" "8 correlated streams, ngram-mod ahead of MTP" "$how" \
+        "prediction: above the arm above, because the children repeat each other and the container is shared" \
+        -- "${PROD_ARGS[@]}" --slots 8 --mtp-draft 1 --ngram-draft 8 --ngram-min 4 --sampling greedy \
+        -- --concurrency 8 --swarm --loop-check || true
+    measure_config "swarm-ngram-distinct" "8 UNcorrelated streams, ngram-mod ahead of MTP" \
+        "same, without --swarm: distinct prefixes and rotating shapes" \
+        "the control. If this matches swarm-ngram the effect is not cross-slot sharing" \
+        -- "${PROD_ARGS[@]}" --slots 8 --mtp-draft 1 --ngram-draft 8 --ngram-min 4 --sampling greedy \
+        -- --concurrency 8 --loop-check || true
+    log "swarm_ngram: the comparison that matters is swarm-ngram vs BOTH others. Beating swarm-nongram shows ngram helps; beating swarm-ngram-distinct shows the help is cross-slot."
+}
+
 # Are CUDA graphs alive during speculation, or is every step re-launching ~1000 kernels?
 #
 # ggml keys its CUDA graph cache on `cgraph->nodes[0]` - a POINTER, not a shape
